@@ -105,6 +105,9 @@ class Emitter(BaseModel):
     energy_ev: float = 0.0
     direction_deg: float = 0.0
     spread_deg: float = 0.0
+    energy_dist: Literal["mono", "maxwell"] = "mono"  # "mono": 従来動作 / "maxwell": 熱速度成分を付加
+    temperature_ev: float = Field(1.0, gt=0, description="maxwell 時の温度 kT [eV]")
+    seed: int = 0  # maxwell サンプリングの乱数シード (再現性確保)
 
     @model_validator(mode="after")
     def _check_line_needs_p2(self) -> "Emitter":
@@ -167,4 +170,5 @@ class TraceResult(BaseModel):
     status: list[Literal["absorbed", "alive"]]
     tof: list[float | None]                    # absorbed 粒子の飛行時間 [s]
     final_energy_ev: list[float]
+    final_angle_deg: list[float]                # 最終速度の向き [度] (x軸から反時計回り, -180〜180)
     dt: float                                  # 実際に使った dt [s]

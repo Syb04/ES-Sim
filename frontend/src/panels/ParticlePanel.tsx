@@ -40,6 +40,10 @@ export default function ParticlePanel({
   const setEmitter = (patch: Partial<Emitter>) =>
     onChange({ ...particles, emitter: { ...emitter, ...patch } });
 
+  // Maxwell 分布かどうか (未指定は mono 扱い)
+  const energyDist = emitter.energy_dist ?? "mono";
+  const isMaxwell = energyDist === "maxwell";
+
   let summary: {
     n: number;
     absorbed: number;
@@ -47,6 +51,10 @@ export default function ParticlePanel({
     avgTof: number | null;
     eMin: number | null;
     eMax: number | null;
+    angleMean: number | null;
+    angleStd: number | null;
+    angleMin: number | null;
+    angleMax: number | null;
   } | null = null;
   if (traceResult) {
     const n = traceResult.status.length;
@@ -56,7 +64,23 @@ export default function ParticlePanel({
     const energies = traceResult.final_energy_ev;
     const eMin = energies.length ? Math.min(...energies) : null;
     const eMax = energies.length ? Math.max(...energies) : null;
-    summary = { n, absorbed, alive: n - absorbed, avgTof, eMin, eMax };
+    // 吸収粒子の入射角統計 (final_angle_deg を status == "absorbed" の粒子で集計)
+    const absorbedAngles = traceResult.status
+      .map((s, i) => (s === "absorbed" ? traceResult.final_angle_deg[i] : null))
+      .filter((a): a is number => a !== null);
+    let angleMean: number | null = null;
+    let angleStd: number | null = null;
+    let angleMin: number | null = null;
+    let angleMax: number | null = null;
+    if (absorbedAngles.length) {
+      angleMean = absorbedAngles.reduce((a, b) => a + b, 0) / absorbedAngles.length;
+      const variance =
+        absorbedAngles.reduce((a, b) => a + (b - angleMean!) ** 2, 0) / absorbedAngles.length;
+      angleStd = Math.sqrt(variance);
+      angleMin = Math.min(...absorbedAngles);
+      angleMax = Math.max(...absorbedAngles);
+    }
+    summary = { n, absorbed, alive: n - absorbed, avgTof, eMin, eMax, angleMean, angleStd, angleMin, angleMax };
   }
 
   return (
@@ -154,9 +178,53 @@ export default function ParticlePanel({
         <CommitNumberInput value={emitter.direction_deg} onCommit={(v) => setEmitter({ direction_deg: v })} />
       </div>
       <div className="field">
-        <span className="label">広がり半角 [deg]</span>
-        <CommitNumberInput value={emitter.spread_deg} onCommit={(v) => setEmitter({ spread_deg: v })} />
+        <span className="label">エネルギー分布</span>
+        <select
+          value={energyDist}
+          onChange={(e) => {
+            const v = e.target.value as "mono" | "maxwell";
+            if (v === "maxwell") {
+              setEmitter({
+                energy_dist: "maxwell",
+                temperature_ev: emitter.temperature_ev ?? 1.0,
+                seed: emitter.seed ?? 0,
+              });
+            } else {
+              setEmitter({ energy_dist: "mono" });
+            }
+          }}
+        >
+          <option value="mono">単一エネルギー</option>
+          <option value="maxwell">Maxwell</option>
+        </select>
       </div>
+      <div className="field">
+        <span className="label">広がり半角 [deg]</span>
+        <CommitNumberInput
+          value={emitter.spread_deg}
+          onCommit={(v) => setEmitter({ spread_deg: v })}
+          disabled={isMaxwell}
+        />
+      </div>
+      {isMaxwell && (
+        <>
+          <p className="hint">Maxwell分布では熱運動が方向広がりを与えます (広がり半角は無視されます)</p>
+          <div className="field">
+            <span className="label">温度 kT [eV]</span>
+            <CommitNumberInput
+              value={emitter.temperature_ev ?? 1.0}
+              onCommit={(v) => setEmitter({ temperature_ev: v })}
+            />
+          </div>
+          <div className="field">
+            <span className="label">乱数シード</span>
+            <CommitNumberInput
+              value={emitter.seed ?? 0}
+              onCommit={(v) => setEmitter({ seed: Math.round(v) })}
+            />
+          </div>
+        </>
+      )}
 
       <h2>積分設定</h2>
       <div className="field">
@@ -220,6 +288,20 @@ export default function ParticlePanel({
             <span>
               {summary.eMin !== null ? summary.eMin.toExponential(3) : "-"} /{" "}
               {summary.eMax !== null ? summary.eMax.toExponential(3) : "-"} eV
+            </span>
+          </div>
+          <div className="kv">
+            <span>入射角 平均±標準偏差</span>
+            <span>
+              {summary.angleMean !== null ? summary.angleMean.toFixed(2) : "-"} ±{" "}
+              {summary.angleStd !== null ? summary.angleStd.toFixed(2) : "-"} deg
+            </span>
+          </div>
+          <div className="kv">
+            <span>入射角 min/max</span>
+            <span>
+              {summary.angleMin !== null ? summary.angleMin.toFixed(2) : "-"} /{" "}
+              {summary.angleMax !== null ? summary.angleMax.toFixed(2) : "-"} deg
             </span>
           </div>
         </>

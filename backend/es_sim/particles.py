@@ -38,6 +38,7 @@ class TraceOutput:
     absorbed: np.ndarray           # (n_particles,) bool
     tof: np.ndarray                # (n_particles,) float。alive なら nan
     final_energy_ev: np.ndarray    # (n_particles,)
+    final_angle_deg: np.ndarray    # (n_particles,) 最終速度の向き [度] (atan2(vy, vx))
     dt: float                      # 実際に使った dt [s]
 
 
@@ -177,7 +178,13 @@ def _walk_step(coeffs, adjacency: np.ndarray, elem0: np.ndarray, x_new: np.ndarr
 
 
 def _init_particles(emitter: Emitter, m: float) -> tuple[np.ndarray, np.ndarray]:
-    """エミッタ設定から初期位置・初期速度 (n,2) を作る。乱数は使わず等間隔割り振り。"""
+    """エミッタ設定から初期位置・初期速度 (n,2) を作る。
+
+    energy_dist == "mono" (既定) の場合は乱数を使わず等間隔割り振り (従来動作)。
+    energy_dist == "maxwell" の場合はドリフト速度 (energy_ev, direction_deg から。
+    spread_deg は無視) に熱速度成分 (2D Maxwell分布) を加算する。乱数は
+    np.random.default_rng(seed) を使い、同じ seed で完全再現する。
+    """
     n = emitter.n
     if emitter.kind == "point":
         p1 = np.asarray(emitter.p1, dtype=np.float64)
@@ -187,6 +194,19 @@ def _init_particles(emitter: Emitter, m: float) -> tuple[np.ndarray, np.ndarray]
         p2 = np.asarray(emitter.p2, dtype=np.float64)
         t = np.linspace(0.0, 1.0, n)
         pos = p1[None, :] + t[:, None] * (p2 - p1)[None, :]
+
+    if emitter.energy_dist == "maxwell":
+        # ドリフト速度は全粒子共通 (spread_deg は無視)
+        angle = math.radians(emitter.direction_deg)
+        speed = math.sqrt(2.0 * emitter.energy_ev * QE / m) if emitter.energy_ev > 0 else 0.0
+        drift = speed * np.array([math.cos(angle), math.sin(angle)])
+        vel = np.tile(drift, (n, 1))
+
+        # 熱速度: vx, vy ~ Normal(0, sigma), sigma = sqrt(kT * q_e / m)
+        sigma = math.sqrt(emitter.temperature_ev * QE / m)
+        rng = np.random.default_rng(emitter.seed)
+        vel = vel + rng.normal(0.0, sigma, size=(n, 2))
+        return pos, vel
 
     if n == 1:
         angles_deg = np.array([emitter.direction_deg])
@@ -320,11 +340,15 @@ def trace(project: Project, mesh: Mesh, sol: Solution) -> TraceOutput:
     speed2 = np.sum(v * v, axis=1)
     final_energy_ev = 0.5 * m * speed2 / QE
     absorbed = ~alive
+    # 衝突角度: absorbed 粒子は衝突時刻に線形補間した速度 (v[abs_idx] を参照)、
+    # alive 粒子は最終ステップの速度から向きを求める
+    final_angle_deg = np.degrees(np.arctan2(v[:, 1], v[:, 0]))
 
     return TraceOutput(
         trajectories=trajectories,
         absorbed=absorbed,
         tof=tof,
         final_energy_ev=final_energy_ev,
+        final_angle_deg=final_angle_deg,
         dt=dt,
     )

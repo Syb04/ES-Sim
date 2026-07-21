@@ -107,6 +107,8 @@ button.danger:hover { background: #b34747; }
   border-radius: 3px; padding: 3px 6px; font-size: 12px; width: 100px;
 }
 
+.side .hint { color: var(--muted); font-size: 11px; margin: 2px 0 6px; line-height: 1.4; }
+
 .side .edge-row { display: flex; flex-direction: column; gap: 4px; padding: 5px 0; border-bottom: 1px dashed var(--border); }
 .side .edge-row:last-of-type { border-bottom: none; }
 .side .edge-row .edge-label { font-size: 12px; color: var(--muted); }

@@ -10,8 +10,8 @@ import pytest
 
 from es_sim.fem import solve
 from es_sim.meshing import generate_mesh
-from es_sim.particles import ME, QE, trace
-from es_sim.schema import Project
+from es_sim.particles import ME, QE, _init_particles, trace
+from es_sim.schema import Emitter, Project
 
 D, H, V1 = 0.1, 0.05, 100.0  # 平行平板: 幅 D [m], 高さ H [m], 右側(陽極)電位 V1 [V]
 MESH_SIZE = 0.005
@@ -202,3 +202,124 @@ def test_particle_absorbed_by_conductor():
 
     assert np.all(result.absorbed)
     assert all(t is not None and t > 0 for t in result.tof.tolist())
+
+
+# ---- Maxwell分布テスト -------------------------------------------------------
+
+
+def test_maxwell_distribution_mean_energy_matches_kt():
+    """energy_dist='maxwell', ドリフト0 で n=2000 サンプリングしたとき、
+    平均運動エネルギーが 2D Maxwell の期待値 <E> = kT に対し相対誤差5%以内であること。"""
+    kt_ev = 2.0
+    emitter = Emitter.model_validate(
+        {
+            "kind": "point",
+            "p1": [0.0, 0.0],
+            "n": 2000,
+            "energy_ev": 0.0,        # ドリフト0
+            "direction_deg": 0.0,
+            "energy_dist": "maxwell",
+            "temperature_ev": kt_ev,
+            "seed": 42,
+        }
+    )
+    _, vel = _init_particles(emitter, ME)
+    speed2 = np.sum(vel * vel, axis=1)
+    mean_energy_ev = np.mean(0.5 * ME * speed2 / QE)
+
+    assert mean_energy_ev == pytest.approx(kt_ev, rel=0.05)
+
+
+def test_maxwell_distribution_reproducible_with_same_seed():
+    """同じ seed で2回呼び出すと完全に同じサンプルが得られること(再現性)。"""
+    emitter = Emitter.model_validate(
+        {
+            "kind": "point",
+            "p1": [0.0, 0.0],
+            "n": 500,
+            "energy_ev": 0.0,
+            "direction_deg": 0.0,
+            "energy_dist": "maxwell",
+            "temperature_ev": 1.0,
+            "seed": 7,
+        }
+    )
+    _, vel1 = _init_particles(emitter, ME)
+    _, vel2 = _init_particles(emitter, ME)
+
+    assert np.array_equal(vel1, vel2)
+
+
+def test_mono_mode_unaffected_by_new_fields():
+    """energy_dist の既定値 'mono' では従来通り決定論的な等間隔割り振りとなること
+    (energy_dist を明示指定しなくても mono と同じ結果になる)。"""
+    emitter_default = Emitter.model_validate(
+        {
+            "kind": "line",
+            "p1": [0.0, 0.0],
+            "p2": [1.0, 0.0],
+            "n": 5,
+            "energy_ev": 10.0,
+            "direction_deg": 30.0,
+            "spread_deg": 5.0,
+        }
+    )
+    emitter_explicit_mono = Emitter.model_validate(
+        {
+            "kind": "line",
+            "p1": [0.0, 0.0],
+            "p2": [1.0, 0.0],
+            "n": 5,
+            "energy_ev": 10.0,
+            "direction_deg": 30.0,
+            "spread_deg": 5.0,
+            "energy_dist": "mono",
+        }
+    )
+    pos1, vel1 = _init_particles(emitter_default, ME)
+    pos2, vel2 = _init_particles(emitter_explicit_mono, ME)
+
+    assert np.array_equal(pos1, pos2)
+    assert np.array_equal(vel1, vel2)
+
+
+# ---- 衝突角度テスト ----------------------------------------------------------
+
+
+def test_final_angle_deg_matches_analytic_at_wall_collision():
+    """放物軌道テスト設定(直交初速で射出)で、上壁に衝突するときの角度が
+    解析解 atan2(v_y, v_x) と数度以内で一致すること。"""
+    x0, y0 = 0.01, 0.025
+    energy_ev = 5.0
+    project = _parallel_plate_project(
+        {
+            "species": {"preset": "electron"},
+            "emitter": {
+                "kind": "point",
+                "p1": [x0, y0],
+                "n": 1,
+                "energy_ev": energy_ev,
+                "direction_deg": 90.0,  # 電場(x方向)と直交するy方向に射出
+            },
+            "dt": None,
+            "n_steps": 20000,
+            "save_every": 50,
+        }
+    )
+    mesh = generate_mesh(project)
+    sol = solve(project, mesh)
+    result = trace(project, mesh, sol)
+
+    assert result.absorbed[0]
+
+    v0 = math.sqrt(2.0 * energy_ev * QE / ME)
+    e_field = V1 / D
+    a = QE * e_field / ME
+
+    # 上壁 (y=H) に到達する時刻 (y方向には力が働かないため等速)
+    t_wall = (H - y0) / v0
+    vx_exact = a * t_wall
+    vy_exact = v0
+    angle_exact = math.degrees(math.atan2(vy_exact, vx_exact))
+
+    assert result.final_angle_deg[0] == pytest.approx(angle_exact, abs=3.0)

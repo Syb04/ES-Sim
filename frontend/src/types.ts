@@ -63,9 +63,12 @@ export interface Emitter {
   p1: Point;
   p2: Point; // point の場合は未使用 (p1 のみ使用)
   n: number;             // 粒子数
-  energy_ev: number;     // 初期運動エネルギー [eV]
+  energy_ev: number;     // 初期運動エネルギー [eV] (ドリフトエネルギー。maxwell 時もドリフト成分として有効)
   direction_deg: number; // 射出方向 (x軸から反時計回り、度)
-  spread_deg: number;    // 方向の一様分布半角 [度] (等間隔割り振り、乱数不使用)
+  spread_deg: number;    // 方向の一様分布半角 [度] (等間隔割り振り、乱数不使用。maxwell 時は無視される)
+  energy_dist?: "mono" | "maxwell"; // エネルギー分布。未指定は "mono" (従来動作)
+  temperature_ev?: number; // maxwell 時の温度 kT [eV] (>0)
+  seed?: number;           // maxwell サンプリングの乱数シード (再現性確保)
 }
 
 export interface ParticleSettings {
@@ -90,6 +93,7 @@ export interface TraceResult {
   status: ("absorbed" | "alive")[];      // absorbed = 電極/外周に到達して停止
   tof: (number | null)[];                // absorbed 粒子の飛行時間 [s]
   final_energy_ev: number[];             // 最終運動エネルギー [eV]
+  final_angle_deg: number[];             // 最終速度の向き [度] (x軸から反時計回り、-180〜180)。absorbed 粒子では衝突時の入射方向
   dt: number;                            // 実際に使った dt
 }
 

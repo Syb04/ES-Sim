@@ -113,5 +113,6 @@ def trace_endpoint(project: Project) -> TraceResult:
         status=status,
         tof=tof,
         final_energy_ev=result.final_energy_ev.tolist(),
+        final_angle_deg=result.final_angle_deg.tolist(),
         dt=result.dt,
     )
