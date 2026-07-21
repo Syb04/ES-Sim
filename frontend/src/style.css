@@ -85,6 +85,10 @@ button.secondary { background: var(--panel); border: 1px solid var(--border); co
   background: var(--bg); border: 1px solid var(--border); color: var(--text);
   border-radius: 3px; padding: 3px 6px; font-size: 12px;
 }
+.tool-toolbar .ruler-font-select {
+  background: var(--bg); border: 1px solid var(--border); color: var(--text);
+  border-radius: 3px; padding: 3px 6px; font-size: 12px;
+}
 
 button.tool {
   background: var(--panel); border: 1px solid var(--border); color: var(--text);

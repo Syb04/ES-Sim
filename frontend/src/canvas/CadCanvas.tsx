@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { CircleShape, Point, Project, Region, SolveResult } from "../types";
+import type { CircleShape, MeshResult, Point, Project, Region, SolveResult } from "../types";
 import { computeIsolines } from "./isolines";
 
 /**
@@ -18,9 +18,13 @@ export type FieldView = "v" | "e_abs";
 interface Props {
   project: Project;
   result: SolveResult | null;
+  // Mesh ボタン (解析なし) で生成したメッシュ。result がある間は result 側の表示を優先する
+  meshResult: MeshResult | null;
   showMesh: boolean;
   tool: Tool;
   gridSnap: boolean;
+  // ルーラー目盛りラベルのフォントサイズ (px)
+  rulerFontSize: number;
   selectedRegionId: string | null;
   fieldView: FieldView;
   showIsolines: boolean;
@@ -47,8 +51,11 @@ const CLICK_MOVE_TOLERANCE_PX = 5;
 const EDGE_HIT_TOLERANCE_PX = 6;
 // 頂点/中点ハンドルのヒットテスト許容誤差 (画面px)
 const HANDLE_HIT_TOLERANCE_PX = 8;
-// ルーラーの幅/高さ (画面px)
-const RULER_SIZE = 24;
+
+// ルーラーの幅/高さ (画面px)。フォントサイズに応じて少し広げる
+function rulerSizeFor(fontSize: number): number {
+  return Math.max(24, fontSize * 2.2);
+}
 
 // 簡易 viridis カラーマップ
 const STOPS: [number, number, number][] = [
@@ -224,9 +231,11 @@ function hitHandleRadius(
 export default function CadCanvas({
   project,
   result,
+  meshResult,
   showMesh,
   tool,
   gridSnap,
+  rulerFontSize,
   selectedRegionId,
   fieldView,
   showIsolines,
@@ -341,6 +350,35 @@ export default function CadCanvas({
       ctx.moveTo(0, sy(y)); ctx.lineTo(rect.width, sy(y));
     }
     ctx.stroke();
+
+    // Mesh ボタンで生成したメッシュのワイヤーフレーム (解析結果がない状態でも見えるようにする)。
+    // Solve 結果がある間は Solve 側の表示 (カラーマップ) を優先する
+    if (!result && meshResult) {
+      const { nodes, triangles, region_of_triangle } = meshResult;
+      const regionColor = (type: Region["type"]): string =>
+        type === "conductor"
+          ? "rgba(224,176,80,0.16)"
+          : type === "dielectric"
+            ? "rgba(80,176,224,0.16)"
+            : "rgba(176,112,224,0.16)";
+      for (let i = 0; i < triangles.length; i++) {
+        const [a, b, c] = triangles[i];
+        const regionIdx = region_of_triangle[i];
+        const region = regionIdx >= 0 ? project.geometry.regions[regionIdx] : undefined;
+        ctx.beginPath();
+        ctx.moveTo(sx(nodes[a][0]), sy(nodes[a][1]));
+        ctx.lineTo(sx(nodes[b][0]), sy(nodes[b][1]));
+        ctx.lineTo(sx(nodes[c][0]), sy(nodes[c][1]));
+        ctx.closePath();
+        if (region) {
+          ctx.fillStyle = regionColor(region.type);
+          ctx.fill();
+        }
+        ctx.strokeStyle = "rgba(216,220,228,0.45)";
+        ctx.lineWidth = 1;
+        ctx.stroke();
+      }
+    }
 
     // 解析結果: カラーマップ (fieldView に応じて電位 V または要素ごとの |E| を塗る)
     if (result) {
@@ -678,6 +716,8 @@ export default function CadCanvas({
     {
       const majorStep = step; // グリッドの自動ステップと揃える
       const minorStep = majorStep / 10;
+      // ルーラー帯の幅/高さはフォントサイズに応じて広げる
+      const RULER_SIZE = rulerSizeFor(rulerFontSize);
 
       ctx.fillStyle = "#242830";
       ctx.fillRect(0, 0, rect.width, RULER_SIZE);
@@ -692,7 +732,7 @@ export default function CadCanvas({
       ctx.lineTo(RULER_SIZE + 0.5, rect.height);
       ctx.stroke();
 
-      ctx.font = "9px system-ui, sans-serif";
+      ctx.font = `${rulerFontSize}px system-ui, sans-serif`;
 
       // 上辺: x 方向の目盛り (主目盛りに mm ラベル、1/10 間隔で副目盛り)
       const xStart = Math.floor(toWorld(RULER_SIZE, 0, view)[0] / minorStep) * minorStep;
@@ -761,6 +801,7 @@ export default function CadCanvas({
   }, [
     project,
     result,
+    meshResult,
     showMesh,
     view,
     toWorld,
@@ -775,6 +816,7 @@ export default function CadCanvas({
     vertexPreviewPolygon,
     shapeRadiusPreview,
     profileLine,
+    rulerFontSize,
   ]);
 
   // Space キーの追跡 (入力欄にフォーカス中は無視)

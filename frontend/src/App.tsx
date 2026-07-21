@@ -5,7 +5,17 @@ import type { FieldView, Tool } from "./canvas/CadCanvas";
 import { CommitNumberInput, CommitTextInput } from "./CommitInput";
 import ProfilePanel from "./panels/ProfilePanel";
 import { useHistory } from "./useHistory";
-import type { CircleShape, Health, Point, Project, Region, RegionType, SolveResult } from "./types";
+import { mToMm, mmToM } from "./units";
+import type {
+  CircleShape,
+  Health,
+  MeshResult,
+  Point,
+  Project,
+  Region,
+  RegionType,
+  SolveResult,
+} from "./types";
 
 // フェーズ0 のサンプル (examples/parallel_plates.json と同内容)。
 // これを初期値として、以降は project state を編集していく。
@@ -44,12 +54,16 @@ export default function App() {
 
   const [health, setHealth] = useState<Health | null>(null);
   const [result, setResult] = useState<SolveResult | null>(null);
+  // Mesh ボタン (解析なしでメッシュ生成のみ) の結果。Solve 結果とは独立に保持する
+  const [meshResult, setMeshResult] = useState<MeshResult | null>(null);
   const [showMesh, setShowMesh] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const [tool, setTool] = useState<Tool>("select");
   const [gridSnap, setGridSnap] = useState(true);
+  // ルーラー目盛りラベルのフォントサイズ (px)。プロジェクトファイルには保存しない表示設定
+  const [rulerFontSize, setRulerFontSize] = useState(11);
   const [fieldView, setFieldView] = useState<FieldView>("v");
   const [showIsolines, setShowIsolines] = useState(false);
   const [showVectors, setShowVectors] = useState(false);
@@ -77,6 +91,7 @@ export default function App() {
     projectRef.current = next;
     setProjectState(next);
     setResult(null);
+    setMeshResult(null);
     setProfileLine(null);
   }, [history]);
 
@@ -87,6 +102,7 @@ export default function App() {
     projectRef.current = prev;
     setProjectState(prev);
     setResult(null);
+    setMeshResult(null);
     setProfileLine(null);
     setSelectedRegionId((sel) => ensureSelection(prev, sel));
   }, [history, ensureSelection]);
@@ -97,6 +113,7 @@ export default function App() {
     projectRef.current = next;
     setProjectState(next);
     setResult(null);
+    setMeshResult(null);
     setProfileLine(null);
     setSelectedRegionId((sel) => ensureSelection(next, sel));
   }, [history, ensureSelection]);
@@ -126,8 +143,22 @@ export default function App() {
   const runSolve = async () => {
     setBusy(true);
     setError(null);
+    setMeshResult(null); // Solve 実行時は Mesh のみの結果を破棄し、Solve 側の表示を優先する
     try {
       setResult(await api.solve(project));
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  // メッシュ生成のみ (解析は行わない)
+  const runMesh = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      setMeshResult(await api.mesh(project));
     } catch (e) {
       setError(String(e));
     } finally {
@@ -345,6 +376,9 @@ export default function App() {
     <div className="app">
       <div className="toolbar">
         <h1>ES-Sim</h1>
+        <button className="secondary" onClick={runMesh} disabled={busy || !health}>
+          {busy ? "計算中..." : "Mesh"}
+        </button>
         <button onClick={runSolve} disabled={busy || !health}>
           {busy ? "計算中..." : "Solve"}
         </button>
@@ -396,6 +430,18 @@ export default function App() {
           />
           グリッドスナップ
         </label>
+        <label className="snap">
+          ルーラー文字
+          <select
+            className="ruler-font-select"
+            value={rulerFontSize}
+            onChange={(e) => setRulerFontSize(Number(e.target.value))}
+          >
+            <option value={9}>小</option>
+            <option value={11}>中</option>
+            <option value={14}>大</option>
+          </select>
+        </label>
         <div className="sep" />
         <span className="field-view-label">表示</span>
         <select
@@ -429,9 +475,11 @@ export default function App() {
           <CadCanvas
             project={project}
             result={result}
+            meshResult={meshResult}
             showMesh={showMesh}
             tool={tool}
             gridSnap={gridSnap}
+            rulerFontSize={rulerFontSize}
             selectedRegionId={selectedRegionId}
             fieldView={fieldView}
             showIsolines={showIsolines}
@@ -457,12 +505,20 @@ export default function App() {
         <div className="side">
           <h2>ジオメトリ (domain)</h2>
           <div className="field">
-            <span className="label">幅 (m)</span>
-            <CommitNumberInput value={domainW} step="0.001" onCommit={(w) => setDomainSize(w, domainH)} />
+            <span className="label">幅 [mm]</span>
+            <CommitNumberInput
+              value={mToMm(domainW)}
+              step="0.1"
+              onCommit={(w) => setDomainSize(mmToM(w), domainH)}
+            />
           </div>
           <div className="field">
-            <span className="label">高さ (m)</span>
-            <CommitNumberInput value={domainH} step="0.001" onCommit={(h) => setDomainSize(domainW, h)} />
+            <span className="label">高さ [mm]</span>
+            <CommitNumberInput
+              value={mToMm(domainH)}
+              step="0.1"
+              onCommit={(h) => setDomainSize(domainW, mmToM(h))}
+            />
           </div>
 
           <h2>境界条件</h2>
@@ -491,9 +547,19 @@ export default function App() {
 
           <h2>メッシュ</h2>
           <div className="field">
-            <span className="label">サイズ (m)</span>
-            <CommitNumberInput value={project.mesh.size} step="0.0001" onCommit={setMeshSize} />
+            <span className="label">サイズ [mm]</span>
+            <CommitNumberInput
+              value={mToMm(project.mesh.size)}
+              step="0.01"
+              onCommit={(v) => setMeshSize(mmToM(v))}
+            />
           </div>
+          {meshResult && (
+            <>
+              <div className="kv"><span>節点数</span><span>{meshResult.nodes.length}</span></div>
+              <div className="kv"><span>要素数</span><span>{meshResult.triangles.length}</span></div>
+            </>
+          )}
 
           <h2>領域一覧 ({project.geometry.regions.length})</h2>
           <div className="region-list">
@@ -535,37 +601,37 @@ export default function App() {
               {selected.shape && (
                 <>
                   <label>
-                    中心 X (m)
+                    中心 X [mm]
                     <CommitNumberInput
-                      value={selected.shape.center[0]}
-                      step="0.001"
+                      value={mToMm(selected.shape.center[0])}
+                      step="0.1"
                       onCommit={(x) =>
                         editRegionShape(selected.id, {
                           ...selected.shape!,
-                          center: [x, selected.shape!.center[1]],
+                          center: [mmToM(x), selected.shape!.center[1]],
                         })
                       }
                     />
                   </label>
                   <label>
-                    中心 Y (m)
+                    中心 Y [mm]
                     <CommitNumberInput
-                      value={selected.shape.center[1]}
-                      step="0.001"
+                      value={mToMm(selected.shape.center[1])}
+                      step="0.1"
                       onCommit={(y) =>
                         editRegionShape(selected.id, {
                           ...selected.shape!,
-                          center: [selected.shape!.center[0], y],
+                          center: [selected.shape!.center[0], mmToM(y)],
                         })
                       }
                     />
                   </label>
                   <label>
-                    半径 (m)
+                    半径 [mm]
                     <CommitNumberInput
-                      value={selected.shape.radius}
-                      step="0.001"
-                      onCommit={(radius) => editRegionShape(selected.id, { ...selected.shape!, radius })}
+                      value={mToMm(selected.shape.radius)}
+                      step="0.1"
+                      onCommit={(radius) => editRegionShape(selected.id, { ...selected.shape!, radius: mmToM(radius) })}
                     />
                   </label>
                 </>
