@@ -130,3 +130,5 @@ button.danger:hover { background: #b34747; }
 .file-input { display: none; }
 .side .actions { display: flex; gap: 6px; margin: 8px 0; }
 .muted { color: var(--muted); font-size: 12px; }
+
+.side .particle-trace-toggle { display: flex; align-items: center; gap: 6px; margin: 4px 0 8px; }

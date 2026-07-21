@@ -4,18 +4,38 @@ import CadCanvas from "./canvas/CadCanvas";
 import type { FieldView, Tool } from "./canvas/CadCanvas";
 import { CommitNumberInput, CommitTextInput } from "./CommitInput";
 import ProfilePanel from "./panels/ProfilePanel";
+import ParticlePanel from "./panels/ParticlePanel";
 import { useHistory } from "./useHistory";
 import { mToMm, mmToM } from "./units";
 import type {
   CircleShape,
   Health,
   MeshResult,
+  ParticleSettings,
   Point,
   Project,
   Region,
   RegionType,
   SolveResult,
+  TraceResult,
 } from "./types";
+
+// 粒子パネルの既定値 (project.particles が未設定の場合の初期表示に使う)
+const DEFAULT_PARTICLES: ParticleSettings = {
+  species: { preset: "electron" },
+  emitter: {
+    kind: "line",
+    p1: [0.02, 0.02],
+    p2: [0.02, 0.03],
+    n: 50,
+    energy_ev: 1.0,
+    direction_deg: 0,
+    spread_deg: 0,
+  },
+  dt: null,
+  n_steps: 2000,
+  save_every: 10,
+};
 
 // フェーズ0 のサンプル (examples/parallel_plates.json と同内容)。
 // これを初期値として、以降は project state を編集していく。
@@ -71,6 +91,12 @@ export default function App() {
   const [profileLine, setProfileLine] = useState<[Point, Point] | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  // 粒子設定 (エミッタ・積分パラメータ)。ジオメトリ編集とは独立に管理し、
+  // 既存の Undo/Redo 履歴 (history) には積まない。保存/読込 (project.particles) の対象ではある
+  const [particles, setParticles] = useState<ParticleSettings>(DEFAULT_PARTICLES);
+  const [traceResult, setTraceResult] = useState<TraceResult | null>(null);
+  const [showTrajectories, setShowTrajectories] = useState(true);
+
   useEffect(() => {
     const check = () => api.health().then(setHealth).catch(() => setHealth(null));
     check();
@@ -93,6 +119,7 @@ export default function App() {
     setResult(null);
     setMeshResult(null);
     setProfileLine(null);
+    setTraceResult(null); // ジオメトリ変更で解析結果とともに trace 結果も破棄する
   }, [history]);
 
   // --- Undo/Redo ---
@@ -104,6 +131,7 @@ export default function App() {
     setResult(null);
     setMeshResult(null);
     setProfileLine(null);
+    setTraceResult(null);
     setSelectedRegionId((sel) => ensureSelection(prev, sel));
   }, [history, ensureSelection]);
 
@@ -115,6 +143,7 @@ export default function App() {
     setResult(null);
     setMeshResult(null);
     setProfileLine(null);
+    setTraceResult(null);
     setSelectedRegionId((sel) => ensureSelection(next, sel));
   }, [history, ensureSelection]);
 
@@ -164,6 +193,24 @@ export default function App() {
     } finally {
       setBusy(false);
     }
+  };
+
+  // 粒子軌道トレース実行 (project.particles として送信する)
+  const runTrace = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      setTraceResult(await api.trace({ ...project, particles }));
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  // エミッタ配置ツール (CadCanvas) からの確定通知。kind/n 等はそのまま維持し p1/p2 のみ更新する
+  const setEmitterPoints = (p1: Point, p2: Point) => {
+    setParticles((prev) => ({ ...prev, emitter: { ...prev.emitter, p1, p2 } }));
   };
 
   // --- domain ---
@@ -338,8 +385,10 @@ export default function App() {
   };
 
   // --- 保存/読込 ---
+  // particles は history 管理外の別 state のため、保存時にここで project へ合成する
   const saveProject = () => {
-    const blob = new Blob([JSON.stringify(project, null, 2)], { type: "application/json" });
+    const toSave: Project = { ...project, particles };
+    const blob = new Blob([JSON.stringify(toSave, null, 2)], { type: "application/json" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
@@ -360,6 +409,9 @@ export default function App() {
         }
         // 型はバックエンドが信頼できるものを書き出す前提で信用する
         commitProject(obj as Project);
+        // particles は独立管理の state なので、読込んだファイルにあれば反映し、なければ既定値に戻す
+        const loadedParticles = (obj as Project).particles;
+        setParticles(loadedParticles ?? DEFAULT_PARTICLES);
         setSelectedRegionId(null);
         setError(null);
       } catch (err) {
@@ -420,6 +472,9 @@ export default function App() {
         </button>
         <button className={`tool ${tool === "profile" ? "active" : ""}`} onClick={() => setTool("profile")}>
           プロファイル
+        </button>
+        <button className={`tool ${tool === "emitter" ? "active" : ""}`} onClick={() => setTool("emitter")}>
+          エミッタ
         </button>
         <div className="sep" />
         <label className="snap">
@@ -485,6 +540,9 @@ export default function App() {
             showIsolines={showIsolines}
             showVectors={showVectors}
             profileLine={profileLine}
+            emitter={particles.emitter}
+            traceResult={traceResult}
+            showTrajectories={showTrajectories}
             onSelectRegion={setSelectedRegionId}
             onDeleteRegion={deleteRegion}
             onAddRegion={addRegion}
@@ -492,6 +550,7 @@ export default function App() {
             onEditRegionPolygon={editRegionPolygon}
             onEditRegionShape={editRegionShape}
             onProfileLine={(p1, p2) => setProfileLine([p1, p2])}
+            onSetEmitter={setEmitterPoints}
           />
           {profileLine && (
             <ProfilePanel
@@ -691,6 +750,18 @@ export default function App() {
               <div className="kv"><span>エネルギー</span><span>{result.energy.toExponential(3)} J/m</span></div>
             </>
           )}
+
+          <ParticlePanel
+            particles={particles}
+            onChange={setParticles}
+            busy={busy}
+            canRun={!!health}
+            onTrace={runTrace}
+            traceResult={traceResult}
+            showTrajectories={showTrajectories}
+            onToggleTrajectories={setShowTrajectories}
+          />
+
           {error && (
             <>
               <h2>エラー</h2>

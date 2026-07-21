@@ -1,4 +1,4 @@
-import type { Health, MeshResult, Point, Project, ProfileResult, SolveResult } from "./types";
+import type { Health, MeshResult, Point, Project, ProfileResult, SolveResult, TraceResult } from "./types";
 
 const BASE = "http://127.0.0.1:8317";
 
@@ -22,4 +22,5 @@ export const api = {
   solve: (project: Project): Promise<SolveResult> => post("/solve", project),
   profile: (project: Project, p1: Point, p2: Point, n = 200): Promise<ProfileResult> =>
     post("/profile", { project, p1, p2, n }),
+  trace: (project: Project): Promise<TraceResult> => post("/trace", project),
 };

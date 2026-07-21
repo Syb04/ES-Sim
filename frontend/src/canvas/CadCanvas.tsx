@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { CircleShape, MeshResult, Point, Project, Region, SolveResult } from "../types";
+import type { CircleShape, Emitter, MeshResult, Point, Project, Region, SolveResult, TraceResult } from "../types";
 import { computeIsolines } from "./isolines";
 
 /**
@@ -7,10 +7,11 @@ import { computeIsolines } from "./isolines";
  * - パン: 中ボタンドラッグ / Space+左ドラッグ
  * - ズーム: ホイール (カーソル中心)
  * - 表示: グリッド、ルーラー、ジオメトリ、解析結果 (電位/|E| カラーマップ、等電位線、ベクトル、カラーバー)
- * - 作図ツール: 選択 (頂点/中点グリップ編集含む) / ポリライン / 矩形 / 円 (グリッドスナップ対応)
+ * - 作図ツール: 選択 (頂点/中点グリップ編集含む) / ポリライン / 矩形 / 円 / エミッタ (グリッドスナップ対応)
+ * - 粒子軌道: traceResult をシアン系の半透明ポリラインで描画 (吸収位置は小さな点)
  */
 
-export type Tool = "select" | "polyline" | "rect" | "circle" | "profile";
+export type Tool = "select" | "polyline" | "rect" | "circle" | "profile" | "emitter";
 
 // カラーマップの対象: 電位 V か |E|
 export type FieldView = "v" | "e_abs";
@@ -30,6 +31,11 @@ interface Props {
   showIsolines: boolean;
   showVectors: boolean;
   profileLine: [Point, Point] | null;
+  // 粒子エミッタ (常時オーバーレイ表示の対象)。粒子パネル側で必ず既定値を持つため常に非 null
+  emitter: Emitter;
+  // 粒子軌道トレース結果 (Trace 実行前は null)
+  traceResult: TraceResult | null;
+  showTrajectories: boolean;
   onSelectRegion: (id: string | null) => void;
   onDeleteRegion: (id: string) => void;
   onAddRegion: (geom: Point[] | CircleShape) => void;
@@ -37,6 +43,7 @@ interface Props {
   onEditRegionPolygon: (id: string, polygon: Point[]) => void;
   onEditRegionShape: (id: string, shape: CircleShape) => void;
   onProfileLine: (p1: Point, p2: Point) => void;
+  onSetEmitter: (p1: Point, p2: Point) => void;
 }
 
 interface View {
@@ -241,6 +248,9 @@ export default function CadCanvas({
   showIsolines,
   showVectors,
   profileLine,
+  emitter,
+  traceResult,
+  showTrajectories,
   onSelectRegion,
   onDeleteRegion,
   onAddRegion,
@@ -248,6 +258,7 @@ export default function CadCanvas({
   onEditRegionPolygon,
   onEditRegionShape,
   onProfileLine,
+  onSetEmitter,
 }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [view, setView] = useState<View | null>(null);
@@ -654,6 +665,21 @@ export default function CadCanvas({
       ctx.beginPath();
       ctx.arc(sx(x0p), sy(y0p), 3, 0, Math.PI * 2);
       ctx.fill();
+    } else if (tool === "emitter" && drawPts.length === 1 && cursor) {
+      // エミッタ配置ツールのラバーバンド (緑系破線)
+      const [x0e, y0e] = drawPts[0];
+      const [x1e, y1e] = cursor;
+      ctx.strokeStyle = "#4ddd8c";
+      ctx.setLineDash([4, 3]);
+      ctx.beginPath();
+      ctx.moveTo(sx(x0e), sy(y0e));
+      ctx.lineTo(sx(x1e), sy(y1e));
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.fillStyle = "#4ddd8c";
+      ctx.beginPath();
+      ctx.arc(sx(x0e), sy(y0e), 3, 0, Math.PI * 2);
+      ctx.fill();
     }
 
     // 確定済みプロファイル線のオーバーレイ (白破線 + 端点マーカー)
@@ -673,6 +699,81 @@ export default function CadCanvas({
         ctx.arc(sx(px), sy(py), 4, 0, Math.PI * 2);
         ctx.fill();
       }
+    }
+
+    // 粒子軌道 (trace 結果): シアン系半透明ポリライン。粒子数が多くても見えるように線幅は細く保つ
+    if (showTrajectories && traceResult) {
+      ctx.strokeStyle = "rgba(0,200,255,0.5)";
+      ctx.lineWidth = 1;
+      for (const traj of traceResult.trajectories) {
+        if (traj.length < 2) continue;
+        ctx.beginPath();
+        traj.forEach(([x, y], i) => (i === 0 ? ctx.moveTo(sx(x), sy(y)) : ctx.lineTo(sx(x), sy(y))));
+        ctx.stroke();
+      }
+      // 吸収された粒子の最終位置 (着地点) に小さな点を描く
+      ctx.fillStyle = "rgba(0,200,255,0.9)";
+      traceResult.trajectories.forEach((traj, i) => {
+        if (traceResult.status[i] !== "absorbed" || traj.length === 0) return;
+        const [lx, ly] = traj[traj.length - 1];
+        ctx.beginPath();
+        ctx.arc(sx(lx), sy(ly), 2, 0, Math.PI * 2);
+        ctx.fill();
+      });
+    }
+
+    // エミッタのオーバーレイ (常時表示): line は緑線分、point は×マーカー。中点/p1 から射出方向へ矢印を描く
+    {
+      ctx.strokeStyle = "#4ddd8c";
+      ctx.fillStyle = "#4ddd8c";
+      ctx.lineWidth = 2;
+      let originX: number;
+      let originY: number;
+      if (emitter.kind === "line") {
+        const [p1x, p1y] = emitter.p1;
+        const [p2x, p2y] = emitter.p2;
+        ctx.beginPath();
+        ctx.moveTo(sx(p1x), sy(p1y));
+        ctx.lineTo(sx(p2x), sy(p2y));
+        ctx.stroke();
+        originX = (p1x + p2x) / 2;
+        originY = (p1y + p2y) / 2;
+      } else {
+        // point エミッタ: ×マーカー
+        const [px0, py0] = emitter.p1;
+        const hx = sx(px0);
+        const hy = sy(py0);
+        const hs = 6;
+        ctx.beginPath();
+        ctx.moveTo(hx - hs, hy - hs);
+        ctx.lineTo(hx + hs, hy + hs);
+        ctx.moveTo(hx + hs, hy - hs);
+        ctx.lineTo(hx - hs, hy + hs);
+        ctx.stroke();
+        originX = px0;
+        originY = py0;
+      }
+      // 射出方向の矢印 (画面固定長。画面はワールドに対し y が反転している点に注意)
+      const angRad = (emitter.direction_deg * Math.PI) / 180;
+      const arrowLen = 24;
+      const ox = sx(originX);
+      const oy = sy(originY);
+      const adx = Math.cos(angRad) * arrowLen;
+      const ady = -Math.sin(angRad) * arrowLen;
+      const ex = ox + adx;
+      const ey = oy + ady;
+      ctx.beginPath();
+      ctx.moveTo(ox, oy);
+      ctx.lineTo(ex, ey);
+      ctx.stroke();
+      const ang = Math.atan2(ady, adx);
+      const headLen = 7;
+      ctx.beginPath();
+      ctx.moveTo(ex, ey);
+      ctx.lineTo(ex - headLen * Math.cos(ang - Math.PI / 6), ey - headLen * Math.sin(ang - Math.PI / 6));
+      ctx.lineTo(ex - headLen * Math.cos(ang + Math.PI / 6), ey - headLen * Math.sin(ang + Math.PI / 6));
+      ctx.closePath();
+      ctx.fill();
     }
 
     // カラーバー (右下、画面固定・縦グラデーション)
@@ -817,6 +918,9 @@ export default function CadCanvas({
     shapeRadiusPreview,
     profileLine,
     rulerFontSize,
+    emitter,
+    traceResult,
+    showTrajectories,
   ]);
 
   // Space キーの追跡 (入力欄にフォーカス中は無視)
@@ -1078,6 +1182,14 @@ export default function CadCanvas({
             } else {
               const p1 = drawPts[0];
               onProfileLine(p1, pt);
+              setDrawPts([]);
+            }
+          } else if (tool === "emitter") {
+            if (drawPts.length === 0) {
+              setDrawPts([pt]);
+            } else {
+              const p1 = drawPts[0];
+              onSetEmitter(p1, pt);
               setDrawPts([]);
             }
           }

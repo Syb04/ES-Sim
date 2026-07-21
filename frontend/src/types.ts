@@ -50,12 +50,47 @@ export interface Geometry {
   boundaries: BoundaryCondition[];
 }
 
+// 粒子種。custom の場合のみ q [C] / m [kg] を持つ
+export interface Species {
+  preset: "electron" | "proton" | "custom";
+  q?: number; // custom時のみ [C]
+  m?: number; // custom時のみ [kg]
+}
+
+// 粒子エミッタ。line: p1-p2 線分上に等間隔配置、point: p1 のみ使用 (全粒子同位置)
+export interface Emitter {
+  kind: "line" | "point";
+  p1: Point;
+  p2: Point; // point の場合は未使用 (p1 のみ使用)
+  n: number;             // 粒子数
+  energy_ev: number;     // 初期運動エネルギー [eV]
+  direction_deg: number; // 射出方向 (x軸から反時計回り、度)
+  spread_deg: number;    // 方向の一様分布半角 [度] (等間隔割り振り、乱数不使用)
+}
+
+export interface ParticleSettings {
+  species: Species;
+  emitter: Emitter;
+  dt: number | null; // 秒。null なら自動推定
+  n_steps: number;
+  save_every: number;
+}
+
 export interface Project {
   version: number;
   unit: "m" | "mm";
   geometry: Geometry;
   mesh: { size: number; local_sizes?: { region: string; size: number }[] };
   solver?: { backend: "numpy" | "cupy" | "auto" };
+  particles?: ParticleSettings;
+}
+
+export interface TraceResult {
+  trajectories: Point[][];               // 粒子ごと、save_every ステップごと (初期位置含む)
+  status: ("absorbed" | "alive")[];      // absorbed = 電極/外周に到達して停止
+  tof: (number | null)[];                // absorbed 粒子の飛行時間 [s]
+  final_energy_ev: number[];             // 最終運動エネルギー [eV]
+  dt: number;                            // 実際に使った dt
 }
 
 export interface MeshResult {

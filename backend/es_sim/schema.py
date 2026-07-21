@@ -73,12 +73,61 @@ class SolverSettings(BaseModel):
     backend: Literal["numpy", "cupy", "auto"] = "numpy"
 
 
+# ---- 粒子軌道追跡 (フェーズ2、仕様書 §8) --------------------------------------
+
+
+class Species(BaseModel):
+    """粒子種。electron/proton プリセット、または custom で q・m を直接指定する。"""
+
+    preset: Literal["electron", "proton", "custom"] = "electron"
+    q: float | None = None  # custom 時の電荷 [C]
+    m: float | None = None  # custom 時の質量 [kg]
+
+    @model_validator(mode="after")
+    def _check_custom_qm(self) -> "Species":
+        if self.preset == "custom" and (self.q is None or self.m is None):
+            raise ValueError("preset='custom' には q と m の指定が必要です")
+        return self
+
+
+class Emitter(BaseModel):
+    """粒子源。
+
+    line: p1-p2 の線分上に n 個を等間隔配置。point: p1 に全粒子を配置 (p2 は無視)。
+    direction_deg は x 軸から反時計回りの射出方向 [度]、spread_deg はその一様分布
+    半角 [度] (乱数は使わず、n 個に等間隔で振り分ける)。
+    """
+
+    kind: Literal["line", "point"] = "line"
+    p1: Point
+    p2: Point | None = None
+    n: int = Field(..., gt=0)
+    energy_ev: float = 0.0
+    direction_deg: float = 0.0
+    spread_deg: float = 0.0
+
+    @model_validator(mode="after")
+    def _check_line_needs_p2(self) -> "Emitter":
+        if self.kind == "line" and self.p2 is None:
+            raise ValueError("kind='line' には p2 の指定が必要です")
+        return self
+
+
+class ParticleSettings(BaseModel):
+    species: Species = Species()
+    emitter: Emitter
+    dt: float | None = None  # 秒。None なら自動推定 (particles.py 参照)
+    n_steps: int = Field(5000, gt=0)
+    save_every: int = Field(10, gt=0)
+
+
 class Project(BaseModel):
     version: int = 1
     unit: Literal["m", "mm"] = "m"
     geometry: Geometry
     mesh: MeshSettings
     solver: SolverSettings = SolverSettings()
+    particles: ParticleSettings | None = None
 
 
 # ---- API レスポンス ----------------------------------------------------------
@@ -111,3 +160,11 @@ class ProfileResult(BaseModel):
     s: list[float]                # 弧長 (p1 からの距離) [m]
     v: list[float | None]         # 電位 [V] (領域外は None)
     e_abs: list[float | None]     # |E| [V/m] (領域外は None)
+
+
+class TraceResult(BaseModel):
+    trajectories: list[list[Point]]            # 粒子ごと、save_every ステップごと (初期位置含む)
+    status: list[Literal["absorbed", "alive"]]
+    tof: list[float | None]                    # absorbed 粒子の飛行時間 [s]
+    final_energy_ev: list[float]
+    dt: float                                  # 実際に使った dt [s]

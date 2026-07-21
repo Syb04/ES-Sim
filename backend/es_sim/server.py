@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+import math
+
 import numpy as np
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -13,8 +15,16 @@ from . import __version__
 from .backend import gpu_available
 from .fem import solve
 from .meshing import generate_mesh
+from .particles import trace
 from .postprocess import sample_line
-from .schema import MeshResult, Project, ProfileRequest, ProfileResult, SolveResult
+from .schema import (
+    MeshResult,
+    Project,
+    ProfileRequest,
+    ProfileResult,
+    SolveResult,
+    TraceResult,
+)
 
 app = FastAPI(title="ES-Sim backend", version=__version__)
 
@@ -82,4 +92,26 @@ def profile_endpoint(req: ProfileRequest) -> ProfileResult:
         s=s.tolist(),
         v=_nan_to_none(v),
         e_abs=_nan_to_none(e_abs),
+    )
+
+
+@app.post("/trace", response_model=TraceResult)
+def trace_endpoint(project: Project) -> TraceResult:
+    if project.particles is None:
+        raise HTTPException(status_code=422, detail="project.particles が指定されていません")
+    try:
+        mesh = generate_mesh(project)
+        sol = solve(project, mesh)
+        result = trace(project, mesh, sol)
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    status = ["absorbed" if a else "alive" for a in result.absorbed.tolist()]
+    tof = [None if math.isnan(t) else float(t) for t in result.tof.tolist()]
+    return TraceResult(
+        trajectories=result.trajectories.tolist(),
+        status=status,
+        tof=tof,
+        final_energy_ev=result.final_energy_ev.tolist(),
+        dt=result.dt,
     )
