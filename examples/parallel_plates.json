@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "unit": "m",
+  "geometry": {
+    "domain": { "polygon": [[0, 0], [0.1, 0], [0.1, 0.05], [0, 0.05]] },
+    "regions": [
+      {
+        "id": "diel1",
+        "type": "dielectric",
+        "polygon": [[0.04, 0.01], [0.06, 0.01], [0.06, 0.04], [0.04, 0.04]],
+        "eps_r": 4.0
+      }
+    ],
+    "boundaries": [
+      { "edges": [3], "type": "dirichlet", "voltage": 0.0 },
+      { "edges": [1], "type": "dirichlet", "voltage": 100.0 }
+    ]
+  },
+  "mesh": { "size": 0.004 },
+  "solver": { "backend": "numpy" }
+}

@@ -1,0 +1,102 @@
+"""P1 (線形三角形) 要素による静電場 FEM。仕様書 §6 参照。
+
+∇·(ε∇V) = -ρ を弱形式で解く。
+組み立ては全要素一括のベクトル化。Dirichlet は対称性を保つ縮約方式。
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+import numpy as np
+import scipy.sparse as sp
+import scipy.sparse.linalg as spla
+
+from .meshing import Mesh
+from .schema import Project
+
+EPS0 = 8.8541878128e-12  # 真空の誘電率 [F/m]
+
+
+@dataclass
+class Solution:
+    v: np.ndarray        # (N,) 節点電位 [V]
+    e_field: np.ndarray  # (M, 2) 要素ごとの E = -∇V [V/m]
+    energy: float        # 蓄積エネルギー [J/m] (奥行き単位長あたり)
+
+
+def _element_geometry(nodes: np.ndarray, tris: np.ndarray):
+    """P1 要素の形状関数勾配と面積 (全要素一括)。"""
+    p = nodes[tris]                      # (M, 3, 2)
+    x, y = p[:, :, 0], p[:, :, 1]
+    # b_i = y_j - y_k, c_i = x_k - x_j  (i, j, k は巡回)
+    b = np.stack([y[:, 1] - y[:, 2], y[:, 2] - y[:, 0], y[:, 0] - y[:, 1]], axis=1)
+    c = np.stack([x[:, 2] - x[:, 1], x[:, 0] - x[:, 2], x[:, 1] - x[:, 0]], axis=1)
+    det = x[:, 0] * b[:, 0] + x[:, 1] * b[:, 1] + x[:, 2] * b[:, 2]
+    area = 0.5 * np.abs(det)
+    return b, c, area                    # (M,3), (M,3), (M,)
+
+
+def _material_arrays(project: Project, mesh: Mesh):
+    """要素ごとの ε と ρ。"""
+    eps = np.full(len(mesh.triangles), EPS0)
+    rho = np.zeros(len(mesh.triangles))
+    for i, region in enumerate(project.geometry.regions):
+        mask = mesh.tri_region == i
+        if region.type == "dielectric":
+            eps[mask] = EPS0 * region.eps_r
+        elif region.type == "charge":
+            rho[mask] = region.rho
+    return eps, rho
+
+
+def assemble(project: Project, mesh: Mesh):
+    """剛性行列 K (csr) と右辺 f を返す。"""
+    tris = mesh.triangles
+    b, c, area = _element_geometry(mesh.nodes, tris)
+    eps, rho = _material_arrays(project, mesh)
+
+    # Ke[i,j] = eps * (b_i b_j + c_i c_j) / (4A)
+    coef = (eps / (4.0 * area))[:, None, None]
+    ke = coef * (b[:, :, None] * b[:, None, :] + c[:, :, None] * c[:, None, :])
+
+    rows = np.repeat(tris, 3, axis=1).ravel()          # i index
+    cols = np.tile(tris, (1, 3)).ravel()               # j index
+    n = len(mesh.nodes)
+    k = sp.coo_matrix((ke.ravel(), (rows, cols)), shape=(n, n)).tocsr()
+
+    # 一様電荷密度の P1 右辺: 各節点へ rho*A/3
+    f = np.zeros(n)
+    np.add.at(f, tris.ravel(), np.repeat(rho * area / 3.0, 3))
+    return k, f
+
+
+def solve(project: Project, mesh: Mesh) -> Solution:
+    k, f = assemble(project, mesh)
+    n = len(mesh.nodes)
+
+    fixed = np.fromiter(mesh.dirichlet.keys(), dtype=np.int64)
+    v_fixed = np.fromiter(mesh.dirichlet.values(), dtype=np.float64)
+    free = np.setdiff1d(np.arange(n), fixed)
+
+    v = np.zeros(n)
+    v[fixed] = v_fixed
+    if len(free):
+        k_ff = k[free][:, free].tocsc()
+        rhs = f[free] - k[free][:, fixed] @ v_fixed
+        # 直接法 (LU)。PIC で右辺のみ更新する再解析に備え splu を使う
+        v[free] = spla.splu(k_ff).solve(rhs)
+
+    # E = -∇V (要素内一定)
+    tris = mesh.triangles
+    b, c, area = _element_geometry(mesh.nodes, tris)
+    vt = v[tris]                                        # (M, 3)
+    inv2a = 1.0 / (2.0 * area)
+    ex = -np.sum(vt * b, axis=1) * inv2a
+    ey = -np.sum(vt * c, axis=1) * inv2a
+    e_field = np.stack([ex, ey], axis=1)
+
+    eps, _ = _material_arrays(project, mesh)
+    energy = float(np.sum(0.5 * eps * (ex**2 + ey**2) * area))
+
+    return Solution(v=v, e_field=e_field, energy=energy)
