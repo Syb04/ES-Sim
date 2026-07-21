@@ -5,10 +5,13 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
 import math
+import threading
 
 import numpy as np
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
 from . import __version__
@@ -16,6 +19,7 @@ from .backend import gpu_available
 from .fem import solve
 from .meshing import generate_mesh
 from .particles import trace
+from .pic import PicSimulation
 from .postprocess import sample_line
 from .schema import (
     MeshResult,
@@ -116,3 +120,94 @@ def trace_endpoint(project: Project) -> TraceResult:
         final_angle_deg=result.final_angle_deg.tolist(),
         dt=result.dt,
     )
+
+
+# ---- PIC WebSocket ストリーミング (フェーズ3、仕様書 §9) ----------------------
+
+
+async def _run_pic_session(ws: WebSocket, project_dict: dict) -> None:
+    """1回の PIC 実行。計算はワーカースレッドで行い、フレームをキュー経由で送出する。"""
+    loop = asyncio.get_running_loop()
+    stop = threading.Event()
+    queue: asyncio.Queue = asyncio.Queue()
+
+    try:
+        project = Project.model_validate(project_dict)
+        # メッシュ生成・行列組み立ても重いのでスレッドで実行
+        sim = await asyncio.to_thread(PicSimulation, project)
+    except Exception as exc:
+        await ws.send_json({"type": "error", "detail": str(exc)})
+        return
+
+    await ws.send_json(
+        {
+            "type": "started",
+            "dt": sim.dt,
+            "n_steps": sim.pic.n_steps,
+            "warnings": sim.warnings,
+            "mesh": {
+                "nodes": sim.mesh.nodes.tolist(),
+                "triangles": sim.mesh.triangles.tolist(),
+            },
+        }
+    )
+
+    def on_frame(frame: dict) -> None:
+        # ワーカースレッドからイベントループへ安全に渡す (ブロックしない)
+        loop.call_soon_threadsafe(queue.put_nowait, frame)
+
+    run_task = asyncio.create_task(
+        asyncio.to_thread(sim.run_batch, on_frame, stop.is_set)
+    )
+
+    async def watch_stop() -> None:
+        # 実行中の stop コマンド (または切断) を監視する
+        while True:
+            try:
+                msg = json.loads(await ws.receive_text())
+            except (WebSocketDisconnect, RuntimeError):
+                stop.set()
+                return
+            if msg.get("cmd") == "stop":
+                stop.set()
+                return
+
+    stop_task = asyncio.create_task(watch_stop())
+    try:
+        while True:
+            if run_task.done() and queue.empty():
+                break
+            try:
+                frame = await asyncio.wait_for(queue.get(), timeout=0.1)
+            except asyncio.TimeoutError:
+                continue
+            await ws.send_json(frame)
+        history, _ = await run_task
+        await ws.send_json({"type": "done", "history": history})
+    except Exception as exc:
+        try:
+            await ws.send_json({"type": "error", "detail": str(exc)})
+        except Exception:
+            pass
+    finally:
+        stop.set()
+        stop_task.cancel()
+        await asyncio.gather(run_task, return_exceptions=True)
+
+
+@app.websocket("/ws/pic")
+async def ws_pic(ws: WebSocket) -> None:
+    """PIC 実行の WebSocket。start コマンドで開始、stop で中断できる。"""
+    await ws.accept()
+    try:
+        while True:
+            msg = json.loads(await ws.receive_text())
+            cmd = msg.get("cmd")
+            if cmd == "start":
+                await _run_pic_session(ws, msg.get("project", {}))
+            elif cmd == "stop":
+                continue  # 実行中でなければ無視
+            else:
+                await ws.send_json({"type": "error", "detail": f"不明なコマンド: {cmd}"})
+    except WebSocketDisconnect:
+        pass

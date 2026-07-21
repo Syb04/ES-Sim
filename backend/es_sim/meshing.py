@@ -26,7 +26,9 @@ class Mesh:
     nodes: np.ndarray          # (N, 2) float64
     triangles: np.ndarray      # (M, 3) int64
     tri_region: np.ndarray     # (M,) int64  regions のインデックス。-1 は背景 (真空)
-    dirichlet: dict[int, float] = field(default_factory=dict)  # 節点番号 -> 電位 [V]
+    dirichlet: dict[int, float] = field(default_factory=dict)  # 節点番号 -> 電位 [V] (直流分)
+    # 節点番号 -> (振幅 [V], 周波数 [Hz], 位相 [deg])。PIC のみ使用 (フェーズ1/2 は無視)
+    dirichlet_rf: dict[int, tuple[float, float, float]] = field(default_factory=dict)
 
 
 def _add_polygon(points, lc: float):
@@ -93,7 +95,7 @@ def generate_mesh(project: Project) -> Mesh:
             if region.type == "conductor":
                 if region.voltage is None:
                     raise ValueError(f"conductor '{region.id}' に voltage がありません")
-                conductor_curves.append((region.voltage, curves))
+                conductor_curves.append((region.voltage, region.voltage_rf, curves))
             else:
                 surf = gmsh.model.geo.addPlaneSurface([loop])
                 region_surfaces.append((i, surf))
@@ -130,24 +132,34 @@ def generate_mesh(project: Project) -> Mesh:
 
         # ---- Dirichlet 節点 ------------------------------------------------
         dirichlet: dict[int, float] = {}
+        dirichlet_rf: dict[int, tuple[float, float, float]] = {}
 
         def _curve_nodes(curve_tag: int) -> np.ndarray:
             tags, _, _ = gmsh.model.mesh.getNodes(1, curve_tag, includeBoundary=True)
             return tag_to_index[np.asarray(tags, dtype=np.int64)]
 
+        def _assign(n: int, voltage: float, rf) -> None:
+            """節点に直流分と RF 成分を設定する (RF なしなら既存 RF を消して上書き)。"""
+            dirichlet[n] = voltage
+            if rf is not None:
+                dirichlet_rf[n] = (rf.amplitude, rf.freq_hz, rf.phase_deg)
+            else:
+                dirichlet_rf.pop(n, None)
+
         # 外周エッジの境界条件 (エッジ i は outer_curves[i])
         for bc in geo.boundaries:
             for edge in bc.edges:
                 for n in _curve_nodes(outer_curves[edge]):
-                    dirichlet[int(n)] = bc.voltage
+                    _assign(int(n), bc.voltage, bc.voltage_rf)
 
         # 電極輪郭 (電極の指定を優先して上書き)
-        for voltage, curves in conductor_curves:
+        for voltage, rf, curves in conductor_curves:
             for c in curves:
                 for n in _curve_nodes(c):
-                    dirichlet[int(n)] = voltage
+                    _assign(int(n), voltage, rf)
 
         return Mesh(nodes=nodes, triangles=triangles,
-                    tri_region=tri_region, dirichlet=dirichlet)
+                    tri_region=tri_region, dirichlet=dirichlet,
+                    dirichlet_rf=dirichlet_rf)
     finally:
         gmsh.finalize()

@@ -11,6 +11,13 @@ export interface CircleShape {
   radius: number;
 }
 
+// RF重畳電圧。V(t) = voltage(直流分) + amplitude * sin(2π f t + phase) (PICのみで使用。/solve は voltage のみ)
+export interface VoltageRf {
+  amplitude: number;  // [V]
+  freq_hz: number;    // [Hz]
+  phase_deg: number;  // [deg]
+}
+
 export interface Region {
   id: string;
   type: RegionType;
@@ -20,6 +27,7 @@ export interface Region {
   voltage?: number; // conductor
   eps_r?: number;   // dielectric
   rho?: number;     // charge
+  voltage_rf?: VoltageRf; // conductor: RF重畳 (未指定なら直流のみ)
 }
 
 // 表示/ヒットテスト用の輪郭ポリゴンを返す。
@@ -42,6 +50,7 @@ export interface BoundaryCondition {
   edges: number[];
   type: "dirichlet";
   voltage: number;
+  voltage_rf?: VoltageRf; // RF重畳 (未指定なら直流のみ)
 }
 
 export interface Geometry {
@@ -79,6 +88,89 @@ export interface ParticleSettings {
   save_every: number;
 }
 
+// ---- FEM-PIC (フェーズ3、backend/es_sim/schema.py 予定分と手動同期) ----------------
+
+// 初期プラズマ装荷設定。null なら初期装荷なし
+export interface InitialPlasma {
+  density: number;        // [m^-3] (奥行き1m換算)
+  te_ev: number;           // 電子温度 [eV]
+  ti_ev: number;           // イオン温度 [eV]
+  ion_mass_amu: number;    // イオン質量 [amu] (Ar+ = 40 など)
+  immobile_ions: boolean;  // true でイオン固定 (検証用)
+  seed: number;            // 乱数シード
+}
+
+// エミッタ定常注入。emitter はフェーズ2の ParticleSettings.emitter と同型 (共用する)
+export interface PicInjection {
+  emitter: Emitter;
+  species: "electron" | "ion";
+  current_a_per_m: number; // 電流 [A/m] → 毎ステップの実電荷を等分注入
+}
+
+export interface PicSettings {
+  initial_plasma: InitialPlasma | null;
+  injection: PicInjection | null;
+  n_macro: number;      // 種ごとの初期マクロ粒子数の目安
+  dt: number | null;    // 秒。null = 0.1/ωpe (初期密度から自動)
+  n_steps: number;
+  frame_every: number;  // フレーム送出間隔 (ステップ)
+}
+
+// PIC診断 (1ステップ分)
+export interface PicDiag {
+  t: number;
+  ke_e: number;
+  ke_i: number;
+  fe: number;
+  n_e: number;
+  n_i: number;
+  wall_e: number;
+  wall_i: number;
+  phi_min: number;
+  phi_max: number;
+}
+
+// ---- PIC WebSocket プロトコル (server→client, /ws/pic) ------------------------
+
+export interface PicStartedMsg {
+  type: "started";
+  dt: number;
+  n_steps: number;
+  warnings: string[];
+  mesh: MeshResult;
+}
+
+export interface PicFrameMsg {
+  type: "frame";
+  step: number;
+  t: number;
+  phi: number[]; // 節点値
+  particles: { electron: Point[]; ion: Point[] }; // 種ごと最大2000点に間引き済み
+  diag: PicDiag;
+}
+
+export interface PicDoneMsg {
+  type: "done";
+  history: PicDiag[];
+}
+
+export interface PicErrorMsg {
+  type: "error";
+  detail: string;
+}
+
+export type PicServerMessage = PicStartedMsg | PicFrameMsg | PicDoneMsg | PicErrorMsg;
+
+// client→server コマンド
+export type PicClientCommand = { cmd: "start"; project: Project } | { cmd: "stop" };
+
+// CadCanvas でのライブ描画用にまとめたビュー (started の mesh + 最新 frame)
+export interface PicLiveFrame {
+  mesh: MeshResult;
+  phi: number[];
+  particles: { electron: Point[]; ion: Point[] };
+}
+
 export interface Project {
   version: number;
   unit: "m" | "mm";
@@ -86,6 +178,7 @@ export interface Project {
   mesh: { size: number; local_sizes?: { region: string; size: number }[] };
   solver?: { backend: "numpy" | "cupy" | "auto" };
   particles?: ParticleSettings;
+  pic?: PicSettings;
 }
 
 export interface TraceResult {

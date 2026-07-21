@@ -1,5 +1,15 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { CircleShape, Emitter, MeshResult, Point, Project, Region, SolveResult, TraceResult } from "../types";
+import type {
+  CircleShape,
+  Emitter,
+  MeshResult,
+  PicLiveFrame,
+  Point,
+  Project,
+  Region,
+  SolveResult,
+  TraceResult,
+} from "../types";
 import { computeIsolines } from "./isolines";
 
 /**
@@ -36,6 +46,9 @@ interface Props {
   // 粒子軌道トレース結果 (Trace 実行前は null)
   traceResult: TraceResult | null;
   showTrajectories: boolean;
+  // PICライブ表示 (started の mesh + 最新 frame)。実行中〜done後の最終フレームまで非null。
+  // 存在する間は既存の Solve 結果表示より優先して描画する
+  picFrame: PicLiveFrame | null;
   onSelectRegion: (id: string | null) => void;
   onDeleteRegion: (id: string) => void;
   onAddRegion: (geom: Point[] | CircleShape) => void;
@@ -251,6 +264,7 @@ export default function CadCanvas({
   emitter,
   traceResult,
   showTrajectories,
+  picFrame,
   onSelectRegion,
   onDeleteRegion,
   onAddRegion,
@@ -362,9 +376,47 @@ export default function CadCanvas({
     }
     ctx.stroke();
 
+    // PICライブ表示: φ (節点値) を既存の電位カラーマップと同じ経路で描画し、
+    // 粒子を点描画する (電子=シアン、イオン=オレンジ)。実行中〜done後の最終フレームまで
+    // Solve/Mesh 側の表示より優先する。フレームごとに v_min/v_max を再計算する
+    if (picFrame) {
+      const { nodes, triangles } = picFrame.mesh;
+      const phi = picFrame.phi;
+      let phiMin = Infinity;
+      let phiMax = -Infinity;
+      for (const v of phi) {
+        if (v < phiMin) phiMin = v;
+        if (v > phiMax) phiMax = v;
+      }
+      const range = phiMax - phiMin || 1;
+      for (let i = 0; i < triangles.length; i++) {
+        const [a, b, c] = triangles[i];
+        const t = ((phi[a] + phi[b] + phi[c]) / 3 - phiMin) / range;
+        ctx.fillStyle = colormap(t);
+        ctx.beginPath();
+        ctx.moveTo(sx(nodes[a][0]), sy(nodes[a][1]));
+        ctx.lineTo(sx(nodes[b][0]), sy(nodes[b][1]));
+        ctx.lineTo(sx(nodes[c][0]), sy(nodes[c][1]));
+        ctx.closePath();
+        ctx.fill();
+      }
+
+      // 粒子 (1〜2px の小さな矩形。多数点でも軽く保つため fillRect を使う)
+      const drawSpecies = (pts: Point[], color: string) => {
+        ctx.fillStyle = color;
+        for (const [px0, py0] of pts) {
+          const px = sx(px0);
+          const py = sy(py0);
+          ctx.fillRect(px - 0.8, py - 0.8, 1.6, 1.6);
+        }
+      };
+      drawSpecies(picFrame.particles.electron, "#4dd4ff"); // 電子: シアン
+      drawSpecies(picFrame.particles.ion, "#ff9d4d");       // イオン: オレンジ
+    }
+
     // Mesh ボタンで生成したメッシュのワイヤーフレーム (解析結果がない状態でも見えるようにする)。
-    // Solve 結果がある間は Solve 側の表示 (カラーマップ) を優先する
-    if (!result && meshResult) {
+    // Solve 結果がある間は Solve 側の表示 (カラーマップ) を優先する。PICライブ表示中は出さない
+    if (!picFrame && !result && meshResult) {
       const { nodes, triangles, region_of_triangle } = meshResult;
       const regionColor = (type: Region["type"]): string =>
         type === "conductor"
@@ -391,8 +443,8 @@ export default function CadCanvas({
       }
     }
 
-    // 解析結果: カラーマップ (fieldView に応じて電位 V または要素ごとの |E| を塗る)
-    if (result) {
+    // 解析結果: カラーマップ (fieldView に応じて電位 V または要素ごとの |E| を塗る)。PICライブ表示中は出さない
+    if (!picFrame && result) {
       const { nodes, triangles } = result.mesh;
       const { v, v_min, v_max, e_field, e_abs_max } = result;
 
@@ -776,8 +828,8 @@ export default function CadCanvas({
       ctx.fill();
     }
 
-    // カラーバー (右下、画面固定・縦グラデーション)
-    if (result) {
+    // カラーバー (右下、画面固定・縦グラデーション)。PICライブ表示中は Solve 結果のバーは出さない
+    if (!picFrame && result) {
       const barW = 16;
       const barH = 140;
       const marginRight = 10; // キャンバス右端からの余白
@@ -921,6 +973,7 @@ export default function CadCanvas({
     emitter,
     traceResult,
     showTrajectories,
+    picFrame,
   ]);
 
   // Space キーの追跡 (入力欄にフォーカス中は無視)

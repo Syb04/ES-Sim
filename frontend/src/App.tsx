@@ -5,6 +5,8 @@ import type { FieldView, Tool } from "./canvas/CadCanvas";
 import { CommitNumberInput, CommitTextInput } from "./CommitInput";
 import ProfilePanel from "./panels/ProfilePanel";
 import ParticlePanel from "./panels/ParticlePanel";
+import PicPanel from "./panels/PicPanel";
+import { PicClient } from "./picClient";
 import { useHistory } from "./useHistory";
 import { mToMm, mmToM } from "./units";
 import type {
@@ -12,12 +14,18 @@ import type {
   Health,
   MeshResult,
   ParticleSettings,
+  PicDiag,
+  PicFrameMsg,
+  PicLiveFrame,
+  PicSettings,
+  PicStartedMsg,
   Point,
   Project,
   Region,
   RegionType,
   SolveResult,
   TraceResult,
+  VoltageRf,
 } from "./types";
 
 // 粒子パネルの既定値 (project.particles が未設定の場合の初期表示に使う)
@@ -36,6 +44,26 @@ const DEFAULT_PARTICLES: ParticleSettings = {
   n_steps: 2000,
   save_every: 10,
 };
+
+// PIC設定の既定値 (project.pic が未設定の場合の初期表示に使う)
+const DEFAULT_PIC: PicSettings = {
+  initial_plasma: null,
+  injection: null,
+  n_macro: 20000,
+  dt: null,
+  n_steps: 2000,
+  frame_every: 20,
+};
+
+// RF重畳電圧の既定値 (13.56MHz の CCP を想定)
+const DEFAULT_VOLTAGE_RF: VoltageRf = { amplitude: 100.0, freq_hz: 13.56e6, phase_deg: 0.0 };
+
+// pic.injection.emitter は常にフェーズ2 (粒子) パネルの現在のエミッタ設定で上書きしてから
+// 保存/送信する (PicPanel 側では編集用の複製を持たず、都度ここで同期する)
+function withInjectionEmitter(pic: PicSettings, emitter: ParticleSettings["emitter"]): PicSettings {
+  if (!pic.injection) return pic;
+  return { ...pic, injection: { ...pic.injection, emitter } };
+}
 
 // フェーズ0 のサンプル (examples/parallel_plates.json と同内容)。
 // これを初期値として、以降は project state を編集していく。
@@ -96,6 +124,20 @@ export default function App() {
   const [particles, setParticles] = useState<ParticleSettings>(DEFAULT_PARTICLES);
   const [traceResult, setTraceResult] = useState<TraceResult | null>(null);
   const [showTrajectories, setShowTrajectories] = useState(true);
+
+  // PIC設定 (particles と同様、Undo/Redo履歴には積まない。保存/読込 (project.pic) の対象ではある)
+  const [pic, setPic] = useState<PicSettings>(DEFAULT_PIC);
+  const [picRunning, setPicRunning] = useState(false);
+  const [picStarted, setPicStarted] = useState<PicStartedMsg | null>(null);
+  const [picFrame, setPicFrame] = useState<PicFrameMsg | null>(null);
+  const [picHistory, setPicHistory] = useState<PicDiag[]>([]);
+  const [picError, setPicError] = useState<string | null>(null);
+  const picClientRef = useRef<PicClient | null>(null);
+
+  // アンマウント時に WebSocket 接続を確実に閉じる
+  useEffect(() => {
+    return () => picClientRef.current?.close();
+  }, []);
 
   useEffect(() => {
     const check = () => api.health().then(setHealth).catch(() => setHealth(null));
@@ -208,6 +250,37 @@ export default function App() {
     }
   };
 
+  // PIC開始: WebSocket接続を張り、project.pic (エミッタはフェーズ2の設定と同期) を送信する
+  const runPicStart = () => {
+    setPicError(null);
+    setPicStarted(null);
+    setPicFrame(null);
+    setPicHistory([]);
+    setPicRunning(true);
+    const client = new PicClient({
+      onStarted: (msg) => setPicStarted(msg),
+      onFrame: (msg) => {
+        setPicFrame(msg);
+        setPicHistory((h) => [...h, msg.diag]);
+      },
+      onDone: (msg) => {
+        setPicHistory(msg.history);
+        setPicRunning(false);
+      },
+      onError: (detail) => {
+        setPicError(detail);
+        setPicRunning(false);
+      },
+      onClose: () => setPicRunning(false),
+    });
+    picClientRef.current = client;
+    client.start({ ...project, pic: withInjectionEmitter(pic, particles.emitter) });
+  };
+
+  const runPicStop = () => {
+    picClientRef.current?.stop();
+  };
+
   // エミッタ配置ツール (CadCanvas) からの確定通知。kind/n 等はそのまま維持し p1/p2 のみ更新する
   const setEmitterPoints = (p1: Point, p2: Point) => {
     setParticles((prev) => ({ ...prev, emitter: { ...prev.emitter, p1, p2 } }));
@@ -230,9 +303,9 @@ export default function App() {
   };
 
   // --- 境界条件 (4辺: 0=下,1=右,2=上,3=左) ---
-  const edgeState = (edgeIndex: number): { dirichlet: boolean; voltage: number } => {
+  const edgeState = (edgeIndex: number): { dirichlet: boolean; voltage: number; voltageRf?: VoltageRf } => {
     const b = project.geometry.boundaries.find((b) => b.edges.includes(edgeIndex));
-    return b ? { dirichlet: true, voltage: b.voltage } : { dirichlet: false, voltage: 0 };
+    return b ? { dirichlet: true, voltage: b.voltage, voltageRf: b.voltage_rf } : { dirichlet: false, voltage: 0 };
   };
 
   const setEdgeNeumann = (edgeIndex: number) => {
@@ -255,6 +328,20 @@ export default function App() {
         )
       : [...p.geometry.boundaries, { edges: [edgeIndex], type: "dirichlet" as const, voltage }];
     commitProject({ ...p, geometry: { ...p.geometry, boundaries } });
+  };
+
+  // 境界条件のRF重畳設定 (対象エッジが Dirichlet でない場合は何もしない)
+  const setEdgeVoltageRf = (edgeIndex: number, voltage_rf: VoltageRf | undefined) => {
+    const p = projectRef.current;
+    commitProject({
+      ...p,
+      geometry: {
+        ...p.geometry,
+        boundaries: p.geometry.boundaries.map((b) =>
+          b.edges.includes(edgeIndex) ? { ...b, voltage_rf } : b,
+        ),
+      },
+    });
   };
 
   // --- メッシュ ---
@@ -385,9 +472,9 @@ export default function App() {
   };
 
   // --- 保存/読込 ---
-  // particles は history 管理外の別 state のため、保存時にここで project へ合成する
+  // particles / pic は history 管理外の別 state のため、保存時にここで project へ合成する
   const saveProject = () => {
-    const toSave: Project = { ...project, particles };
+    const toSave: Project = { ...project, particles, pic: withInjectionEmitter(pic, particles.emitter) };
     const blob = new Blob([JSON.stringify(toSave, null, 2)], { type: "application/json" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
@@ -409,9 +496,11 @@ export default function App() {
         }
         // 型はバックエンドが信頼できるものを書き出す前提で信用する
         commitProject(obj as Project);
-        // particles は独立管理の state なので、読込んだファイルにあれば反映し、なければ既定値に戻す
+        // particles / pic は独立管理の state なので、読込んだファイルにあれば反映し、なければ既定値に戻す
         const loadedParticles = (obj as Project).particles;
         setParticles(loadedParticles ?? DEFAULT_PARTICLES);
+        const loadedPic = (obj as Project).pic;
+        setPic(loadedPic ?? DEFAULT_PIC);
         setSelectedRegionId(null);
         setError(null);
       } catch (err) {
@@ -423,6 +512,12 @@ export default function App() {
   };
 
   const selected = project.geometry.regions.find((r) => r.id === selectedRegionId) ?? null;
+
+  // PICライブ描画用ビュー (started の mesh + 最新 frame)。実行中〜done後の最終フレームまで保持する
+  const picLiveFrame: PicLiveFrame | null =
+    picStarted && picFrame
+      ? { mesh: picStarted.mesh, phi: picFrame.phi, particles: picFrame.particles }
+      : null;
 
   return (
     <div className="app">
@@ -543,6 +638,7 @@ export default function App() {
             emitter={particles.emitter}
             traceResult={traceResult}
             showTrajectories={showTrajectories}
+            picFrame={picLiveFrame}
             onSelectRegion={setSelectedRegionId}
             onDeleteRegion={deleteRegion}
             onAddRegion={addRegion}
@@ -597,9 +693,40 @@ export default function App() {
                     <option value="dirichlet">Dirichlet</option>
                   </select>
                   {st.dirichlet && (
-                    <CommitNumberInput value={st.voltage} onCommit={(v) => setEdgeDirichlet(i, v)} />
+                    <>
+                      <CommitNumberInput value={st.voltage} onCommit={(v) => setEdgeDirichlet(i, v)} />
+                      <label className="rf-check-inline">
+                        <input
+                          type="checkbox"
+                          checked={!!st.voltageRf}
+                          onChange={(e) =>
+                            setEdgeVoltageRf(i, e.target.checked ? st.voltageRf ?? DEFAULT_VOLTAGE_RF : undefined)
+                          }
+                        />
+                        RF
+                      </label>
+                    </>
                   )}
                 </div>
+                {st.dirichlet && st.voltageRf && (
+                  <div className="edge-rf-row">
+                    <CommitNumberInput
+                      className="rf-compact"
+                      value={st.voltageRf.amplitude}
+                      onCommit={(v) => setEdgeVoltageRf(i, { ...st.voltageRf!, amplitude: v })}
+                    />
+                    <CommitNumberInput
+                      className="rf-compact"
+                      value={st.voltageRf.freq_hz}
+                      onCommit={(v) => setEdgeVoltageRf(i, { ...st.voltageRf!, freq_hz: v })}
+                    />
+                    <CommitNumberInput
+                      className="rf-compact"
+                      value={st.voltageRf.phase_deg}
+                      onCommit={(v) => setEdgeVoltageRf(i, { ...st.voltageRf!, phase_deg: v })}
+                    />
+                  </div>
+                )}
               </div>
             );
           })}
@@ -696,13 +823,58 @@ export default function App() {
                 </>
               )}
               {selected.type === "conductor" && (
-                <label>
-                  電位 V [V]
-                  <CommitNumberInput
-                    value={selected.voltage ?? 0}
-                    onCommit={(v) => updateRegion(selected.id, { voltage: v })}
-                  />
-                </label>
+                <>
+                  <label>
+                    電位 V [V]
+                    <CommitNumberInput
+                      value={selected.voltage ?? 0}
+                      onCommit={(v) => updateRegion(selected.id, { voltage: v })}
+                    />
+                  </label>
+                  <label className="checkbox-row">
+                    <input
+                      type="checkbox"
+                      checked={!!selected.voltage_rf}
+                      onChange={(e) =>
+                        updateRegion(selected.id, {
+                          voltage_rf: e.target.checked ? selected.voltage_rf ?? DEFAULT_VOLTAGE_RF : undefined,
+                        })
+                      }
+                    />
+                    RF重畳
+                  </label>
+                  {selected.voltage_rf && (
+                    <>
+                      <label>
+                        振幅 [V]
+                        <CommitNumberInput
+                          value={selected.voltage_rf.amplitude}
+                          onCommit={(v) =>
+                            updateRegion(selected.id, { voltage_rf: { ...selected.voltage_rf!, amplitude: v } })
+                          }
+                        />
+                      </label>
+                      <label>
+                        周波数 [Hz]
+                        <CommitNumberInput
+                          value={selected.voltage_rf.freq_hz}
+                          onCommit={(v) =>
+                            updateRegion(selected.id, { voltage_rf: { ...selected.voltage_rf!, freq_hz: v } })
+                          }
+                        />
+                      </label>
+                      <label>
+                        位相 [deg]
+                        <CommitNumberInput
+                          value={selected.voltage_rf.phase_deg}
+                          onCommit={(v) =>
+                            updateRegion(selected.id, { voltage_rf: { ...selected.voltage_rf!, phase_deg: v } })
+                          }
+                        />
+                      </label>
+                    </>
+                  )}
+                </>
               )}
               {selected.type === "dielectric" && (
                 <label>
@@ -760,6 +932,20 @@ export default function App() {
             traceResult={traceResult}
             showTrajectories={showTrajectories}
             onToggleTrajectories={setShowTrajectories}
+          />
+
+          <PicPanel
+            pic={pic}
+            onChange={setPic}
+            emitter={particles.emitter}
+            canRun={!!health}
+            running={picRunning}
+            onStart={runPicStart}
+            onStop={runPicStop}
+            started={picStarted}
+            frame={picFrame}
+            history={picHistory}
+            error={picError}
           />
 
           {error && (

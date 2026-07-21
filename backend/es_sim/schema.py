@@ -25,12 +25,24 @@ class CircleShape(BaseModel):
     radius: float = Field(..., gt=0)
 
 
+class VoltageRF(BaseModel):
+    """RF 電圧成分 (フェーズ3)。V(t) = voltage + amplitude * sin(2π f t + phase)。
+
+    静電ソルブ (/solve) は従来通り直流分 voltage のみを使い、PIC のみが V(t) を使う。
+    """
+
+    amplitude: float
+    freq_hz: float = Field(..., gt=0)
+    phase_deg: float = 0.0
+
+
 class Region(BaseModel):
     id: str
     type: Literal["conductor", "dielectric", "charge"]
     polygon: list[Point] | None = Field(None, min_length=3)
     shape: CircleShape | None = None
-    voltage: float | None = None  # conductor: 電位 [V]
+    voltage: float | None = None  # conductor: 電位 [V] (直流分)
+    voltage_rf: VoltageRF | None = None  # conductor: RF 成分 (PIC のみ使用)
     eps_r: float = 1.0            # dielectric: 比誘電率
     rho: float = 0.0              # charge: 電荷密度 [C/m^3]
 
@@ -51,6 +63,7 @@ class BoundaryCondition(BaseModel):
     edges: list[int]
     type: Literal["dirichlet"] = "dirichlet"
     voltage: float = 0.0
+    voltage_rf: VoltageRF | None = None  # RF 成分 (PIC のみ使用)
 
 
 class Geometry(BaseModel):
@@ -124,6 +137,37 @@ class ParticleSettings(BaseModel):
     save_every: int = Field(10, gt=0)
 
 
+# ---- PIC (フェーズ3、仕様書 §9) ----------------------------------------------
+
+
+class InitialPlasma(BaseModel):
+    """初期プラズマの一様装荷。null なら初期装荷なし。"""
+
+    density: float = Field(..., gt=0, description="数密度 [m^-3] (奥行き1m換算)")
+    te_ev: float = Field(2.0, ge=0, description="電子温度 kTe [eV]")
+    ti_ev: float = Field(0.03, ge=0, description="イオン温度 kTi [eV]")
+    ion_mass_amu: float = Field(40.0, gt=0, description="イオン質量 [amu] (Ar+ = 40)")
+    immobile_ions: bool = False  # true でイオン固定 (検証用)
+    seed: int = 0
+
+
+class PicInjection(BaseModel):
+    """エミッタからの定常注入。電流 [A/m] を毎ステップの実電荷として等分注入する。"""
+
+    emitter: Emitter
+    species: Literal["electron", "ion"] = "electron"
+    current_a_per_m: float = Field(..., gt=0)
+
+
+class PicSettings(BaseModel):
+    initial_plasma: InitialPlasma | None = None
+    injection: PicInjection | None = None
+    n_macro: int = Field(20000, gt=0, description="種ごとの初期マクロ粒子数の目安")
+    dt: float | None = Field(None, description="秒。None なら 0.1/ωpe (初期密度から)")
+    n_steps: int = Field(2000, gt=0)
+    frame_every: int = Field(20, gt=0, description="フレーム送出間隔 (ステップ)")
+
+
 class Project(BaseModel):
     version: int = 1
     unit: Literal["m", "mm"] = "m"
@@ -131,6 +175,7 @@ class Project(BaseModel):
     mesh: MeshSettings
     solver: SolverSettings = SolverSettings()
     particles: ParticleSettings | None = None
+    pic: PicSettings | None = None
 
 
 # ---- API レスポンス ----------------------------------------------------------
