@@ -65,13 +65,30 @@ button.secondary { background: var(--panel); border: 1px solid var(--border); co
 
 .side {
   width: 280px; background: var(--panel); border-left: 1px solid var(--border);
-  padding: 12px; font-size: 13px; overflow-y: auto;
+  font-size: 13px; display: flex; flex-direction: column; min-height: 0;
 }
 .side h2 { font-size: 13px; color: var(--muted); margin: 10px 0 6px; }
 .side h2:first-child { margin-top: 0; }
 .side .kv { display: flex; justify-content: space-between; padding: 2px 0; }
 .side .kv span:last-child { font-variant-numeric: tabular-nums; }
 .side .error { color: #e07070; word-break: break-all; }
+
+/* サイドパネル最上部 (保存/読込、全タブ共通)。スクロールしても常に見える */
+.side-top { flex: none; padding: 12px 12px 0; }
+.side-top .actions { margin: 0 0 8px; }
+
+/* タブバー (静電場/粒子追跡/PIC)。パネル上部に固定し、選択中タブを明示する */
+.side-tabbar { flex: none; display: flex; border-bottom: 1px solid var(--border); }
+.side-tab {
+  flex: 1; background: var(--panel); border: none; border-bottom: 2px solid transparent;
+  color: var(--muted); border-radius: 0; padding: 8px 4px; font-size: 12px; cursor: pointer;
+}
+.side-tab:hover { color: var(--text); }
+.side-tab.active { color: var(--text); border-bottom-color: var(--accent); font-weight: 600; }
+
+/* タブ内容 (スクロール領域)。非表示タブは display:none で切替え、アンマウントしない
+   (PIC実行中のWS接続やチャート履歴、他タブの編集状態をタブ切替をまたいで保持するため) */
+.side-tab-content { flex: 1; min-height: 0; overflow-y: auto; padding: 12px; }
 
 /* スケッチツールバー */
 .tool-toolbar {

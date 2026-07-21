@@ -2,8 +2,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "./api";
 import CadCanvas from "./canvas/CadCanvas";
 import type { FieldView, Tool } from "./canvas/CadCanvas";
-import { CommitNumberInput, CommitTextInput } from "./CommitInput";
 import ProfilePanel from "./panels/ProfilePanel";
+import FieldPanel from "./panels/FieldPanel";
 import ParticlePanel from "./panels/ParticlePanel";
 import PicPanel from "./panels/PicPanel";
 import { PicClient } from "./picClient";
@@ -55,9 +55,6 @@ const DEFAULT_PIC: PicSettings = {
   frame_every: 20,
 };
 
-// RF重畳電圧の既定値 (13.56MHz の CCP を想定)
-const DEFAULT_VOLTAGE_RF: VoltageRf = { amplitude: 100.0, freq_hz: 13.56e6, phase_deg: 0.0 };
-
 // pic.injection.emitter は常にフェーズ2 (粒子) パネルの現在のエミッタ設定で上書きしてから
 // 保存/送信する (PicPanel 側では編集用の複製を持たず、都度ここで同期する)
 function withInjectionEmitter(pic: PicSettings, emitter: ParticleSettings["emitter"]): PicSettings {
@@ -89,9 +86,6 @@ const SAMPLE: Project = {
   solver: { backend: "numpy" },
 };
 
-// 矩形 domain の外周エッジ順: 0=下, 1=右, 2=上, 3=左
-const EDGE_LABELS = ["下 (y=0)", "右 (x=w)", "上 (y=h)", "左 (x=0)"];
-
 export default function App() {
   const [project, setProjectState] = useState<Project>(SAMPLE);
   // project state の最新値を同期的に参照するための ref。
@@ -118,6 +112,10 @@ export default function App() {
   const [selectedRegionId, setSelectedRegionId] = useState<string | null>(null);
   const [profileLine, setProfileLine] = useState<[Point, Point] | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // サイドパネルのタブ (静電場/粒子追跡/PIC)。タブ切替は表示の切替のみで、
+  // 各タブの編集状態・実行状態 (PIC の WS 接続やチャート履歴など) はアンマウントされずに保持される
+  const [activeTab, setActiveTab] = useState<"field" | "particle" | "pic">("field");
 
   // 粒子設定 (エミッタ・積分パラメータ)。ジオメトリ編集とは独立に管理し、
   // 既存の Undo/Redo 履歴 (history) には積まない。保存/読込 (project.particles) の対象ではある
@@ -281,9 +279,17 @@ export default function App() {
     picClientRef.current?.stop();
   };
 
-  // エミッタ配置ツール (CadCanvas) からの確定通知。kind/n 等はそのまま維持し p1/p2 のみ更新する
+  // エミッタ配置ツール (CadCanvas) からの確定通知。kind/n 等はそのまま維持し p1/p2 のみ更新する。
+  // 線を確定したら「粒子追跡」タブに切替え、プロパティがすぐ見えるようにする
   const setEmitterPoints = (p1: Point, p2: Point) => {
     setParticles((prev) => ({ ...prev, emitter: { ...prev.emitter, p1, p2 } }));
+    setActiveTab("particle");
+  };
+
+  // キャンバス上で領域を選択したら「静電場」タブに切替える (選択解除時はタブ切替しない)
+  const selectRegionFromCanvas = (id: string | null) => {
+    setSelectedRegionId(id);
+    if (id !== null) setActiveTab("field");
   };
 
   // --- domain ---
@@ -639,7 +645,7 @@ export default function App() {
             traceResult={traceResult}
             showTrajectories={showTrajectories}
             picFrame={picLiveFrame}
-            onSelectRegion={setSelectedRegionId}
+            onSelectRegion={selectRegionFromCanvas}
             onDeleteRegion={deleteRegion}
             onAddRegion={addRegion}
             onMoveRegion={moveRegion}
@@ -658,302 +664,105 @@ export default function App() {
           )}
         </div>
         <div className="side">
-          <h2>ジオメトリ (domain)</h2>
-          <div className="field">
-            <span className="label">幅 [mm]</span>
-            <CommitNumberInput
-              value={mToMm(domainW)}
-              step="0.1"
-              onCommit={(w) => setDomainSize(mmToM(w), domainH)}
-            />
-          </div>
-          <div className="field">
-            <span className="label">高さ [mm]</span>
-            <CommitNumberInput
-              value={mToMm(domainH)}
-              step="0.1"
-              onCommit={(h) => setDomainSize(domainW, mmToM(h))}
-            />
+          <div className="side-top">
+            <div className="actions">
+              <button className="secondary" onClick={saveProject}>保存</button>
+              <button className="secondary" onClick={() => fileInputRef.current?.click()}>読込</button>
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept="application/json"
+                className="file-input"
+                onChange={loadProject}
+              />
+            </div>
           </div>
 
-          <h2>境界条件</h2>
-          {EDGE_LABELS.map((label, i) => {
-            const st = edgeState(i);
-            return (
-              <div className="edge-row" key={i}>
-                <span className="edge-label">{label}</span>
-                <div className="edge-controls">
-                  <select
-                    value={st.dirichlet ? "dirichlet" : "neumann"}
-                    onChange={(e) =>
-                      e.target.value === "dirichlet" ? setEdgeDirichlet(i, st.voltage) : setEdgeNeumann(i)
-                    }
-                  >
-                    <option value="neumann">なし (Neumann)</option>
-                    <option value="dirichlet">Dirichlet</option>
-                  </select>
-                  {st.dirichlet && (
-                    <>
-                      <CommitNumberInput value={st.voltage} onCommit={(v) => setEdgeDirichlet(i, v)} />
-                      <label className="rf-check-inline">
-                        <input
-                          type="checkbox"
-                          checked={!!st.voltageRf}
-                          onChange={(e) =>
-                            setEdgeVoltageRf(i, e.target.checked ? st.voltageRf ?? DEFAULT_VOLTAGE_RF : undefined)
-                          }
-                        />
-                        RF
-                      </label>
-                    </>
-                  )}
-                </div>
-                {st.dirichlet && st.voltageRf && (
-                  <div className="edge-rf-row">
-                    <CommitNumberInput
-                      className="rf-compact"
-                      value={st.voltageRf.amplitude}
-                      onCommit={(v) => setEdgeVoltageRf(i, { ...st.voltageRf!, amplitude: v })}
-                    />
-                    <CommitNumberInput
-                      className="rf-compact"
-                      value={st.voltageRf.freq_hz}
-                      onCommit={(v) => setEdgeVoltageRf(i, { ...st.voltageRf!, freq_hz: v })}
-                    />
-                    <CommitNumberInput
-                      className="rf-compact"
-                      value={st.voltageRf.phase_deg}
-                      onCommit={(v) => setEdgeVoltageRf(i, { ...st.voltageRf!, phase_deg: v })}
-                    />
-                  </div>
-                )}
-              </div>
-            );
-          })}
-
-          <h2>メッシュ</h2>
-          <div className="field">
-            <span className="label">サイズ [mm]</span>
-            <CommitNumberInput
-              value={mToMm(project.mesh.size)}
-              step="0.01"
-              onCommit={(v) => setMeshSize(mmToM(v))}
-            />
+          <div className="side-tabbar">
+            <button
+              className={`side-tab ${activeTab === "field" ? "active" : ""}`}
+              onClick={() => setActiveTab("field")}
+            >
+              静電場
+            </button>
+            <button
+              className={`side-tab ${activeTab === "particle" ? "active" : ""}`}
+              onClick={() => setActiveTab("particle")}
+            >
+              粒子追跡
+            </button>
+            <button
+              className={`side-tab ${activeTab === "pic" ? "active" : ""}`}
+              onClick={() => setActiveTab("pic")}
+            >
+              PIC
+            </button>
           </div>
-          {meshResult && (
-            <>
-              <div className="kv"><span>節点数</span><span>{meshResult.nodes.length}</span></div>
-              <div className="kv"><span>要素数</span><span>{meshResult.triangles.length}</span></div>
-            </>
-          )}
 
-          <h2>領域一覧 ({project.geometry.regions.length})</h2>
-          <div className="region-list">
-            {project.geometry.regions.map((r) => (
-              <div
-                key={r.id}
-                className={`region-item ${selectedRegionId === r.id ? "selected" : ""}`}
-                onClick={() => setSelectedRegionId(r.id)}
-              >
-                <span>{r.id}</span>
-                <span className="tag">{r.type}</span>
-              </div>
-            ))}
-            {project.geometry.regions.length === 0 && (
-              <div className="muted">(領域なし。ツールバーで作図してください)</div>
+          <div className="side-tab-content">
+            {/* 各タブは display:none で非表示化するのみでアンマウントしない。
+                これにより PIC 実行中の WebSocket 接続やチャート履歴、他タブの編集状態が
+                タブ切替をまたいで保持される */}
+            <div style={{ display: activeTab === "field" ? "block" : "none" }}>
+              <FieldPanel
+                project={project}
+                domainW={domainW}
+                domainH={domainH}
+                setDomainSize={setDomainSize}
+                edgeState={edgeState}
+                setEdgeNeumann={setEdgeNeumann}
+                setEdgeDirichlet={setEdgeDirichlet}
+                setEdgeVoltageRf={setEdgeVoltageRf}
+                setMeshSize={setMeshSize}
+                meshResult={meshResult}
+                selectedRegionId={selectedRegionId}
+                onSelectRegion={setSelectedRegionId}
+                selected={selected}
+                renameRegion={renameRegion}
+                setRegionType={setRegionType}
+                editRegionShape={editRegionShape}
+                updateRegion={updateRegion}
+                deleteRegion={deleteRegion}
+                result={result}
+              />
+            </div>
+
+            <div style={{ display: activeTab === "particle" ? "block" : "none" }}>
+              <ParticlePanel
+                particles={particles}
+                onChange={setParticles}
+                busy={busy}
+                canRun={!!health}
+                onTrace={runTrace}
+                traceResult={traceResult}
+                showTrajectories={showTrajectories}
+                onToggleTrajectories={setShowTrajectories}
+              />
+            </div>
+
+            <div style={{ display: activeTab === "pic" ? "block" : "none" }}>
+              <PicPanel
+                pic={pic}
+                onChange={setPic}
+                emitter={particles.emitter}
+                canRun={!!health}
+                running={picRunning}
+                onStart={runPicStart}
+                onStop={runPicStop}
+                started={picStarted}
+                frame={picFrame}
+                history={picHistory}
+                error={picError}
+              />
+            </div>
+
+            {error && (
+              <>
+                <h2>エラー</h2>
+                <div className="error">{error}</div>
+              </>
             )}
           </div>
-
-          {selected && (
-            <div className="region-edit">
-              <label>
-                ID
-                <CommitTextInput
-                  value={selected.id}
-                  onCommit={(newId) => renameRegion(selected.id, newId)}
-                />
-              </label>
-              <label>
-                種別
-                <select
-                  value={selected.type}
-                  onChange={(e) => setRegionType(selected.id, e.target.value as RegionType)}
-                >
-                  <option value="conductor">電極 (conductor)</option>
-                  <option value="dielectric">誘電体 (dielectric)</option>
-                  <option value="charge">空間電荷 (charge)</option>
-                </select>
-              </label>
-              {selected.shape && (
-                <>
-                  <label>
-                    中心 X [mm]
-                    <CommitNumberInput
-                      value={mToMm(selected.shape.center[0])}
-                      step="0.1"
-                      onCommit={(x) =>
-                        editRegionShape(selected.id, {
-                          ...selected.shape!,
-                          center: [mmToM(x), selected.shape!.center[1]],
-                        })
-                      }
-                    />
-                  </label>
-                  <label>
-                    中心 Y [mm]
-                    <CommitNumberInput
-                      value={mToMm(selected.shape.center[1])}
-                      step="0.1"
-                      onCommit={(y) =>
-                        editRegionShape(selected.id, {
-                          ...selected.shape!,
-                          center: [selected.shape!.center[0], mmToM(y)],
-                        })
-                      }
-                    />
-                  </label>
-                  <label>
-                    半径 [mm]
-                    <CommitNumberInput
-                      value={mToMm(selected.shape.radius)}
-                      step="0.1"
-                      onCommit={(radius) => editRegionShape(selected.id, { ...selected.shape!, radius: mmToM(radius) })}
-                    />
-                  </label>
-                </>
-              )}
-              {selected.type === "conductor" && (
-                <>
-                  <label>
-                    電位 V [V]
-                    <CommitNumberInput
-                      value={selected.voltage ?? 0}
-                      onCommit={(v) => updateRegion(selected.id, { voltage: v })}
-                    />
-                  </label>
-                  <label className="checkbox-row">
-                    <input
-                      type="checkbox"
-                      checked={!!selected.voltage_rf}
-                      onChange={(e) =>
-                        updateRegion(selected.id, {
-                          voltage_rf: e.target.checked ? selected.voltage_rf ?? DEFAULT_VOLTAGE_RF : undefined,
-                        })
-                      }
-                    />
-                    RF重畳
-                  </label>
-                  {selected.voltage_rf && (
-                    <>
-                      <label>
-                        振幅 [V]
-                        <CommitNumberInput
-                          value={selected.voltage_rf.amplitude}
-                          onCommit={(v) =>
-                            updateRegion(selected.id, { voltage_rf: { ...selected.voltage_rf!, amplitude: v } })
-                          }
-                        />
-                      </label>
-                      <label>
-                        周波数 [Hz]
-                        <CommitNumberInput
-                          value={selected.voltage_rf.freq_hz}
-                          onCommit={(v) =>
-                            updateRegion(selected.id, { voltage_rf: { ...selected.voltage_rf!, freq_hz: v } })
-                          }
-                        />
-                      </label>
-                      <label>
-                        位相 [deg]
-                        <CommitNumberInput
-                          value={selected.voltage_rf.phase_deg}
-                          onCommit={(v) =>
-                            updateRegion(selected.id, { voltage_rf: { ...selected.voltage_rf!, phase_deg: v } })
-                          }
-                        />
-                      </label>
-                    </>
-                  )}
-                </>
-              )}
-              {selected.type === "dielectric" && (
-                <label>
-                  比誘電率 εr
-                  <CommitNumberInput
-                    value={selected.eps_r ?? 1}
-                    onCommit={(v) => updateRegion(selected.id, { eps_r: v })}
-                  />
-                </label>
-              )}
-              {selected.type === "charge" && (
-                <label>
-                  電荷密度 ρ [C/m³]
-                  <CommitNumberInput
-                    value={selected.rho ?? 0}
-                    onCommit={(v) => updateRegion(selected.id, { rho: v })}
-                  />
-                </label>
-              )}
-              <button className="danger" onClick={() => deleteRegion(selected.id)}>
-                削除
-              </button>
-            </div>
-          )}
-
-          <div className="actions">
-            <button className="secondary" onClick={saveProject}>保存</button>
-            <button className="secondary" onClick={() => fileInputRef.current?.click()}>読込</button>
-            <input
-              ref={fileInputRef}
-              type="file"
-              accept="application/json"
-              className="file-input"
-              onChange={loadProject}
-            />
-          </div>
-
-          {result && (
-            <>
-              <h2>解析結果</h2>
-              <div className="kv"><span>節点数</span><span>{result.mesh.nodes.length}</span></div>
-              <div className="kv"><span>要素数</span><span>{result.mesh.triangles.length}</span></div>
-              <div className="kv"><span>V min/max</span><span>{result.v_min.toFixed(1)} / {result.v_max.toFixed(1)} V</span></div>
-              <div className="kv"><span>|E| max</span><span>{result.e_abs_max.toExponential(2)} V/m</span></div>
-              <div className="kv"><span>エネルギー</span><span>{result.energy.toExponential(3)} J/m</span></div>
-            </>
-          )}
-
-          <ParticlePanel
-            particles={particles}
-            onChange={setParticles}
-            busy={busy}
-            canRun={!!health}
-            onTrace={runTrace}
-            traceResult={traceResult}
-            showTrajectories={showTrajectories}
-            onToggleTrajectories={setShowTrajectories}
-          />
-
-          <PicPanel
-            pic={pic}
-            onChange={setPic}
-            emitter={particles.emitter}
-            canRun={!!health}
-            running={picRunning}
-            onStart={runPicStart}
-            onStop={runPicStop}
-            started={picStarted}
-            frame={picFrame}
-            history={picHistory}
-            error={picError}
-          />
-
-          {error && (
-            <>
-              <h2>エラー</h2>
-              <div className="error">{error}</div>
-            </>
-          )}
         </div>
       </div>
     </div>
