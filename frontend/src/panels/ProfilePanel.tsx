@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { api } from "../api";
+import { saveTextFile } from "../saveFile";
 import type { Point, Project, ProfileResult } from "../types";
 
 /**
@@ -217,13 +218,9 @@ export default function ProfilePanel({ project, p1, p2, onClose }: Props) {
       const e = data.e_abs[i];
       lines.push(`${data.s[i]},${v ?? ""},${e ?? ""}`);
     }
-    const blob = new Blob([lines.join("\n")], { type: "text/csv" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = "profile.csv";
-    a.click();
-    URL.revokeObjectURL(url);
+    saveTextFile("profile.csv", lines.join("\n"), "CSV", ["csv"]).catch((err) => {
+      setError(String(err));
+    });
   };
 
   return (

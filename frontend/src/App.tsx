@@ -10,6 +10,7 @@ import type { CyclePicField, PicResultField } from "./panels/PicPanel";
 import { PicClient } from "./picClient";
 import type { PicClientCallbacks } from "./picClient";
 import { useHistory } from "./useHistory";
+import { saveTextFile } from "./saveFile";
 import { toDiagArray } from "./types";
 import { mToMm, mmToM } from "./units";
 import type {
@@ -634,13 +635,9 @@ export default function App() {
   // particles / pic は history 管理外の別 state のため、保存時にここで project へ合成する
   const saveProject = () => {
     const toSave: Project = { ...project, particles, pic: withInjectionEmitter(pic, particles.emitter) };
-    const blob = new Blob([JSON.stringify(toSave, null, 2)], { type: "application/json" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = "project.json";
-    a.click();
-    URL.revokeObjectURL(url);
+    saveTextFile("project.json", JSON.stringify(toSave, null, 2), "JSON", ["json"]).catch((err) => {
+      setError(String(err));
+    });
   };
 
   const loadProject = (e: React.ChangeEvent<HTMLInputElement>) => {

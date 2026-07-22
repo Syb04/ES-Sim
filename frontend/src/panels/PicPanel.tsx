@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api";
+import { saveTextFile } from "../saveFile";
 import { CommitNumberInput, CommitTextInput } from "../CommitInput";
 import type {
   Emitter,
@@ -257,20 +258,20 @@ export default function PicPanel({
   // IEDF/IADF ヒストグラムのビン数 (既定60、変更で再ビニング。コレクタ設定自体ではないので project 保存対象外)
   const [collectorBins, setCollectorBins] = useState(60);
 
-  // コレクタ生サンプル (energy_ev, angle_deg, weight) をCSVでダウンロードする
+  // コレクタCSV保存の失敗を表示するためのローカルエラー状態
+  const [csvError, setCsvError] = useState<string | null>(null);
+
+  // コレクタ生サンプル (energy_ev, angle_deg, weight) をCSVで保存する
   const downloadCollectorCsv = () => {
     if (!collectorResult) return;
     const lines = ["energy_ev,angle_deg,weight"];
     for (let i = 0; i < collectorResult.energies_ev.length; i++) {
       lines.push(`${collectorResult.energies_ev[i]},${collectorResult.angles_deg[i]},${collectorResult.weights[i]}`);
     }
-    const blob = new Blob([lines.join("\n")], { type: "text/csv" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = "iedf_iadf.csv";
-    a.click();
-    URL.revokeObjectURL(url);
+    setCsvError(null);
+    saveTextFile("iedf_iadf.csv", lines.join("\n"), "CSV", ["csv"]).catch((err) => {
+      setCsvError(String(err));
+    });
   };
 
   return (
@@ -615,6 +616,7 @@ export default function PicPanel({
             color="#ffb84d"
             fixedRange={[-90, 90]}
           />
+          {csvError && <div className="error">{csvError}</div>}
           <div className="actions">
             <button className="secondary" onClick={downloadCollectorCsv}>
               CSV保存
