@@ -284,6 +284,15 @@ export default function CadCanvas({
 }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [view, setView] = useState<View | null>(null);
+  // キャンバス親要素のサイズ変化 (サイドパネル幅変更・ウィンドウリサイズ) で再描画する
+  const [resizeTick, setResizeTick] = useState(0);
+  useEffect(() => {
+    const el = canvasRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver(() => setResizeTick((t) => t + 1));
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
   const [cursor, setCursor] = useState<Point | null>(null);
   const [drawPts, setDrawPts] = useState<Point[]>([]);
   const dragRef = useRef<{ x: number; y: number } | null>(null);
@@ -983,6 +992,7 @@ export default function CadCanvas({
       ctx.strokeRect(0.5, 0.5, RULER_SIZE - 1, RULER_SIZE - 1);
     }
   }, [
+    resizeTick,
     project,
     result,
     meshResult,

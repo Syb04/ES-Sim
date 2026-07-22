@@ -111,6 +111,8 @@ export default function App() {
   const [gridSnap, setGridSnap] = useState(true);
   // ルーラー目盛りラベルのフォントサイズ (px)。プロジェクトファイルには保存しない表示設定
   const [rulerFontSize, setRulerFontSize] = useState(11);
+  // サイドパネル幅 (px)。リサイザのドラッグで変更する表示設定 (保存対象外)
+  const [sideWidth, setSideWidth] = useState(280);
   const [fieldView, setFieldView] = useState<FieldView>("v");
   const [showIsolines, setShowIsolines] = useState(false);
   const [showVectors, setShowVectors] = useState(false);
@@ -719,7 +721,30 @@ export default function App() {
             />
           )}
         </div>
-        <div className="side">
+        {/* サイドパネル幅のリサイザ (ドラッグで変更、ダブルクリックで既定幅に戻す) */}
+        <div
+          className="side-resizer"
+          onMouseDown={(e) => {
+            e.preventDefault();
+            const startX = e.clientX;
+            const startW = sideWidth;
+            const onMove = (ev: MouseEvent) => {
+              const w = startW + (startX - ev.clientX);
+              setSideWidth(Math.min(560, Math.max(220, w)));
+            };
+            const onUp = () => {
+              window.removeEventListener("mousemove", onMove);
+              window.removeEventListener("mouseup", onUp);
+              document.body.style.cursor = "";
+            };
+            document.body.style.cursor = "col-resize";
+            window.addEventListener("mousemove", onMove);
+            window.addEventListener("mouseup", onUp);
+          }}
+          onDoubleClick={() => setSideWidth(280)}
+          title="ドラッグで幅を変更 / ダブルクリックで既定幅"
+        />
+        <div className="side" style={{ width: sideWidth }}>
           <div className="side-top">
             <div className="actions">
               <button className="secondary" onClick={saveProject}>保存</button>

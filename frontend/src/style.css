@@ -77,8 +77,15 @@ button.secondary { background: var(--panel); border: 1px solid var(--border); co
   font-variant-numeric: tabular-nums;
 }
 
+/* サイドパネル幅リサイザ */
+.side-resizer {
+  flex: none; width: 5px; cursor: col-resize;
+  background: var(--border);
+}
+.side-resizer:hover { background: var(--accent); }
+
 .side {
-  width: 280px; background: var(--panel); border-left: 1px solid var(--border);
+  flex: none; width: 280px; background: var(--panel); border-left: 1px solid var(--border);
   font-size: 13px; display: flex; flex-direction: column; min-height: 0;
 }
 .side h2 { font-size: 13px; color: var(--muted); margin: 10px 0 6px; }
