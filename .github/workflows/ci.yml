@@ -1,0 +1,43 @@
+# ES-Sim CI — push / PR ごとにテストとビルド検証を実行する
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  backend-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install gmsh system libs
+        run: sudo apt-get update && sudo apt-get install -y -q libglu1-mesa libxft2 libxrender1 libxext6 libx11-6 libgl1 libxcursor1 libxinerama1
+      - name: Install backend deps
+        working-directory: backend
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+      - name: pytest
+        working-directory: backend
+        run: python -m pytest tests/ -q
+
+  frontend-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: npm ci
+        working-directory: frontend
+        run: npm ci
+      - name: Type check + build
+        working-directory: frontend
+        run: npx tsc && npx vite build

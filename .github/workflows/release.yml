@@ -1,0 +1,94 @@
+# ES-Sim 配布ビルド (Windows インストーラ) — GitHub Actions
+#
+# トリガー:
+#   - `v*` タグの push (例: v0.1.0) → ビルドして GitHub Release に添付
+#   - 手動実行 (workflow_dispatch)   → ビルドして Artifacts にのみ保存 (Release は作らない)
+#
+# 構成: windows-latest 上で
+#   Python + PyInstaller でバックエンドを exe 化 (scripts/build_backend.ps1)
+#   → Node + Rust で Tauri をビルド (サイドカー同梱)
+#   → NSIS/MSI インストーラを Release へアップロード
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write  # Release 作成に必要
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # ---- バックエンド (PyInstaller) ----
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install backend deps + PyInstaller
+        working-directory: backend
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .
+          pip install pyinstaller
+      - name: Build backend exe (sidecar)
+        run: powershell -ExecutionPolicy Bypass -File scripts\build_backend.ps1
+      - name: Smoke test backend exe
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem frontend\src-tauri\binaries\es-sim-backend-*.exe | Select-Object -First 1
+          $proc = Start-Process -FilePath $exe.FullName -ArgumentList "--port","8317" -PassThru
+          try {
+            $ok = $false
+            foreach ($i in 1..60) {
+              Start-Sleep -Seconds 2
+              try {
+                $r = Invoke-RestMethod -Uri "http://127.0.0.1:8317/health" -TimeoutSec 2
+                if ($r.status -eq "ok") { $ok = $true; break }
+              } catch {}
+            }
+            if (-not $ok) { throw "backend /health が応答しません" }
+            Write-Host "backend health OK: $($r | ConvertTo-Json -Compress)"
+          } finally {
+            Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+          }
+
+      # ---- フロントエンド (Tauri) ----
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: frontend/src-tauri
+      - name: npm ci
+        working-directory: frontend
+        run: npm ci
+      - name: Tauri build
+        working-directory: frontend
+        run: npm run tauri build
+
+      # ---- 成果物 ----
+      - name: Collect installers
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path release-out | Out-Null
+          Get-ChildItem -Recurse frontend\src-tauri\target\release\bundle -Include *.exe,*.msi |
+            Copy-Item -Destination release-out
+          Get-ChildItem release-out
+      - uses: actions/upload-artifact@v4
+        with:
+          name: es-sim-windows-installers
+          path: release-out/*
+      - name: Create GitHub Release (tag push のみ)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release-out/*
+          generate_release_notes: true

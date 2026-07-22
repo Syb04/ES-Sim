@@ -105,3 +105,14 @@ bash ../scripts/build_backend.sh     # dist/es-sim-backend → binaries/es-sim-b
 ./dist/es-sim-backend --port 8317 &  # /health, /solve が応答することを確認
 cd ../frontend/src-tauri && cargo check
 ```
+
+## GitHub Actions によるリリースビルド
+
+`v*` タグを push すると GitHub Actions (windows-latest) が上記手順を自動実行し、
+生成されたインストーラ (NSIS `.exe` / `.msi`) を GitHub Release に添付する
+(`.github/workflows/release.yml`)。手動実行 (workflow_dispatch) では Artifacts にのみ保存される。
+
+```powershell
+git tag v0.1.0
+git push origin v0.1.0
+```
