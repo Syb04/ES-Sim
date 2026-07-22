@@ -221,6 +221,17 @@ async def _run_pic_session(ws: WebSocket, project_dict: dict) -> None:
                     for name, snaps in c["particles"].items()
                 },
             }
+        # IEDF/IADF コレクタ (prompts/30)。collector 有効時のみ添付する
+        if sim.collector_result is not None:
+            cr = sim.collector_result
+            done_msg["collector"] = {
+                "count": cr["count"],
+                "total_weight": cr["total_weight"],
+                "energies_ev": cr["energies_ev"].tolist(),
+                "angles_deg": cr["angles_deg"].tolist(),
+                "weights": cr["weights"].tolist(),
+                "truncated": cr["truncated"],
+            }
         await ws.send_json(done_msg)
     except Exception as exc:
         try:

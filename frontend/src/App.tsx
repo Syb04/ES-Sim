@@ -18,6 +18,7 @@ import type {
   Health,
   MeshResult,
   ParticleSettings,
+  PicCollectorResult,
   PicCycle,
   PicDiag,
   PicFields,
@@ -148,6 +149,9 @@ export default function App() {
   const [picResultField, setPicResultField] = useState<PicResultField>("live");
   const [picLogScale, setPicLogScale] = useState(false);
   const picClientRef = useRef<PicClient | null>(null);
+
+  // done メッセージで受け取った IEDF/IADF コレクタの記録結果。新規実行開始時にリセットする
+  const [picCollector, setPicCollector] = useState<PicCollectorResult | null>(null);
 
   // RF 1周期の位相分解データ (done で受信、RFなし/phase_bins=0 では null)。
   // 周期アニメーションプレイヤー (PicPanel) の状態一式も新規実行開始時にリセットする
@@ -304,6 +308,8 @@ export default function App() {
     setCyclePlaying(false);
     setCycleBinIndex(0);
     setCycleShowParticles(true);
+    // IEDF/IADF コレクタ結果も新規実行開始時にリセットする (前回 done の残骸を消す)
+    setPicCollector(null);
     const client = new PicClient({
       onStarted: (msg) => setPicStarted(msg),
       onFrame: (msg) => {
@@ -316,6 +322,7 @@ export default function App() {
         setPicHistory(toDiagArray(msg.history));
         setPicFields(msg.fields ?? null);
         setPicCycle(msg.cycle ?? null);
+        setPicCollector(msg.collector ?? null);
         setPicRunning(false);
       },
       onError: (detail) => {
@@ -337,6 +344,13 @@ export default function App() {
   const setEmitterPoints = (p1: Point, p2: Point) => {
     setParticles((prev) => ({ ...prev, emitter: { ...prev.emitter, p1, p2 } }));
     setActiveTab("particle");
+  };
+
+  // コレクタ配置ツール (CadCanvas) からの確定通知。tol は既存設定があれば維持する。
+  // 配置したら PIC 設定の collector を更新し、PIC タブへ切替える
+  const setCollectorPoints = (p1: Point, p2: Point) => {
+    setPic((prev) => ({ ...prev, collector: { p1, p2, tol: prev.collector?.tol ?? null } }));
+    setActiveTab("pic");
   };
 
   // キャンバス上で領域を選択したら「静電場」タブに切替える (選択解除時はタブ切替しない)
@@ -609,6 +623,11 @@ export default function App() {
 
   const selected = project.geometry.regions.find((r) => r.id === selectedRegionId) ?? null;
 
+  // 配置済み IEDF/IADF コレクタ線分 (CadCanvas への常時オーバーレイ表示用)
+  const collectorLine: [Point, Point] | null = pic.collector
+    ? [pic.collector.p1, pic.collector.p2]
+    : null;
+
   // PICライブ描画用ビュー (started の mesh + 最新 frame)。実行中〜done後の最終フレームまで保持する
   const picLiveFrame: PicLiveFrame | null =
     picStarted && picFrame
@@ -739,6 +758,9 @@ export default function App() {
         <button className={`tool ${tool === "emitter" ? "active" : ""}`} onClick={() => setTool("emitter")}>
           エミッタ
         </button>
+        <button className={`tool ${tool === "collector" ? "active" : ""}`} onClick={() => setTool("collector")}>
+          コレクタ
+        </button>
         <div className="sep" />
         <label className="snap">
           <input
@@ -803,6 +825,7 @@ export default function App() {
             showIsolines={showIsolines}
             showVectors={showVectors}
             profileLine={profileLine}
+            collectorLine={collectorLine}
             emitter={particles.emitter}
             traceResult={traceResult}
             showTrajectories={showTrajectories}
@@ -816,6 +839,7 @@ export default function App() {
             onEditRegionShape={editRegionShape}
             onProfileLine={(p1, p2) => setProfileLine([p1, p2])}
             onSetEmitter={setEmitterPoints}
+            onSetCollector={setCollectorPoints}
           />
           {profileLine && (
             <ProfilePanel
@@ -958,6 +982,7 @@ export default function App() {
                 onCycleFpsChange={setCycleFps}
                 cycleShowParticles={cycleShowParticles}
                 onCycleShowParticlesChange={setCycleShowParticles}
+                collectorResult={picCollector}
               />
             </div>
 

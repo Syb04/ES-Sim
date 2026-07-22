@@ -244,6 +244,18 @@ class MccSettings(BaseModel):
     ion_energy_frame: Literal["com", "lab"] = "lab"
 
 
+class Collector(BaseModel):
+    """IEDF/IADF コレクタ線分 (prompts/30)。null なら無効。
+
+    平均区間中にコレクタ線分の近傍 (距離 tol 以内・線分区間内) で吸収された
+    イオンのエネルギー・入射角・重みを記録する (ウエハ面の IEDF/IADF 取得用)。
+    """
+
+    p1: Point
+    p2: Point
+    tol: float | None = Field(None, gt=0, description="判定距離 [m]。None なら mesh.size と同値")
+
+
 class PicSettings(BaseModel):
     initial_plasma: InitialPlasma | None = None
     injection: PicInjection | None = None
@@ -259,6 +271,8 @@ class PicSettings(BaseModel):
     # RF 1周期の位相分解データ (アニメーション用) の位相ビン数 (prompts/28)。
     # 0 で無効。RF (voltage_rf) が未設定の場合も無効
     phase_bins: int = Field(40, ge=0)
+    # IEDF/IADF コレクタ線分 (prompts/30)。null なら無効
+    collector: Collector | None = None
     # 鏡面反射する domain 外周エッジ番号のリスト (エッジ i は頂点 i → i+1)。
     # 到達粒子は吸収せず法線速度成分を反転して境界内へ折り返す (壁カウンタに含めない)。
     # 当該エッジは境界条件なし (Neumann) を想定。2D ストリップで 1D 問題を模擬する用途

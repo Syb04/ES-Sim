@@ -22,7 +22,7 @@ import { computeIsolines } from "./isolines";
  * - 粒子軌道: traceResult をシアン系の半透明ポリラインで描画 (吸収位置は小さな点)
  */
 
-export type Tool = "select" | "polyline" | "rect" | "circle" | "profile" | "emitter";
+export type Tool = "select" | "polyline" | "rect" | "circle" | "profile" | "emitter" | "collector";
 
 // カラーマップの対象: 電位 V か |E|
 export type FieldView = "v" | "e_abs";
@@ -59,6 +59,8 @@ interface Props {
   showIsolines: boolean;
   showVectors: boolean;
   profileLine: [Point, Point] | null;
+  // IEDF/IADF コレクタ線分 (常時オーバーレイ表示の対象)。未配置なら null
+  collectorLine: [Point, Point] | null;
   // 粒子エミッタ (常時オーバーレイ表示の対象)。粒子パネル側で必ず既定値を持つため常に非 null
   emitter: Emitter;
   // 粒子軌道トレース結果 (Trace 実行前は null)
@@ -78,6 +80,7 @@ interface Props {
   onEditRegionShape: (id: string, shape: CircleShape) => void;
   onProfileLine: (p1: Point, p2: Point) => void;
   onSetEmitter: (p1: Point, p2: Point) => void;
+  onSetCollector: (p1: Point, p2: Point) => void;
 }
 
 interface View {
@@ -289,6 +292,7 @@ export default function CadCanvas({
   showIsolines,
   showVectors,
   profileLine,
+  collectorLine,
   emitter,
   traceResult,
   showTrajectories,
@@ -302,6 +306,7 @@ export default function CadCanvas({
   onEditRegionShape,
   onProfileLine,
   onSetEmitter,
+  onSetCollector,
 }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [view, setView] = useState<View | null>(null);
@@ -887,6 +892,21 @@ export default function CadCanvas({
       ctx.beginPath();
       ctx.arc(sx(x0e), sy(y0e), 3, 0, Math.PI * 2);
       ctx.fill();
+    } else if (tool === "collector" && drawPts.length === 1 && cursor) {
+      // コレクタ配置ツールのラバーバンド (黄系破線、プロファイルと同じ2点クリックUX)
+      const [x0c, y0c] = drawPts[0];
+      const [x1c, y1c] = cursor;
+      ctx.strokeStyle = "#ffd400";
+      ctx.setLineDash([4, 3]);
+      ctx.beginPath();
+      ctx.moveTo(sx(x0c), sy(y0c));
+      ctx.lineTo(sx(x1c), sy(y1c));
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.fillStyle = "#ffd400";
+      ctx.beginPath();
+      ctx.arc(sx(x0c), sy(y0c), 3, 0, Math.PI * 2);
+      ctx.fill();
     }
 
     // 確定済みプロファイル線のオーバーレイ (白破線 + 端点マーカー)
@@ -905,6 +925,27 @@ export default function CadCanvas({
         ctx.beginPath();
         ctx.arc(sx(px), sy(py), 4, 0, Math.PI * 2);
         ctx.fill();
+      }
+    }
+
+    // 配置済み IEDF/IADF コレクタ線分のオーバーレイ (常時表示、黄系太めの線分+両端マーカー)
+    if (collectorLine) {
+      const [[xc0, yc0], [xc1, yc1]] = collectorLine;
+      ctx.strokeStyle = "#ffd400";
+      ctx.lineWidth = 3.5;
+      ctx.setLineDash([]);
+      ctx.beginPath();
+      ctx.moveTo(sx(xc0), sy(yc0));
+      ctx.lineTo(sx(xc1), sy(yc1));
+      ctx.stroke();
+      ctx.fillStyle = "#ffd400";
+      ctx.strokeStyle = "#1b1e24";
+      ctx.lineWidth = 1;
+      for (const [px, py] of collectorLine) {
+        ctx.beginPath();
+        ctx.arc(sx(px), sy(py), 5, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
       }
     }
 
@@ -1097,6 +1138,7 @@ export default function CadCanvas({
     vertexPreviewPolygon,
     shapeRadiusPreview,
     profileLine,
+    collectorLine,
     rulerFontSize,
     emitter,
     traceResult,
@@ -1372,6 +1414,14 @@ export default function CadCanvas({
             } else {
               const p1 = drawPts[0];
               onSetEmitter(p1, pt);
+              setDrawPts([]);
+            }
+          } else if (tool === "collector") {
+            if (drawPts.length === 0) {
+              setDrawPts([pt]);
+            } else {
+              const p1 = drawPts[0];
+              onSetCollector(p1, pt);
               setDrawPts([]);
             }
           }

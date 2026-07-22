@@ -47,6 +47,9 @@ from .schema import PicSettings, Project
 # フレーム送出時の種ごとの最大粒子数 (間引き)
 MAX_FRAME_PARTICLES = 2000
 
+# IEDF/IADF コレクタのサンプル上限 (超過分は count/total_weight のみ計上、prompts/30)
+COLLECTOR_MAX_SAMPLES = 50000
+
 # walk 並列実行用の共有ワーカースレッド (遅延生成、プロセスで1本)
 _WALK_POOL: ThreadPoolExecutor | None = None
 
@@ -281,6 +284,35 @@ class PicSimulation:
         self._snap_t_start = math.inf
         # run_batch 完了時の位相分解データ (cycle_data() の結果)
         self.cycle: dict | None = None
+
+        # ---- IEDF/IADF コレクタ (prompts/30) ----------------------------------
+        # 平均区間中に吸収されたイオンのうち、コレクタ線分から距離 tol 以内かつ
+        # 線分区間内で吸収されたものを記録する (collector=null なら完全に無効)
+        self._collector = self.pic.collector
+        self.collector_result: dict | None = None
+        if self._collector is not None:
+            p1 = np.asarray(self._collector.p1, dtype=np.float64)
+            p2 = np.asarray(self._collector.p2, dtype=np.float64)
+            seg = p2 - p1
+            seg_len = float(np.hypot(seg[0], seg[1]))
+            if seg_len <= 0.0:
+                raise ValueError("collector の p1 と p2 が同一点です")
+            self._col_p1 = p1
+            self._col_len = seg_len
+            self._col_tan = seg / seg_len                              # 接線 (p1→p2)
+            self._col_nrm = np.array([-self._col_tan[1], self._col_tan[0]])  # 法線
+            self._col_tol = (
+                self._collector.tol
+                if self._collector.tol is not None
+                else project.mesh.size
+            )
+            # チャンク追記 (numpy 配列のリスト) で高速に記録する
+            self._col_e: list[np.ndarray] = []
+            self._col_a: list[np.ndarray] = []
+            self._col_w: list[np.ndarray] = []
+            self._col_count = 0        # 記録したマクロイオン数 (総数)
+            self._col_weight = 0.0     # 総実イオン数 [1/m]
+            self._col_samples = 0      # 保存済みサンプル数 (上限 COLLECTOR_MAX_SAMPLES)
         # 節点集中面積 = Σ隣接要素面積/3 (averaged_density の規格化に使う)。
         # 周期境界では正準節点番号で積むため、スレーブ節点の面積は 0 になる
         self._node_area = np.bincount(
@@ -511,6 +543,90 @@ class PicSimulation:
             weights=contrib.ravel(),
             minlength=self.n_nodes,
         )
+
+    def _collect_ions(
+        self,
+        sp: PicSpecies,
+        x_new: np.ndarray,
+        v_new: np.ndarray,
+        absorbed: np.ndarray,
+        b_elem: np.ndarray,
+        b_loc: np.ndarray,
+        removed: np.ndarray,
+    ) -> None:
+        """吸収イオンのうちコレクタ線分に達したものを記録する (IEDF/IADF)。
+
+        吸収位置は既存の補間位置を使う: 壁吸収 (walk 検出) は境界エッジ L=0 との
+        線形補間、誘電体表面吸収は現在位置 (prompts/24 と同じ扱い)。
+        エネルギーは衝突時速度 (3成分) から ½m|v|²/e [eV]。入射角は法線に対する
+        面内角 [deg] で、符号は接線 (p1→p2) 方向成分の符号 (範囲 (-90, 90))。
+        法線は入射イオンと逆向き成分を持つ側 (表面正面) を基準とするため |v·n| を使う。
+        sp.x は更新前 (プッシュ前) の位置であることを前提とする。
+        """
+        idx = np.nonzero(removed)[0]
+        if idx.size == 0:
+            return
+        pos = np.empty((idx.size, 2))
+        wall = absorbed[idx]
+        if np.any(wall):
+            # 壁吸収: 越えた境界エッジの重心座標 L=0 を x_prev → x_new で線形補間
+            w_idx = idx[wall]
+            ea, eloc = b_elem[w_idx], b_loc[w_idx]
+            a, b, c, det = self.coeffs
+            aa, bb, cc, dd = a[ea, eloc], b[ea, eloc], c[ea, eloc], det[ea]
+            xp, xn = sp.x[w_idx], x_new[w_idx]
+            l0 = (aa + bb * xp[:, 0] + cc * xp[:, 1]) / dd
+            l1 = (aa + bb * xn[:, 0] + cc * xn[:, 1]) / dd
+            denom = l0 - l1
+            denom = np.where(np.abs(denom) < 1e-300, 1e-300, denom)
+            frac = np.clip(l0 / denom, 0.0, 1.0)
+            pos[wall] = xp + frac[:, None] * (xn - xp)
+        if not np.all(wall):
+            # 誘電体表面吸収: 現在位置 (侵入直前〜現在の間で良い)
+            pos[~wall] = x_new[idx[~wall]]
+
+        # コレクタ線分との距離 (法線方向) と区間 (接線方向の射影) の判定
+        d = pos - self._col_p1
+        proj = d[:, 0] * self._col_tan[0] + d[:, 1] * self._col_tan[1]
+        dist = np.abs(d[:, 0] * self._col_nrm[0] + d[:, 1] * self._col_nrm[1])
+        sel = (dist <= self._col_tol) & (proj >= 0.0) & (proj <= self._col_len)
+        if not np.any(sel):
+            return
+        s_idx = idx[sel]
+        vel = v_new[s_idx]
+        wgt = sp.w[s_idx].astype(np.float64)
+        k = len(s_idx)
+        self._col_count += k
+        self._col_weight += float(wgt.sum())
+
+        # サンプル上限到達後は count / total_weight のみ加算する
+        room = COLLECTOR_MAX_SAMPLES - self._col_samples
+        if room <= 0:
+            return
+        if k > room:
+            vel, wgt, k = vel[:room], wgt[:room], room
+        e_ev = 0.5 * sp.m * (vel[:, 0] ** 2 + vel[:, 1] ** 2 + vel[:, 2] ** 2) / QE
+        vt = vel[:, 0] * self._col_tan[0] + vel[:, 1] * self._col_tan[1]
+        vn = vel[:, 0] * self._col_nrm[0] + vel[:, 1] * self._col_nrm[1]
+        ang = np.degrees(np.arctan2(vt, np.abs(vn)))
+        self._col_e.append(e_ev)
+        self._col_a.append(ang)
+        self._col_w.append(wgt)
+        self._col_samples += k
+
+    def _collector_data(self) -> dict | None:
+        """コレクタの記録を dict にまとめる (WS done / self.collector_result 用)。"""
+        if self._collector is None:
+            return None
+        empty = np.zeros(0)
+        return {
+            "count": self._col_count,
+            "total_weight": self._col_weight,
+            "energies_ev": np.concatenate(self._col_e) if self._col_e else empty,
+            "angles_deg": np.concatenate(self._col_a) if self._col_a else empty,
+            "weights": np.concatenate(self._col_w) if self._col_w else empty,
+            "truncated": self._col_count > self._col_samples,
+        }
 
     def _emit_see(
         self,
@@ -818,6 +934,12 @@ class PicSimulation:
             n_abs = int(removed.sum())
             if n_abs:
                 sp.wall_absorbed += n_abs
+                # IEDF/IADF コレクタ: 平均区間中に吸収されたイオンを記録
+                # (外周・電極輪郭・誘電体表面のすべて。電子・SEE は対象外)
+                if sp.name == "ion" and self._collector is not None and accumulating:
+                    self._collect_ions(
+                        sp, x_new, v_new, absorbed, b_elem, b_loc, removed
+                    )
                 # SEE: γ>0 電極へのイオン吸収で二次電子を生成 (sp.x は更新前の位置)
                 if sp.name == "ion" and self._edge_gamma is not None and np.any(absorbed):
                     self._emit_see(sp, x_new, b_elem, b_loc, absorbed)
@@ -1165,4 +1287,5 @@ class PicSimulation:
                     callback(frame)
         self.fields = self.averaged_fields()
         self.cycle = self.cycle_data()
+        self.collector_result = self._collector_data()
         return self.history, frames

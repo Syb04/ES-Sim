@@ -1,10 +1,11 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api";
 import { CommitNumberInput, CommitTextInput } from "../CommitInput";
 import type {
   Emitter,
   InitialPlasma,
   McSettings,
+  PicCollectorResult,
   PicCycle,
   PicDiag,
   PicFields,
@@ -91,6 +92,10 @@ interface Props {
   onCycleFpsChange: (v: number) => void;
   cycleShowParticles: boolean;
   onCycleShowParticlesChange: (v: boolean) => void;
+
+  // done で受信した IEDF/IADF コレクタの記録結果 (collector 未配置・未受信では null)。
+  // 新しい実行開始時に App 側で null にリセットされる
+  collectorResult: PicCollectorResult | null;
 }
 
 const DEFAULT_INITIAL_PLASMA: InitialPlasma = {
@@ -167,6 +172,7 @@ export default function PicPanel({
   onCycleFpsChange,
   cycleShowParticles,
   onCycleShowParticlesChange,
+  collectorResult,
 }: Props) {
   // 有効チェックを一度オフにしても、再度オンにしたときに直前の値を復元できるよう保持する
   const plasmaDefaultsRef = useRef<InitialPlasma>(pic.initial_plasma ?? DEFAULT_INITIAL_PLASMA);
@@ -237,6 +243,25 @@ export default function PicPanel({
   };
 
   const progressPct = started && started.n_steps > 0 ? Math.min(100, ((frame?.step ?? 0) / started.n_steps) * 100) : 0;
+
+  // IEDF/IADF ヒストグラムのビン数 (既定60、変更で再ビニング。コレクタ設定自体ではないので project 保存対象外)
+  const [collectorBins, setCollectorBins] = useState(60);
+
+  // コレクタ生サンプル (energy_ev, angle_deg, weight) をCSVでダウンロードする
+  const downloadCollectorCsv = () => {
+    if (!collectorResult) return;
+    const lines = ["energy_ev,angle_deg,weight"];
+    for (let i = 0; i < collectorResult.energies_ev.length; i++) {
+      lines.push(`${collectorResult.energies_ev[i]},${collectorResult.angles_deg[i]},${collectorResult.weights[i]}`);
+    }
+    const blob = new Blob([lines.join("\n")], { type: "text/csv" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "iedf_iadf.csv";
+    a.click();
+    URL.revokeObjectURL(url);
+  };
 
   return (
     <>
@@ -496,6 +521,98 @@ export default function PicPanel({
         />
       </div>
 
+      <h2>PIC: IEDF/IADF (コレクタ)</h2>
+      <p className="hint">
+        キャンバスの「コレクタ」ツールでウエハ面上に2点クリックして線分を配置します。
+      </p>
+      <div className="kv">
+        <span>p1 [mm]</span>
+        <span>
+          {pic.collector
+            ? `(${(pic.collector.p1[0] * 1000).toFixed(2)}, ${(pic.collector.p1[1] * 1000).toFixed(2)})`
+            : "未配置"}
+        </span>
+      </div>
+      <div className="kv">
+        <span>p2 [mm]</span>
+        <span>
+          {pic.collector
+            ? `(${(pic.collector.p2[0] * 1000).toFixed(2)}, ${(pic.collector.p2[1] * 1000).toFixed(2)})`
+            : "未配置"}
+        </span>
+      </div>
+      <div className="field">
+        <span className="label">判定距離 tol [mm] (空欄=メッシュサイズ)</span>
+        <input
+          type="text"
+          disabled={!pic.collector}
+          value={pic.collector?.tol == null ? "" : String(pic.collector.tol * 1000)}
+          placeholder="メッシュサイズ"
+          onChange={(e) => {
+            if (!pic.collector) return;
+            const raw = e.target.value;
+            if (raw.trim() === "") {
+              onChange({ ...pic, collector: { ...pic.collector, tol: null } });
+              return;
+            }
+            const n = Number(raw);
+            if (Number.isFinite(n)) onChange({ ...pic, collector: { ...pic.collector, tol: n / 1000 } });
+          }}
+        />
+      </div>
+      <div className="actions">
+        <button className="secondary" onClick={() => onChange({ ...pic, collector: null })} disabled={!pic.collector}>
+          コレクタをクリア
+        </button>
+      </div>
+
+      {collectorResult && (
+        <>
+          <div className="kv">
+            <span>記録サンプル数</span>
+            <span>{collectorResult.count}</span>
+          </div>
+          <div className="kv">
+            <span>総実イオン数 [1/m]</span>
+            <span>{collectorResult.total_weight.toExponential(3)}</span>
+          </div>
+          {collectorResult.truncated && (
+            <div className="pic-warnings">
+              警告: サンプル数上限に達したため、以降は個数のみ集計しています (ヒストグラムは記録分のみ反映)
+            </div>
+          )}
+          <div className="field">
+            <span className="label">ビン数</span>
+            <CommitNumberInput
+              value={collectorBins}
+              onCommit={(v) => setCollectorBins(Math.max(1, Math.round(v)))}
+            />
+          </div>
+          <p className="hint">IEDF (入射エネルギー分布、横軸 eV)</p>
+          <HistogramChart
+            values={collectorResult.energies_ev}
+            weights={collectorResult.weights}
+            bins={collectorBins}
+            unit="eV"
+            color="#4da3ff"
+          />
+          <p className="hint">IADF (入射角分布、横軸 deg、-90〜90)</p>
+          <HistogramChart
+            values={collectorResult.angles_deg}
+            weights={collectorResult.weights}
+            bins={collectorBins}
+            unit="deg"
+            color="#ffb84d"
+            fixedRange={[-90, 90]}
+          />
+          <div className="actions">
+            <button className="secondary" onClick={downloadCollectorCsv}>
+              CSV保存
+            </button>
+          </div>
+        </>
+      )}
+
       <div className="actions">
         <button onClick={onStart} disabled={!canRun || running}>
           {running ? "実行中..." : "PIC開始"}
@@ -672,6 +789,145 @@ function PicHistoryChart({ history }: { history: PicDiag[] }) {
         <span><span className="swatch" style={{ background: "#d8dce4" }} />粒子数</span>
       </div>
     </>
+  );
+}
+
+interface HistogramChartProps {
+  values: number[];   // サンプル値 (energies_ev または angles_deg)
+  weights: number[];  // 同数、重み付きカウントに使う (values と同じインデックス対応)
+  bins: number;       // ビン数
+  unit: string;       // 横軸の単位表示
+  color: string;      // バーの色
+  // 指定時はこの範囲でビニングする (未指定時は values の min/max を使う)。IADFは常に固定 [-90, 90]
+  fixedRange?: [number, number];
+}
+
+// IEDF/IADF 用のヒストグラム (重み付きカウント、canvas 直描き)。
+// ProfilePanel のグラフ実装を参考に、軸目盛り・ホバーでのビン範囲/カウント読み取りを持たせる
+function HistogramChart({ values, weights, bins, unit, color, fixedRange }: HistogramChartProps) {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const [hoverIdx, setHoverIdx] = useState<number | null>(null);
+  const scaleRef = useRef<{ padL: number; binW: number; n: number } | null>(null);
+
+  // 重み付きカウントのビニング (values/weights が変わるか bins/range が変わるたびに再計算)
+  const { counts, lo, hi } = useMemo(() => {
+    const n = Math.max(1, Math.round(bins));
+    let rangeLo: number;
+    let rangeHi: number;
+    if (fixedRange) {
+      [rangeLo, rangeHi] = fixedRange;
+    } else if (values.length === 0) {
+      rangeLo = 0;
+      rangeHi = 1;
+    } else {
+      rangeLo = Math.min(...values);
+      rangeHi = Math.max(...values);
+      if (!(rangeHi > rangeLo)) rangeHi = rangeLo + 1;
+    }
+    const counts = new Array(n).fill(0) as number[];
+    const range = rangeHi - rangeLo || 1;
+    for (let i = 0; i < values.length; i++) {
+      const v = values[i];
+      let idx = Math.floor(((v - rangeLo) / range) * n);
+      if (idx < 0) idx = 0;
+      if (idx >= n) idx = n - 1;
+      counts[idx] += weights[i] ?? 1;
+    }
+    return { counts, lo: rangeLo, hi: rangeHi };
+  }, [values, weights, bins, fixedRange]);
+
+  useEffect(() => {
+    const el = canvasRef.current;
+    if (!el) return;
+    const dpr = window.devicePixelRatio || 1;
+    const rect = el.getBoundingClientRect();
+    el.width = rect.width * dpr;
+    el.height = rect.height * dpr;
+    const ctx = el.getContext("2d")!;
+    ctx.scale(dpr, dpr);
+    ctx.clearRect(0, 0, rect.width, rect.height);
+
+    const padL = 44;
+    const padR = 6;
+    const padT = 6;
+    const padB = 16;
+    const plotW = rect.width - padL - padR;
+    const plotH = rect.height - padT - padB;
+    const n = counts.length;
+    const binW = plotW / n;
+    scaleRef.current = { padL, binW, n };
+
+    const maxCount = Math.max(...counts, 1e-30);
+
+    // 枠
+    ctx.strokeStyle = "#363c48";
+    ctx.lineWidth = 1;
+    ctx.strokeRect(padL, padT, plotW, plotH);
+
+    // バー
+    ctx.fillStyle = color;
+    for (let i = 0; i < n; i++) {
+      const h = (counts[i] / maxCount) * plotH;
+      const x = padL + i * binW;
+      const y = padT + plotH - h;
+      ctx.fillRect(x + 0.5, y, Math.max(1, binW - 1), h);
+    }
+
+    // 横軸目盛り (最小/中央/最大)
+    ctx.font = "9px system-ui, sans-serif";
+    ctx.fillStyle = "#8a919e";
+    ctx.textBaseline = "top";
+    ctx.textAlign = "left";
+    ctx.fillText(lo.toFixed(1), padL, padT + plotH + 3);
+    ctx.textAlign = "center";
+    ctx.fillText(((lo + hi) / 2).toFixed(1), padL + plotW / 2, padT + plotH + 3);
+    ctx.textAlign = "right";
+    ctx.fillText(hi.toFixed(1), padL + plotW, padT + plotH + 3);
+
+    // 縦軸目盛り (0 / 最大カウント)
+    ctx.textAlign = "right";
+    ctx.textBaseline = "top";
+    ctx.fillText(maxCount.toExponential(1), padL - 4, padT);
+    ctx.textBaseline = "bottom";
+    ctx.fillText("0", padL - 4, padT + plotH);
+
+    // ホバー中のビンを枠で強調
+    if (hoverIdx !== null && hoverIdx >= 0 && hoverIdx < n) {
+      ctx.strokeStyle = "rgba(255,255,255,0.6)";
+      ctx.lineWidth = 1;
+      ctx.strokeRect(padL + hoverIdx * binW, padT, binW, plotH);
+    }
+  }, [counts, lo, hi, hoverIdx, color]);
+
+  const handleMouseMove = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    const el = canvasRef.current;
+    const sc = scaleRef.current;
+    if (!el || !sc) return;
+    const rect = el.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const idx = Math.floor((x - sc.padL) / sc.binW);
+    setHoverIdx(idx >= 0 && idx < sc.n ? idx : null);
+  };
+
+  const n = counts.length;
+  const range = hi - lo || 1;
+  const hoverBinLo = hoverIdx !== null ? lo + (range * hoverIdx) / n : null;
+  const hoverBinHi = hoverIdx !== null ? lo + (range * (hoverIdx + 1)) / n : null;
+
+  return (
+    <div className="iedf-hist-wrap">
+      <canvas
+        ref={canvasRef}
+        className="iedf-hist"
+        onMouseMove={handleMouseMove}
+        onMouseLeave={() => setHoverIdx(null)}
+      />
+      <div className="hint iedf-hist-hover">
+        {hoverIdx !== null && hoverBinLo !== null && hoverBinHi !== null
+          ? `${hoverBinLo.toFixed(2)} 〜 ${hoverBinHi.toFixed(2)} ${unit}: ${counts[hoverIdx].toExponential(3)}`
+          : " "}
+      </div>
+    </div>
   );
 }
 

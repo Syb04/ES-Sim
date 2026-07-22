@@ -170,6 +170,15 @@ export interface PicSettings {
   avg_steps?: number | null;
   // RF 1周期の位相分解データの位相ビン数 (0 で無効)。省略 = 40
   phase_bins?: number;
+  // IEDF/IADF コレクタ線分。null/省略 = 無効
+  collector?: PicCollectorSettings | null;
+}
+
+// IEDF/IADF コレクタ線分の設定
+export interface PicCollectorSettings {
+  p1: [number, number];  // 線分の始点 [m]
+  p2: [number, number];  // 線分の終点 [m]
+  tol?: number | null;   // 判定距離 [m]。null = mesh.size と同値
 }
 
 // PIC診断 (1ステップ分)
@@ -262,11 +271,22 @@ export interface PicCycle {
   };
 }
 
+// IEDF/IADF コレクタの記録結果 (done メッセージの collector)
+export interface PicCollectorResult {
+  count: number;         // 記録したマクロイオン数 (総数)
+  total_weight: number;  // 総実イオン数 [1/m]
+  energies_ev: number[]; // サンプル (上限 50000。超過分は count/total_weight のみ)
+  angles_deg: number[];  // 同数。符号付き入射角 [deg] (範囲 (-90, 90))
+  weights: number[];     // 同数
+  truncated: boolean;
+}
+
 export interface PicDoneMsg {
   type: "done";
   history: PicHistoryDict; // 列ごとの辞書 (toDiagArray で PicDiag[] に変換して使う)
   fields?: PicFields;      // 時間平均フィールド (未対応バックエンドでは省略)
   cycle?: PicCycle;        // RF 1周期の位相分解 (RFなし/phase_bins=0 では省略)
+  collector?: PicCollectorResult; // IEDF/IADF コレクタ (collector 有効時のみ)
 }
 
 export interface PicErrorMsg {

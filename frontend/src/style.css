@@ -198,4 +198,9 @@ button.danger:hover { background: #b34747; }
 .pic-warnings { color: #e0b050; font-size: 11px; margin: 4px 0; line-height: 1.4; }
 .pic-chart { display: block; width: 100%; height: 90px; background: var(--bg); border: 1px solid var(--border); border-radius: 3px; }
 .pic-chart-legend { display: flex; flex-wrap: wrap; gap: 8px; font-size: 10px; color: var(--muted); margin: 4px 0 8px; }
+
+/* PICパネル: IEDF/IADF ヒストグラム (パネルが縦に伸びすぎないよう130px程度に抑える) */
+.iedf-hist-wrap { margin: 2px 0 8px; }
+.iedf-hist { display: block; width: 100%; height: 130px; background: var(--bg); border: 1px solid var(--border); border-radius: 3px; }
+.iedf-hist-hover { min-height: 14px; margin: 2px 0 0; }
 .pic-chart-legend .swatch { display: inline-block; width: 8px; height: 8px; border-radius: 2px; margin-right: 3px; vertical-align: middle; }
