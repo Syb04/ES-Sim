@@ -445,6 +445,10 @@ export default function PicPanel({
               {frame.diag.coll_e ?? "-"} / {frame.diag.ion_events ?? "-"} / {frame.diag.see_events ?? "-"}
             </span>
           </div>
+          <div className="kv">
+            <span>誘電体表面電荷 [C/m]</span>
+            <span>{frame.diag.surf_q !== undefined ? frame.diag.surf_q.toExponential(3) : "-"}</span>
+          </div>
           <PicHistoryChart history={history} />
         </>
       )}

@@ -184,6 +184,7 @@ export interface PicDiag {
   coll_e?: number;      // 電子衝突数 (累計)
   ion_events?: number;  // 電離数 (累計)
   see_events?: number;  // SEE発生数 (累計)
+  surf_q?: number;      // 誘電体の累計表面電荷 [C/m] (全誘電体合計)
 }
 
 // PIC診断履歴 (done メッセージの形式)。バックエンド (pic.py) は列ごとの辞書
@@ -208,6 +209,7 @@ export function toDiagArray(h: PicHistoryDict | PicDiag[] | null | undefined): P
       n_e: col(h.n_e, i), n_i: col(h.n_i, i), wall_e: col(h.wall_e, i), wall_i: col(h.wall_i, i),
       phi_min: col(h.phi_min, i), phi_max: col(h.phi_max, i),
       coll_e: colOpt(h.coll_e, i), ion_events: colOpt(h.ion_events, i), see_events: colOpt(h.see_events, i),
+      surf_q: colOpt(h.surf_q, i),
     };
   }
   return out;

@@ -112,6 +112,11 @@ class PicSimulation:
         # 場の計算は変更しない (εr 付き要素としてメッシュに残る)。無ければ None
         self._solid_elem = _solid_elements(project, mesh)
 
+        # 誘電体の表面電荷 (prompts/25): 吸収された粒子の電荷 w·q [C/m] を節点へ
+        # P1 射影で蓄積し、毎ステップのポアソン右辺へ恒常的に加える。
+        # 実行開始時は 0 で、停止までラン内で持続する
+        self.q_surf = np.zeros(self.n_nodes)
+
         # ---- FEM 行列: K_ff を splu で1回だけ前分解 --------------------------
         k, self.f_static = assemble(project, mesh)  # 静的 charge 領域の右辺を含む
         items = sorted(mesh.dirichlet.items())      # 節点順に固定して決定的に
@@ -258,7 +263,7 @@ class PicSimulation:
             for k in (
                 "t", "ke_e", "ke_i", "fe", "n_e", "n_i",
                 "wall_e", "wall_i", "phi_min", "phi_max",
-                "coll_e", "ion_events", "see_events",
+                "coll_e", "ion_events", "see_events", "surf_q",
             )
         }
         self._f_immobile: dict[str, np.ndarray] = {}  # 不動種の堆積キャッシュ
@@ -430,6 +435,27 @@ class PicSimulation:
             l_out[p_idx] = sub_l
         return True
 
+    def _accumulate_surface_charge(
+        self,
+        sp: PicSpecies,
+        elem_new: np.ndarray,
+        l_new: np.ndarray,
+        hit: np.ndarray,
+    ) -> None:
+        """誘電体に吸収された粒子の電荷 w·q を表面電荷 Q_surf へ加算する。
+
+        吸収位置 (進入した誘電体要素内) の P1 重心座標重みで節点へ散布する
+        (点電荷の P1 射影と同じ扱い)。位置は表面の直内側 (高々1ステップの
+        移動量) なので重みはほぼ表面節点に集中するが、進入要素の内部節点にも
+        僅かに載る近似である。周期境界では正準節点番号 (tris_dep) で積む。
+        """
+        contrib = (sp.q * sp.w[hit])[:, None] * l_new[hit]
+        self.q_surf += np.bincount(
+            self.tris_dep[elem_new[hit]].ravel(),
+            weights=contrib.ravel(),
+            minlength=self.n_nodes,
+        )
+
     def _emit_see(
         self,
         sp: PicSpecies,
@@ -575,6 +601,9 @@ class PicSimulation:
         vd = self._dirichlet_values(t)
         v[self.fixed] = vd
         f = self.f_static + f_dep
+        if self._solid_elem is not None:
+            # 誘電体の蓄積表面電荷を恒常的に加算する (誘電体なしの経路は数値不変)
+            f = f + self.q_surf
         rhs = f[self.free] - self.k_fd @ vd
         v[self.free] = self.lu.solve(rhs)
         if self.canon is not None:
@@ -716,9 +745,13 @@ class PicSimulation:
                     ):
                         break
             # 誘電体 (固体) 要素へ入った粒子は表面で吸収する
-            # (壁カウンタに計上するが SEE は発生させない、prompts/24)
+            # (壁カウンタに計上するが SEE は発生させない、prompts/24)。
+            # 吸収電荷は表面電荷 Q_surf へ蓄積して場にフィードバックする (prompts/25)
             if self._solid_elem is not None:
-                removed = absorbed | self._solid_elem[elem_new]
+                solid_hit = ~absorbed & self._solid_elem[elem_new]
+                if np.any(solid_hit):
+                    self._accumulate_surface_charge(sp, elem_new, l_new, solid_hit)
+                removed = absorbed | solid_hit
             else:
                 removed = absorbed
             n_abs = int(removed.sum())
@@ -793,6 +826,8 @@ class PicSimulation:
         h["coll_e"].append(self.coll_e)
         h["ion_events"].append(self.ion_events)
         h["see_events"].append(self.see_events)
+        # 累計表面電荷 (全誘電体合計 [C/m])。誘電体なしなら常に 0
+        h["surf_q"].append(float(self.q_surf.sum()))
         return phi
 
     # ---- 節点密度の時間平均 ---------------------------------------------------
