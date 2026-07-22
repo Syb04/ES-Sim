@@ -130,6 +130,28 @@ export interface PicDiag {
   phi_max: number;
 }
 
+// PIC診断履歴 (done メッセージの形式)。バックエンド (pic.py) は列ごとの辞書
+// { t: [...], ke_e: [...], ... } で全ステップの履歴を返すため、フロントでは
+// toDiagArray() で PicDiag[] (行ごと) に変換して使う
+export type PicHistoryDict = { [K in keyof PicDiag]: number[] };
+
+// 列ごとの辞書 → 行ごとの PicDiag[] 変換。形式が想定外でも例外を投げず空配列を返す
+export function toDiagArray(h: PicHistoryDict | PicDiag[] | null | undefined): PicDiag[] {
+  if (Array.isArray(h)) return h; // 将来サーバーが行形式になっても許容
+  if (!h || !Array.isArray(h.t)) return [];
+  const n = h.t.length;
+  const col = (a: number[] | undefined, i: number) => (a && Number.isFinite(a[i]) ? a[i] : 0);
+  const out: PicDiag[] = new Array(n);
+  for (let i = 0; i < n; i++) {
+    out[i] = {
+      t: col(h.t, i), ke_e: col(h.ke_e, i), ke_i: col(h.ke_i, i), fe: col(h.fe, i),
+      n_e: col(h.n_e, i), n_i: col(h.n_i, i), wall_e: col(h.wall_e, i), wall_i: col(h.wall_i, i),
+      phi_min: col(h.phi_min, i), phi_max: col(h.phi_max, i),
+    };
+  }
+  return out;
+}
+
 // ---- PIC WebSocket プロトコル (server→client, /ws/pic) ------------------------
 
 export interface PicStartedMsg {
@@ -151,7 +173,7 @@ export interface PicFrameMsg {
 
 export interface PicDoneMsg {
   type: "done";
-  history: PicDiag[];
+  history: PicHistoryDict; // 列ごとの辞書 (toDiagArray で PicDiag[] に変換して使う)
 }
 
 export interface PicErrorMsg {

@@ -8,6 +8,7 @@ import ParticlePanel from "./panels/ParticlePanel";
 import PicPanel from "./panels/PicPanel";
 import { PicClient } from "./picClient";
 import { useHistory } from "./useHistory";
+import { toDiagArray } from "./types";
 import { mToMm, mmToM } from "./units";
 import type {
   CircleShape,
@@ -262,7 +263,9 @@ export default function App() {
         setPicHistory((h) => [...h, msg.diag]);
       },
       onDone: (msg) => {
-        setPicHistory(msg.history);
+        // バックエンドの history は列ごとの辞書形式なので行ごとの PicDiag[] に変換する
+        // (形式不一致のまま描画するとチャートが例外を投げて画面全体が落ちるため必ず変換を通す)
+        setPicHistory(toDiagArray(msg.history));
         setPicRunning(false);
       },
       onError: (detail) => {

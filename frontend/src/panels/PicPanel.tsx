@@ -292,7 +292,8 @@ function PicHistoryChart({ history }: { history: PicDiag[] }) {
     ctx.scale(dpr, dpr);
     ctx.clearRect(0, 0, rect.width, rect.height);
 
-    if (history.length < 2) return;
+    // 防御: 想定外の形式 (配列でない等) が渡っても例外で画面全体を落とさない
+    if (!Array.isArray(history) || history.length < 2) return;
 
     const ts = history.map((h) => h.t);
     const ke = history.map((h) => h.ke_e + h.ke_i);
