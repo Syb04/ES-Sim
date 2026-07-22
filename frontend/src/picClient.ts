@@ -1,5 +1,5 @@
 // PIC WebSocket クライアント (薄いラッパ)。
-// ws://127.0.0.1:8317/ws/pic に接続し、start/stop コマンドを送信する。
+// ws://127.0.0.1:<port>/ws/pic に接続し、start/stop コマンドを送信する。
 // サーバーからの started/frame/done/error 通知はコールバックへそのまま中継する。
 // 接続エラー・切断時は onError / onClose を呼び、パネル側で待機状態に戻せるようにする。
 
@@ -12,8 +12,12 @@ import type {
   PicStartedMsg,
   Project,
 } from "./types";
+import { getPort } from "./backendPort";
 
-const WS_URL = "ws://127.0.0.1:8317/ws/pic";
+// 接続の都度ポート番号を組み立てる (GUIでの変更を即座に反映するため、定数 URL は使わない)
+function wsUrl(): string {
+  return `ws://127.0.0.1:${getPort()}/ws/pic`;
+}
 
 export interface PicClientCallbacks {
   onStarted?: (msg: PicStartedMsg) => void;
@@ -44,7 +48,7 @@ export class PicClient {
     this.close();
     let ws: WebSocket;
     try {
-      ws = new WebSocket(WS_URL);
+      ws = new WebSocket(wsUrl());
     } catch (e) {
       this.cb.onError?.(String(e));
       return;

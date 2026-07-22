@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "./api";
+import { getPort, initPort, setPort } from "./backendPort";
 import CadCanvas from "./canvas/CadCanvas";
 import type { FieldView, PicCollectorView, PicFieldView, Tool } from "./canvas/CadCanvas";
 import ProfilePanel from "./panels/ProfilePanel";
@@ -132,6 +133,12 @@ export default function App() {
   const history = useHistory<Project>();
 
   const [health, setHealth] = useState<Health | null>(null);
+  // バックエンドポート番号 (入力欄の表示用文字列)。確定 (blur/Enter) で setPort() へ反映する
+  const [portInput, setPortInput] = useState<string>(String(getPort()));
+  // initPort() 完了フラグ。完了前は health チェックを開始しない (起動直後に誤ったポートへ
+  // アクセスして「backend 未接続」を一瞬表示するのを避けるため)
+  const [portReady, setPortReady] = useState(false);
+  const [portError, setPortError] = useState<string | null>(null);
   const [result, setResult] = useState<SolveResult | null>(null);
   // Mesh ボタン (解析なしでメッシュ生成のみ) の結果。Solve 結果とは独立に保持する
   const [meshResult, setMeshResult] = useState<MeshResult | null>(null);
@@ -220,12 +227,42 @@ export default function App() {
     return () => picClientRef.current?.close();
   }, []);
 
+  // 起動時にポート設定を初期化する (Tauri内なら AppConfig の backend-port.txt、
+  // なければ localStorage、それも無ければ既定値 8317)。完了してから health チェックを始める
   useEffect(() => {
+    let cancelled = false;
+    initPort().then((p) => {
+      if (cancelled) return;
+      setPortInput(String(p));
+      setPortReady(true);
+    });
+    return () => { cancelled = true; };
+  }, []);
+
+  useEffect(() => {
+    if (!portReady) return; // initPort() 完了まで待つ
     const check = () => api.health().then(setHealth).catch(() => setHealth(null));
     check();
     const t = setInterval(check, 5000);
     return () => clearInterval(t);
-  }, []);
+  }, [portReady]);
+
+  // ポート入力欄の確定 (blur / Enter)。不正な値なら現在値に戻すだけで何もしない
+  const commitPortInput = () => {
+    const n = parseInt(portInput, 10);
+    if (!Number.isFinite(n) || n <= 0) {
+      setPortInput(String(getPort()));
+      return;
+    }
+    if (n === getPort()) return; // 変更なしなら再チェック不要
+    setPortError(null);
+    setPort(n)
+      .then(() => {
+        setHealth(null); // 変更直後は未確定表示にし、health即再チェックの結果で更新する
+        return api.health().then(setHealth).catch(() => setHealth(null));
+      })
+      .catch((e) => setPortError(String(e)));
+  };
 
   // 選択中領域が project から消えていたら選択解除する
   const ensureSelection = useCallback((p: Project, sel: string | null): string | null => {
@@ -894,10 +931,30 @@ export default function App() {
           ↷ Redo
         </button>
         <div className="spacer" />
-        <div className={`status ${health ? "ok" : "ng"}`}>
+        <label
+          className="snap port-field"
+          title="開発時は uvicorn の --port をこの値に合わせてください。配布版ではアプリ再起動後にサイドカーへ反映されます"
+        >
+          ポート
+          <input
+            type="number"
+            className="port-input"
+            value={portInput}
+            onChange={(e) => setPortInput(e.target.value)}
+            onBlur={commitPortInput}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") e.currentTarget.blur(); // Enterで確定 (blurのcommitPortInputに委ねる)
+            }}
+          />
+        </label>
+        {portError && <div className="status ng">ポート設定の保存に失敗: {portError}</div>}
+        <div
+          className={`status ${health ? "ok" : "ng"}`}
+          title="開発時は uvicorn の --port をこの値に合わせてください。配布版ではアプリ再起動後にサイドカーへ反映されます"
+        >
           {health
             ? `backend v${health.version} ${health.gpu ? "(GPU)" : "(CPU)"}`
-            : "backend 未接続 — uvicorn es_sim.server:app --port 8317 を起動してください"}
+            : `backend 未接続 — uvicorn es_sim.server:app --port ${getPort()} を起動してください`}
         </div>
       </div>
 

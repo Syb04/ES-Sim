@@ -23,11 +23,22 @@ fn main() {
         .setup(|app| {
             // 配布ビルドのみサイドカーを起動する (cfg!(debug_assertions) で分岐)
             if !cfg!(debug_assertions) {
+                // GUI (フロントエンド) が AppConfig ディレクトリへ書き込む backend-port.txt を
+                // 読み、サイドカーの --port に渡す (prompts/45)。
+                // 読み取り専用: ディレクトリ・ファイルが無ければ作成せず既定値 8317 を使う。
+                // parse失敗・不存在時も既定値 8317 にフォールバックする。
+                let port = app
+                    .path()
+                    .app_config_dir()
+                    .ok()
+                    .and_then(|dir| std::fs::read_to_string(dir.join("backend-port.txt")).ok())
+                    .and_then(|s| s.trim().parse::<u32>().ok())
+                    .unwrap_or(8317);
                 let sidecar = app
                     .shell()
                     .sidecar("es-sim-backend")
                     .expect("failed to create es-sim-backend sidecar command")
-                    .args(["--port", "8317"]);
+                    .args(["--port", &port.to_string()]);
                 let (mut rx, child) = sidecar
                     .spawn()
                     .expect("failed to spawn es-sim-backend sidecar");

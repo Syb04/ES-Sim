@@ -23,6 +23,11 @@ body { font-family: "Segoe UI", system-ui, sans-serif; background: var(--bg); co
 .toolbar .status { font-size: 12px; color: var(--muted); }
 .toolbar .status.ok { color: #6fd08c; }
 .toolbar .status.ng { color: #e07070; }
+.toolbar .port-field { display: flex; align-items: center; gap: 4px; font-size: 12px; color: var(--muted); }
+.toolbar .port-input {
+  width: 68px; background: var(--bg); border: 1px solid var(--border); color: var(--text);
+  border-radius: 3px; padding: 3px 6px; font-size: 12px;
+}
 
 button {
   background: var(--accent); color: #fff; border: none; border-radius: 4px;

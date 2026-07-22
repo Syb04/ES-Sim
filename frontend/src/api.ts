@@ -1,9 +1,13 @@
 import type { Health, MeshResult, Point, Project, ProfileResult, SolveResult, TraceResult, XsProcess } from "./types";
+import { getPort } from "./backendPort";
 
-const BASE = "http://127.0.0.1:8317";
+// リクエストの都度ポート番号を組み立てる (GUIでの変更を即座に反映するため、定数 BASE は使わない)
+function base(): string {
+  return `http://127.0.0.1:${getPort()}`;
+}
 
 async function post<T>(path: string, body: unknown): Promise<T> {
-  const res = await fetch(`${BASE}${path}`, {
+  const res = await fetch(`${base()}${path}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
@@ -17,7 +21,7 @@ async function post<T>(path: string, body: unknown): Promise<T> {
 
 export const api = {
   health: (): Promise<Health> =>
-    fetch(`${BASE}/health`).then((r) => r.json()),
+    fetch(`${base()}/health`).then((r) => r.json()),
   mesh: (project: Project): Promise<MeshResult> => post("/mesh", project),
   solve: (project: Project): Promise<SolveResult> => post("/solve", project),
   profile: (project: Project, p1: Point, p2: Point, n = 200): Promise<ProfileResult> =>
