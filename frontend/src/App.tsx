@@ -628,8 +628,23 @@ export default function App() {
         ...p.geometry,
         regions: p.geometry.regions.map((r) => (r.id === oldId ? { ...r, id: newId } : r)),
       },
+      // ローカルメッシュサイズの参照キーも追従させる
+      mesh: {
+        ...p.mesh,
+        local_sizes: (p.mesh.local_sizes ?? []).map((ls) =>
+          ls.region === oldId ? { ...ls, region: newId } : ls,
+        ),
+      },
     });
     setSelectedRegionId(newId);
+  };
+
+  // 領域ごとのローカルメッシュサイズ [m]。null で解除 (全体サイズを使用)。非構造メッシュのみ有効
+  const setRegionLocalSize = (id: string, size: number | null) => {
+    const p = projectRef.current;
+    const rest = (p.mesh.local_sizes ?? []).filter((ls) => ls.region !== id);
+    const local_sizes = size !== null && size > 0 ? [...rest, { region: id, size }] : rest;
+    commitProject({ ...p, mesh: { ...p.mesh, local_sizes } });
   };
 
   const setRegionType = (id: string, type: RegionType) => {
@@ -657,6 +672,11 @@ export default function App() {
     commitProject({
       ...p,
       geometry: { ...p.geometry, regions: p.geometry.regions.filter((r) => r.id !== id) },
+      // 削除された領域のローカルメッシュサイズ設定も掃除する
+      mesh: {
+        ...p.mesh,
+        local_sizes: (p.mesh.local_sizes ?? []).filter((ls) => ls.region !== id),
+      },
     });
     setSelectedRegionId((sel) => (sel === id ? null : sel));
   };
@@ -1096,6 +1116,7 @@ export default function App() {
                 editRegionShape={editRegionShape}
                 updateRegion={updateRegion}
                 deleteRegion={deleteRegion}
+                setRegionLocalSize={setRegionLocalSize}
                 result={result}
               />
             </div>

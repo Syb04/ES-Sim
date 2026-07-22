@@ -49,6 +49,8 @@ interface Props {
   editRegionShape: (id: string, shape: CircleShape) => void;
   updateRegion: (id: string, patch: Partial<Region>) => void;
   deleteRegion: (id: string) => void;
+  // 領域ごとのローカルメッシュサイズ [m]。null で解除 (全体サイズを使用)
+  setRegionLocalSize: (id: string, size: number | null) => void;
   result: SolveResult | null;
 }
 
@@ -74,6 +76,7 @@ export default function FieldPanel({
   editRegionShape,
   updateRegion,
   deleteRegion,
+  setRegionLocalSize,
   result,
 }: Props) {
   const coord = project.coord ?? "xy";
@@ -373,6 +376,19 @@ export default function FieldPanel({
               />
             </label>
           )}
+          <label title="この領域とその輪郭のメッシュ特性長。0で解除 (全体サイズを使用)。非構造メッシュのみ有効">
+            ローカルメッシュサイズ [mm] (0=全体)
+            <CommitNumberInput
+              value={mToMm(
+                project.mesh.local_sizes?.find((ls) => ls.region === selected.id)?.size ?? 0,
+              )}
+              onCommit={(v) => setRegionLocalSize(selected.id, v > 0 ? mmToM(v) : null)}
+            />
+          </label>
+          {(project.mesh.mode ?? "unstructured") === "structured" &&
+            project.mesh.local_sizes?.some((ls) => ls.region === selected.id) && (
+              <div className="hint">構造格子モードではローカルメッシュサイズは無視されます。</div>
+            )}
           <button className="danger" onClick={() => deleteRegion(selected.id)}>
             削除
           </button>
