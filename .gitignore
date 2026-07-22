@@ -13,6 +13,10 @@ dist/
 frontend/src-tauri/target/
 frontend/src-tauri/gen/
 
+# 配布パッケージ (PyInstaller / サイドカー。binaries/ 内は同梱の .gitignore で除外)
+backend/build/
+backend/*.spec.bak
+
 # IDE / OS
 .vscode/
 .idea/

@@ -1,0 +1,41 @@
+{
+  "version": 1,
+  "unit": "m",
+  "coord": "rz",
+  "geometry": {
+    "domain": { "polygon": [[0.0, 0.0], [0.06, 0.0], [0.06, 0.02], [0.0, 0.02]] },
+    "regions": [
+      {
+        "id": "focus_electrode",
+        "type": "conductor",
+        "polygon": [[0.02, 0.006], [0.026, 0.006], [0.026, 0.02], [0.02, 0.02]],
+        "voltage": 0.0
+      }
+    ],
+    "boundaries": [
+      { "edges": [3], "type": "dirichlet", "voltage": 0.0 },
+      { "edges": [1], "type": "dirichlet", "voltage": 2000.0 }
+    ]
+  },
+  "mesh": {
+    "size": 0.0015,
+    "local_sizes": [ { "region": "focus_electrode", "size": 0.0006 } ]
+  },
+  "solver": { "backend": "numpy" },
+  "particles": {
+    "species": { "preset": "electron" },
+    "emitter": {
+      "kind": "line",
+      "p1": [0.001, 0.001],
+      "p2": [0.001, 0.008],
+      "n": 6,
+      "energy_ev": 1.0,
+      "direction_deg": 0.0,
+      "spread_deg": 0.0,
+      "energy_dist": "mono"
+    },
+    "dt": null,
+    "n_steps": 4000,
+    "save_every": 20
+  }
+}

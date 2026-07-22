@@ -2,12 +2,37 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "Default capability for the main window",
-  "windows": ["main"],
+  "windows": [
+    "main"
+  ],
   "permissions": [
     "core:default",
     "dialog:default",
     "fs:default",
     "fs:allow-write-text-file",
-    { "identifier": "fs:scope", "allow": [{ "path": "**" }] }
+    {
+      "identifier": "fs:scope",
+      "allow": [
+        {
+          "path": "**"
+        }
+      ]
+    },
+    "shell:default",
+    {
+      "identifier": "shell:allow-execute",
+      "allow": [
+        {
+          "name": "binaries/es-sim-backend",
+          "sidecar": true,
+          "args": [
+            "--port",
+            {
+              "validator": "\\d+"
+            }
+          ]
+        }
+      ]
+    }
   ]
 }
