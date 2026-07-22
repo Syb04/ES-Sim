@@ -253,6 +253,9 @@ class PicSettings(BaseModel):
     frame_every: int = Field(20, gt=0, description="フレーム送出間隔 (ステップ)")
     mcc: MccSettings | None = None  # null なら MCC 無効
     see_energy_ev: float = Field(2.0, ge=0, description="SEE 電子の初期エネルギー [eV]")
+    # 完了時に返す時間平均フィールドの平均ステップ数 (最終 N ステップ、prompts/26)。
+    # None なら全ステップの最後の 25% を平均する
+    avg_steps: int | None = Field(None, gt=0)
     # 鏡面反射する domain 外周エッジ番号のリスト (エッジ i は頂点 i → i+1)。
     # 到達粒子は吸収せず法線速度成分を反転して境界内へ折り返す (壁カウンタに含めない)。
     # 当該エッジは境界条件なし (Neumann) を想定。2D ストリップで 1D 問題を模擬する用途

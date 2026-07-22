@@ -166,6 +166,8 @@ export interface PicSettings {
   frame_every: number;  // フレーム送出間隔 (ステップ)
   mcc: McSettings | null;   // null なら MCC(背景ガス衝突) 無効
   see_energy_ev: number;    // SEE(二次電子放出)電子の初期エネルギー [eV]
+  // 完了時の時間平均フィールドの平均ステップ数 (最終Nステップ)。null/省略 = 最後の25%
+  avg_steps?: number | null;
 }
 
 // PIC診断 (1ステップ分)
@@ -234,9 +236,21 @@ export interface PicFrameMsg {
   diag: PicDiag;
 }
 
+// PIC完了時の時間平均2Dフィールド一式 (done メッセージの fields)
+export interface PicFields {
+  phi: number[];       // 節点、時間平均電位 [V]
+  e_abs: number[];     // 要素、時間平均 |E| [V/m] (Eベクトルを平均してから絶対値)
+  n_e: number[];       // 節点、電子密度 [m^-3]
+  n_i: number[];       // 節点、イオン密度 [m^-3]
+  te_ev: number[];     // 節点、電子温度 [eV] (粒子なし節点は 0)
+  ion_rate: number[];  // 節点、電離レート [m^-3 s^-1]
+  avg_steps: number;   // 実際に平均したステップ数
+}
+
 export interface PicDoneMsg {
   type: "done";
   history: PicHistoryDict; // 列ごとの辞書 (toDiagArray で PicDiag[] に変換して使う)
+  fields?: PicFields;      // 時間平均フィールド (未対応バックエンドでは省略)
 }
 
 export interface PicErrorMsg {

@@ -196,7 +196,14 @@ async def _run_pic_session(ws: WebSocket, project_dict: dict) -> None:
                 continue
             await ws.send_json(frame)
         history, _ = await run_task
-        await ws.send_json({"type": "done", "history": history})
+        done_msg: dict = {"type": "done", "history": history}
+        # 時間平均フィールド (prompts/26)。平均区間を積算できていれば添付する
+        if sim.fields is not None:
+            done_msg["fields"] = {
+                k: (v.tolist() if isinstance(v, np.ndarray) else v)
+                for k, v in sim.fields.items()
+            }
+        await ws.send_json(done_msg)
     except Exception as exc:
         try:
             await ws.send_json({"type": "error", "detail": str(exc)})

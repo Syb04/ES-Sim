@@ -6,12 +6,37 @@ import type {
   InitialPlasma,
   McSettings,
   PicDiag,
+  PicFields,
   PicFrameMsg,
   PicInjection,
   PicSettings,
   PicStartedMsg,
   XsProcess,
 } from "../types";
+
+// PIC「結果表示」セレクトの選択肢。"live" はライブ (最終フレーム) 表示、それ以外は
+// done メッセージの fields から時間平均フィールドをカラーマップで描画する対象を表す
+export type PicResultField = "live" | "phi" | "e_abs" | "n_e" | "n_i" | "te_ev" | "ion_rate";
+
+export const PIC_FIELD_OPTIONS: { value: PicResultField; label: string }[] = [
+  { value: "live", label: "ライブ (最終フレーム)" },
+  { value: "phi", label: "電位 [V]" },
+  { value: "e_abs", label: "|E| [V/m]" },
+  { value: "n_e", label: "電子密度 [m^-3]" },
+  { value: "n_i", label: "イオン密度 [m^-3]" },
+  { value: "te_ev", label: "電子温度 [eV]" },
+  { value: "ion_rate", label: "電離レート [m^-3 s^-1]" },
+];
+
+// フィールドキーごとの節点/要素の別・単位 (App 側で CadCanvas 用の picFieldView 構築に使う)
+export const PIC_FIELD_META: Record<Exclude<PicResultField, "live">, { unit: string; nodeBased: boolean }> = {
+  phi: { unit: "V", nodeBased: true },
+  e_abs: { unit: "V/m", nodeBased: false },
+  n_e: { unit: "m^-3", nodeBased: true },
+  n_i: { unit: "m^-3", nodeBased: true },
+  te_ev: { unit: "eV", nodeBased: true },
+  ion_rate: { unit: "m^-3 s^-1", nodeBased: true },
+};
 
 /**
  * PICパネル
@@ -33,6 +58,13 @@ interface Props {
   frame: PicFrameMsg | null;
   history: PicDiag[];
   error: string | null;
+  // done メッセージで受け取った時間平均フィールド一式 (未受信 or 未対応バックエンドでは null)
+  fields: PicFields | null;
+  // 「結果表示」セレクトの現在値と対数スケールチェックボックスの状態 (App 側で保持・CadCanvas に反映)
+  resultField: PicResultField;
+  onResultFieldChange: (v: PicResultField) => void;
+  logScale: boolean;
+  onLogScaleChange: (v: boolean) => void;
 }
 
 const DEFAULT_INITIAL_PLASMA: InitialPlasma = {
@@ -91,6 +123,11 @@ export default function PicPanel({
   frame,
   history,
   error,
+  fields,
+  resultField,
+  onResultFieldChange,
+  logScale,
+  onLogScaleChange,
 }: Props) {
   // 有効チェックを一度オフにしても、再度オンにしたときに直前の値を復元できるよう保持する
   const plasmaDefaultsRef = useRef<InitialPlasma>(pic.initial_plasma ?? DEFAULT_INITIAL_PLASMA);
@@ -395,6 +432,23 @@ export default function PicPanel({
           onCommit={(v) => onChange({ ...pic, frame_every: Math.max(1, Math.round(v)) })}
         />
       </div>
+      <div className="field">
+        <span className="label">平均ステップ数 (空欄=最後の25%)</span>
+        <input
+          type="text"
+          value={pic.avg_steps === null || pic.avg_steps === undefined ? "" : String(pic.avg_steps)}
+          placeholder="最後の25%"
+          onChange={(e) => {
+            const raw = e.target.value;
+            if (raw.trim() === "") {
+              onChange({ ...pic, avg_steps: null });
+              return;
+            }
+            const n = Number(raw);
+            if (Number.isFinite(n)) onChange({ ...pic, avg_steps: Math.max(1, Math.round(n)) });
+          }}
+        />
+      </div>
 
       <div className="actions">
         <button onClick={onStart} disabled={!canRun || running}>
@@ -450,6 +504,34 @@ export default function PicPanel({
             <span>{frame.diag.surf_q !== undefined ? frame.diag.surf_q.toExponential(3) : "-"}</span>
           </div>
           <PicHistoryChart history={history} />
+        </>
+      )}
+
+      {fields && (
+        <>
+          <h2>PIC: 結果フィールド</h2>
+          <p className="hint">時間平均ステップ数: {fields.avg_steps}</p>
+          <div className="field">
+            <span className="label">結果表示</span>
+            <select
+              value={resultField}
+              onChange={(e) => onResultFieldChange(e.target.value as PicResultField)}
+            >
+              {PIC_FIELD_OPTIONS.map((o) => (
+                <option key={o.value} value={o.value}>{o.label}</option>
+              ))}
+            </select>
+          </div>
+          {resultField !== "live" && (
+            <div className="field">
+              <span className="label">対数スケール</span>
+              <input
+                type="checkbox"
+                checked={logScale}
+                onChange={(e) => onLogScaleChange(e.target.checked)}
+              />
+            </div>
+          )}
         </>
       )}
 

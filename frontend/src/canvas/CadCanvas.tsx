@@ -27,6 +27,16 @@ export type Tool = "select" | "polyline" | "rect" | "circle" | "profile" | "emit
 // カラーマップの対象: 電位 V か |E|
 export type FieldView = "v" | "e_abs";
 
+// PIC結果フィールド表示 (done後の「結果表示」セレクトでライブ以外を選んだ場合の描画データ)。
+// 値配列・節点/要素の別・単位・対数フラグを1つにまとめて渡すことで、描画分岐の散乱を避ける
+export interface PicFieldView {
+  mesh: MeshResult;
+  values: number[]; // nodeBased なら節点値 (長さ=nodes.length)、そうでなければ要素値 (長さ=triangles.length)
+  nodeBased: boolean; // true: 節点値 (要素は3節点平均で塗る)。false: 要素値 (e_abs)
+  unit: string; // カラーバーに表示する単位
+  log: boolean; // 対数スケール表示 (値≤0は最小正値にクランプ。全て≤0なら線形にフォールバック)
+}
+
 interface Props {
   project: Project;
   result: SolveResult | null;
@@ -48,8 +58,11 @@ interface Props {
   traceResult: TraceResult | null;
   showTrajectories: boolean;
   // PICライブ表示 (started の mesh + 最新 frame)。実行中〜done後の最終フレームまで非null。
-  // 存在する間は既存の Solve 結果表示より優先して描画する
+  // 存在する間は既存の Solve 結果表示より優先して描画する (picFieldView がある間はそちらを優先)
   picFrame: PicLiveFrame | null;
+  // PIC結果フィールド表示 (done後、「結果表示」セレクトでライブ以外を選んだ場合のみ非null)。
+  // 存在する間は picFrame / Solve 結果表示より優先して描画し、粒子オーバーレイは出さない
+  picFieldView: PicFieldView | null;
   onSelectRegion: (id: string | null) => void;
   onDeleteRegion: (id: string) => void;
   onAddRegion: (geom: Point[] | CircleShape) => void;
@@ -273,6 +286,7 @@ export default function CadCanvas({
   traceResult,
   showTrajectories,
   picFrame,
+  picFieldView,
   onSelectRegion,
   onDeleteRegion,
   onAddRegion,
@@ -393,10 +407,88 @@ export default function CadCanvas({
     }
     ctx.stroke();
 
+    // カラーバー描画の共通ヘルパー (右下、画面固定・縦グラデーション)。
+    // Solve結果 / PIC結果フィールド のどちらの表示でも使い回す
+    const drawColorbar = (minVal: number, maxVal: number, unit: string) => {
+      const barW = 16;
+      const barH = 140;
+      const marginRight = 10; // キャンバス右端からの余白
+      const labelGap = 8;     // バーとラベルの間隔
+
+      const maxLabel = `${formatColorbarValue(maxVal)} ${unit}`;
+      const minLabel = `${formatColorbarValue(minVal)} ${unit}`;
+
+      ctx.font = "11px system-ui, sans-serif";
+      // ラベル幅を測り、右端からはみ出さないようバー位置自体を左にずらして確保する
+      const labelW = Math.max(ctx.measureText(maxLabel).width, ctx.measureText(minLabel).width);
+      const barX = rect.width - marginRight - labelW - labelGap - barW;
+      const barY = rect.height - barH - 24;
+
+      const grad = ctx.createLinearGradient(0, barY, 0, barY + barH);
+      const steps = 16;
+      for (let i = 0; i <= steps; i++) {
+        grad.addColorStop(i / steps, colormap(1 - i / steps));
+      }
+      ctx.fillStyle = grad;
+      ctx.fillRect(barX, barY, barW, barH);
+      ctx.strokeStyle = "rgba(216,220,228,0.6)";
+      ctx.lineWidth = 1;
+      ctx.strokeRect(barX, barY, barW, barH);
+
+      ctx.fillStyle = "#d8dce4";
+      ctx.textAlign = "left";
+      ctx.textBaseline = "middle";
+      ctx.fillText(maxLabel, barX + barW + labelGap, barY);
+      ctx.fillText(minLabel, barX + barW + labelGap, barY + barH);
+    };
+
+    // PIC結果フィールド表示: done後に「結果表示」セレクトでライブ以外を選んだ場合、
+    // 選択したフィールドをカラーマップで描画する (節点値は要素を3節点平均で塗り、
+    // 要素値(e_abs)はそのまま塗る)。対数スケール指定時は値≤0を全体の最小正値にクランプしてから
+    // log10 する (全て≤0なら線形にフォールバック)。粒子オーバーレイ・カラーバーはここで完結させ、
+    // Solve/Mesh/PICライブ側の描画は行わない (以降のブロックで !picFieldView を条件に含める)
+    if (picFieldView) {
+      const { nodes, triangles } = picFieldView.mesh;
+      const { values, nodeBased, log } = picFieldView;
+
+      let rawMin = Infinity;
+      let rawMax = -Infinity;
+      let minPositive = Infinity;
+      for (const v of values) {
+        if (v < rawMin) rawMin = v;
+        if (v > rawMax) rawMax = v;
+        if (v > 0 && v < minPositive) minPositive = v;
+      }
+      if (!Number.isFinite(rawMin)) { rawMin = 0; rawMax = 0; }
+      const useLog = log && Number.isFinite(minPositive);
+      const transformed = useLog
+        ? values.map((v) => Math.log10(v > 0 ? v : minPositive))
+        : values;
+      const tMin = useLog ? Math.log10(minPositive) : rawMin;
+      const tMax = useLog ? Math.log10(rawMax) : rawMax;
+      const range = tMax - tMin || 1;
+
+      for (let i = 0; i < triangles.length; i++) {
+        const [a, b, c] = triangles[i];
+        const val = nodeBased ? (transformed[a] + transformed[b] + transformed[c]) / 3 : transformed[i];
+        const t = (val - tMin) / range;
+        ctx.fillStyle = colormap(t);
+        ctx.beginPath();
+        ctx.moveTo(sx(nodes[a][0]), sy(nodes[a][1]));
+        ctx.lineTo(sx(nodes[b][0]), sy(nodes[b][1]));
+        ctx.lineTo(sx(nodes[c][0]), sy(nodes[c][1]));
+        ctx.closePath();
+        ctx.fill();
+      }
+
+      drawColorbar(rawMin, rawMax, picFieldView.unit);
+    }
+
     // PICライブ表示: φ (節点値) を既存の電位カラーマップと同じ経路で描画し、
     // 粒子を点描画する (電子=シアン、イオン=オレンジ)。実行中〜done後の最終フレームまで
-    // Solve/Mesh 側の表示より優先する。フレームごとに v_min/v_max を再計算する
-    if (picFrame) {
+    // Solve/Mesh 側の表示より優先する。フレームごとに v_min/v_max を再計算する。
+    // picFieldView (結果フィールド表示) が選択されている間はこちらは描画しない
+    if (!picFieldView && picFrame) {
       const { nodes, triangles } = picFrame.mesh;
       const phi = picFrame.phi;
       let phiMin = Infinity;
@@ -432,8 +524,8 @@ export default function CadCanvas({
     }
 
     // Mesh ボタンで生成したメッシュのワイヤーフレーム (解析結果がない状態でも見えるようにする)。
-    // Solve 結果がある間は Solve 側の表示 (カラーマップ) を優先する。PICライブ表示中は出さない
-    if (!picFrame && !result && meshResult) {
+    // Solve 結果がある間は Solve 側の表示 (カラーマップ) を優先する。PICライブ/結果フィールド表示中は出さない
+    if (!picFieldView && !picFrame && !result && meshResult) {
       const { nodes, triangles, region_of_triangle } = meshResult;
       const regionColor = (type: Region["type"]): string =>
         type === "conductor"
@@ -460,8 +552,9 @@ export default function CadCanvas({
       }
     }
 
-    // 解析結果: カラーマップ (fieldView に応じて電位 V または要素ごとの |E| を塗る)。PICライブ表示中は出さない
-    if (!picFrame && result) {
+    // 解析結果: カラーマップ (fieldView に応じて電位 V または要素ごとの |E| を塗る)。
+    // PICライブ/結果フィールド表示中は出さない
+    if (!picFieldView && !picFrame && result) {
       const { nodes, triangles } = result.mesh;
       const { v, v_min, v_max, e_field, e_abs_max } = result;
 
@@ -868,41 +961,13 @@ export default function CadCanvas({
       ctx.fill();
     }
 
-    // カラーバー (右下、画面固定・縦グラデーション)。PICライブ表示中は Solve 結果のバーは出さない
-    if (!picFrame && result) {
-      const barW = 16;
-      const barH = 140;
-      const marginRight = 10; // キャンバス右端からの余白
-      const labelGap = 8;     // バーとラベルの間隔
-
+    // カラーバー (右下、画面固定・縦グラデーション)。PICライブ/結果フィールド表示中は
+    // Solve 結果のバーは出さない (結果フィールド側のバーは picFieldView ブロックで描画済み)
+    if (!picFieldView && !picFrame && result) {
       const unit = fieldView === "v" ? "V" : "V/m";
       const maxVal = fieldView === "v" ? result.v_max : result.e_abs_max;
       const minVal = fieldView === "v" ? result.v_min : 0;
-      const maxLabel = `${formatColorbarValue(maxVal)} ${unit}`;
-      const minLabel = `${formatColorbarValue(minVal)} ${unit}`;
-
-      ctx.font = "11px system-ui, sans-serif";
-      // ラベル幅を測り、右端からはみ出さないようバー位置自体を左にずらして確保する
-      const labelW = Math.max(ctx.measureText(maxLabel).width, ctx.measureText(minLabel).width);
-      const barX = rect.width - marginRight - labelW - labelGap - barW;
-      const barY = rect.height - barH - 24;
-
-      const grad = ctx.createLinearGradient(0, barY, 0, barY + barH);
-      const steps = 16;
-      for (let i = 0; i <= steps; i++) {
-        grad.addColorStop(i / steps, colormap(1 - i / steps));
-      }
-      ctx.fillStyle = grad;
-      ctx.fillRect(barX, barY, barW, barH);
-      ctx.strokeStyle = "rgba(216,220,228,0.6)";
-      ctx.lineWidth = 1;
-      ctx.strokeRect(barX, barY, barW, barH);
-
-      ctx.fillStyle = "#d8dce4";
-      ctx.textAlign = "left";
-      ctx.textBaseline = "middle";
-      ctx.fillText(maxLabel, barX + barW + labelGap, barY);
-      ctx.fillText(minLabel, barX + barW + labelGap, barY + barH);
+      drawColorbar(minVal, maxVal, unit);
     }
 
     // ルーラー (常時表示のオーバーレイ。マウス座標系には影響しない)
@@ -1015,6 +1080,7 @@ export default function CadCanvas({
     traceResult,
     showTrajectories,
     picFrame,
+    picFieldView,
   ]);
 
   // Space キーの追跡 (入力欄にフォーカス中は無視)

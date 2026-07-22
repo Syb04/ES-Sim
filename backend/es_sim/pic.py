@@ -243,6 +243,13 @@ class PicSimulation:
         self._accum_start: int | None = None
         self._accum_count = 0
         self._accum: dict[str, np.ndarray] = {}
+        # 時間平均フィールドのアキュムレータ (prompts/26、enable_density_accum で確保)
+        self._accum_phi: np.ndarray | None = None
+        self._accum_e: np.ndarray | None = None
+        self._accum_ke_e: np.ndarray | None = None
+        self._accum_ion: np.ndarray | None = None
+        # run_batch 完了時の時間平均フィールド (averaged_fields() の結果)
+        self.fields: dict | None = None
         # 節点集中面積 = Σ隣接要素面積/3 (averaged_density の規格化に使う)。
         # 周期境界では正準節点番号で積むため、スレーブ節点の面積は 0 になる
         self._node_area = np.bincount(
@@ -690,6 +697,11 @@ class PicSimulation:
         """
         dt = self.dt
         t = self.t
+        # このステップが時間平均区間に入るか (step_count はステップ末尾で +1 される)
+        accumulating = (
+            self._accum_start is not None
+            and self.step_count + 1 >= self._accum_start
+        )
 
         # 1. 電荷堆積 → 2. ポアソン求解 (RF 含む V(t) で Dirichlet 更新)
         phi = self._solve_phi(self._deposit(), t)
@@ -784,6 +796,13 @@ class PicSimulation:
                 if res.new_x is not None:
                     # 電離: 衝突位置に新電子 + 新イオン (ガス温度 Maxwell) を生成
                     new_l = self._bary_of(res.new_x, res.new_elem)  # 電子・イオン共通
+                    if accumulating:
+                        # 電離イベント発生位置を P1 重みで散布 (電離レート用)
+                        self._accum_ion += np.bincount(
+                            self.tris_dep[res.new_elem].ravel(),
+                            weights=(res.new_w[:, None] * new_l).ravel(),
+                            minlength=self.n_nodes,
+                        )
                     el.x = np.concatenate([el.x, res.new_x])
                     el.v = np.concatenate([el.v, res.new_v_e])
                     el.w = np.concatenate([el.w, res.new_w])
@@ -806,9 +825,9 @@ class PicSimulation:
         self.t = t + dt
         self.step_count += 1
 
-        # 節点密度アキュムレータ (enable_density_accum 以後、毎ステップ積算)
-        if self._accum_start is not None and self.step_count >= self._accum_start:
-            self._accumulate_density()
+        # 節点密度・時間平均フィールド (enable_density_accum 以後、毎ステップ積算)
+        if accumulating:
+            self._accumulate_fields(phi, ex, ey)
 
         # 診断記録 (毎ステップ)
         el, io = self.species["electron"], self.species["ion"]
@@ -833,14 +852,20 @@ class PicSimulation:
     # ---- 節点密度の時間平均 ---------------------------------------------------
 
     def enable_density_accum(self, start_step: int) -> None:
-        """節点密度の時間平均を有効化する。
+        """節点密度・時間平均フィールドの積算を有効化する。
 
         step_count (完了ステップ数、1始まり) が start_step 以上のステップから、
         毎ステップ種ごとに P1 重みで節点へマクロ重みを散布して積算する。
+        併せて φ・E ベクトル・電子運動エネルギー・電離イベントも積算する
+        (prompts/26。追加コストは平均区間のみに限られる)。
         """
         self._accum_start = int(start_step)
         self._accum_count = 0
         self._accum = {name: np.zeros(self.n_nodes) for name in self.species}
+        self._accum_phi = np.zeros(self.n_nodes)
+        self._accum_e = np.zeros((len(self.tris), 2))
+        self._accum_ke_e = np.zeros(self.n_nodes)
+        self._accum_ion = np.zeros(self.n_nodes)
 
     def _accumulate_density(self) -> None:
         """1ステップ分の節点重み (Σ w_p L_i) を種ごとに積算する。
@@ -856,6 +881,25 @@ class PicSimulation:
                 self._nidx_cached(sp).ravel(), weights=contrib.ravel(), minlength=self.n_nodes
             )
         self._accum_count += 1
+
+    def _accumulate_fields(self, phi: np.ndarray, ex: np.ndarray, ey: np.ndarray) -> None:
+        """1ステップ分のフィールドと密度を積算する (平均区間のみ呼ばれる)。
+
+        - φ (節点)・E ベクトル (要素) はそのまま加算
+        - 電子温度用に Σ w·L_i·(½m|v|²) (3速度成分) を節点へ散布
+        - 密度は従来の _accumulate_density (カウンタもここで進む)
+        """
+        self._accum_phi += phi
+        self._accum_e[:, 0] += ex
+        self._accum_e[:, 1] += ey
+        el = self.species["electron"]
+        if len(el.x):
+            ke_p = 0.5 * ME * (el.v[:, 0] ** 2 + el.v[:, 1] ** 2 + el.v[:, 2] ** 2)
+            contrib = (el.w * ke_p)[:, None] * self._bary_cached(el)
+            self._accum_ke_e += np.bincount(
+                self._nidx_cached(el).ravel(), weights=contrib.ravel(), minlength=self.n_nodes
+            )
+        self._accumulate_density()
 
     def averaged_density(self) -> dict[str, np.ndarray]:
         """種ごとの時間平均節点密度 [m^-3] を返す。
@@ -875,6 +919,52 @@ class PicSimulation:
                 dens = dens[self.canon]
             result[name] = dens
         return result
+
+    def averaged_fields(self) -> dict | None:
+        """時間平均した2Dフィールド一式を返す (WS done / 検証スクリプト用、prompts/26)。
+
+        平均区間で1ステップも積算していなければ None。
+          phi:      節点、時間平均電位 [V]
+          e_abs:    要素、時間平均 |E| [V/m] (E ベクトルを平均してから絶対値)
+          n_e/n_i:  節点、時間平均密度 [m^-3]
+          te_ev:    節点、電子温度 [eV] = (2/3)×平均運動エネルギー (3速度成分)。
+                    重み和 0 (粒子なし) の節点は 0
+          ion_rate: 節点、電離レート [m^-3 s^-1]
+                    (電離イベントの P1 散布を平均時間 × 節点集中面積で規格化)
+          avg_steps: 実際に平均したステップ数
+        """
+        if self._accum_start is None or self._accum_count == 0:
+            return None
+        cnt = self._accum_count
+        dens = self.averaged_density()
+
+        phi_avg = self._accum_phi / cnt
+        e_avg = self._accum_e / cnt
+        e_abs = np.sqrt(e_avg[:, 0] ** 2 + e_avg[:, 1] ** 2)
+
+        # Te[eV] = (2/3)·(エネルギー和 / 重み和)/e。重み和 0 の節点は 0
+        w_e = self._accum["electron"]
+        te = np.zeros(self.n_nodes)
+        pos = w_e > 0.0
+        te[pos] = (2.0 / 3.0) * (self._accum_ke_e[pos] / w_e[pos]) / QE
+
+        # 電離レート = 積算重み / (平均時間 × 節点集中面積)。
+        # 周期スレーブ節点は面積 0 なのでゼロ割を避けてマスター値をコピーする
+        na = np.where(self._node_area > 0.0, self._node_area, 1.0)
+        ion_rate = self._accum_ion / (cnt * self.dt * na)
+        if self.canon is not None:
+            te = te[self.canon]
+            ion_rate = ion_rate[self.canon]
+
+        return {
+            "phi": phi_avg,
+            "e_abs": e_abs,
+            "n_e": dens["electron"],
+            "n_i": dens["ion"],
+            "te_ev": te,
+            "ion_rate": ion_rate,
+            "avg_steps": cnt,
+        }
 
     # ---- フレーム・実行 -------------------------------------------------------
 
@@ -904,7 +994,20 @@ class PicSimulation:
 
         callback(frame) は frame_every ステップごとに呼ばれる。
         should_stop() が True を返したら中断する (WS の stop コマンド用)。
+        完了時に時間平均フィールドを self.fields へ格納する (averaged_fields()
+        の結果。WS の done 送出と検証スクリプトが利用する)。
         """
+        # 時間平均区間を決めて積算を有効化する (avg_steps、None なら最後の 25%)。
+        # enable_density_accum が手動で呼ばれていればその設定を尊重する
+        if self._accum_start is None:
+            avg = (
+                self.pic.avg_steps
+                if self.pic.avg_steps is not None
+                else max(1, self.pic.n_steps // 4)
+            )
+            avg = min(avg, self.pic.n_steps)
+            self.enable_density_accum(self.step_count + self.pic.n_steps - avg + 1)
+
         frames: list[dict] = []
         for _ in range(self.pic.n_steps):
             if should_stop is not None and should_stop():
@@ -915,4 +1018,5 @@ class PicSimulation:
                 frames.append(frame)
                 if callback is not None:
                     callback(frame)
+        self.fields = self.averaged_fields()
         return self.history, frames

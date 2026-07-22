@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "./api";
 import CadCanvas from "./canvas/CadCanvas";
-import type { FieldView, Tool } from "./canvas/CadCanvas";
+import type { FieldView, PicFieldView, Tool } from "./canvas/CadCanvas";
 import ProfilePanel from "./panels/ProfilePanel";
 import FieldPanel from "./panels/FieldPanel";
 import ParticlePanel from "./panels/ParticlePanel";
-import PicPanel from "./panels/PicPanel";
+import PicPanel, { PIC_FIELD_META } from "./panels/PicPanel";
+import type { PicResultField } from "./panels/PicPanel";
 import { PicClient } from "./picClient";
 import { useHistory } from "./useHistory";
 import { toDiagArray } from "./types";
@@ -18,6 +19,7 @@ import type {
   MeshResult,
   ParticleSettings,
   PicDiag,
+  PicFields,
   PicFrameMsg,
   PicLiveFrame,
   PicSettings,
@@ -58,6 +60,7 @@ const DEFAULT_PIC: PicSettings = {
   frame_every: 20,
   mcc: null,
   see_energy_ev: 2.0,
+  avg_steps: null,
 };
 
 // pic.injection.emitter は常にフェーズ2 (粒子) パネルの現在のエミッタ設定で上書きしてから
@@ -137,6 +140,11 @@ export default function App() {
   const [picFrame, setPicFrame] = useState<PicFrameMsg | null>(null);
   const [picHistory, setPicHistory] = useState<PicDiag[]>([]);
   const [picError, setPicError] = useState<string | null>(null);
+  // done メッセージで受け取った時間平均フィールド一式。新規実行開始時にリセットする
+  const [picFields, setPicFields] = useState<PicFields | null>(null);
+  // 「結果表示」セレクトの選択と対数スケールチェックボックス。新規実行開始時に既定 (ライブ/線形) へ戻す
+  const [picResultField, setPicResultField] = useState<PicResultField>("live");
+  const [picLogScale, setPicLogScale] = useState(false);
   const picClientRef = useRef<PicClient | null>(null);
 
   // アンマウント時に WebSocket 接続を確実に閉じる
@@ -262,6 +270,10 @@ export default function App() {
     setPicFrame(null);
     setPicHistory([]);
     setPicRunning(true);
+    // 新しい実行を開始したら結果フィールド表示 (前回 done の残骸) をリセットする
+    setPicFields(null);
+    setPicResultField("live");
+    setPicLogScale(false);
     const client = new PicClient({
       onStarted: (msg) => setPicStarted(msg),
       onFrame: (msg) => {
@@ -272,6 +284,7 @@ export default function App() {
         // バックエンドの history は列ごとの辞書形式なので行ごとの PicDiag[] に変換する
         // (形式不一致のまま描画するとチャートが例外を投げて画面全体が落ちるため必ず変換を通す)
         setPicHistory(toDiagArray(msg.history));
+        setPicFields(msg.fields ?? null);
         setPicRunning(false);
       },
       onError: (detail) => {
@@ -571,6 +584,19 @@ export default function App() {
       ? { mesh: picStarted.mesh, phi: picFrame.phi, particles: picFrame.particles }
       : null;
 
+  // PIC結果フィールド表示用ビュー (「結果表示」セレクトでライブ以外を選び、fields がある場合のみ)。
+  // CadCanvas へは値配列・節点/要素の別・単位・対数フラグを1つの prop にまとめて渡す
+  const picFieldView: PicFieldView | null =
+    picResultField !== "live" && picFields && picStarted
+      ? {
+          mesh: picStarted.mesh,
+          values: picFields[picResultField],
+          nodeBased: PIC_FIELD_META[picResultField].nodeBased,
+          unit: PIC_FIELD_META[picResultField].unit,
+          log: picLogScale,
+        }
+      : null;
+
   return (
     <div className="app">
       <div className="toolbar">
@@ -703,6 +729,7 @@ export default function App() {
             traceResult={traceResult}
             showTrajectories={showTrajectories}
             picFrame={picLiveFrame}
+            picFieldView={picFieldView}
             onSelectRegion={selectRegionFromCanvas}
             onDeleteRegion={deleteRegion}
             onAddRegion={addRegion}
@@ -835,6 +862,11 @@ export default function App() {
                 frame={picFrame}
                 history={picHistory}
                 error={picError}
+                fields={picFields}
+                resultField={picResultField}
+                onResultFieldChange={setPicResultField}
+                logScale={picLogScale}
+                onLogScaleChange={setPicLogScale}
               />
             </div>
 
