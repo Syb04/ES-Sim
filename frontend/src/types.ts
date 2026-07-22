@@ -102,9 +102,24 @@ export interface Emitter {
   seed?: number;           // maxwell サンプリングの乱数シード (再現性確保)
 }
 
+// Fowler–Nordheim (FN) 電界放出源。particles.fn / pic.fn。null/undefined = 無効。
+// edges か regions の少なくとも一方が必要 (バックエンドが両方空を 422 で拒否する)
+export interface FnEmission {
+  edges: number[];        // domain 外周のエッジ番号 (dirichlet 辺から選ぶ)
+  regions: string[];      // conductor 領域の id
+  phi_ev: number;         // 仕事関数 φ [eV] 既定 4.5
+  beta: number;           // 電界増倍係数 β 既定 1.0
+  n: number;              // trace 時の放出マクロ粒子総数 既定 200
+  init_energy_ev: number; // 放出電子の初期エネルギー [eV] 既定 0.1
+  macro_weight?: number | null; // PIC のみ: マクロ重み。null なら初期プラズマと同じ
+  seed: number;           // PIC の放出位置乱数シード 既定 0
+}
+
 export interface ParticleSettings {
   species: Species;
   emitter: Emitter;
+  // FN 電界放出源 (prompts/46)。指定時はエミッタ・粒子種は無視され、電極表面から電子を放出する
+  fn?: FnEmission | null;
   dt: number | null; // 秒。null なら自動推定
   n_steps: number;
   save_every: number;
@@ -174,6 +189,8 @@ export interface PicSettings {
   collector?: PicCollectorSettings | null;
   // 複数コレクタ (最大8個)。バックエンドは旧単数形をこちらへ正規化する
   collectors?: PicCollectorSettings[];
+  // FN 電界放出源 (prompts/46)。毎ステップの表面電界から放出する。null/undefined = 無効
+  fn?: FnEmission | null;
 }
 
 // IEDF/IADF コレクタ線分の設定
@@ -201,6 +218,9 @@ export interface PicDiag {
   ion_events?: number;  // 電離数 (累計)
   see_events?: number;  // SEE発生数 (累計)
   surf_q?: number;      // 誘電体の累計表面電荷 [C/m] (全誘電体合計)
+  // FN 電界放出 (prompts/46)。未対応バックエンドでは undefined
+  fn_i?: number;        // そのステップの総放出電流 [A/m]
+  fn_events?: number;   // 累計放出マクロ電子数
 }
 
 // PIC診断履歴 (done メッセージの形式)。バックエンド (pic.py) は列ごとの辞書
@@ -226,6 +246,7 @@ export function toDiagArray(h: PicHistoryDict | PicDiag[] | null | undefined): P
       phi_min: col(h.phi_min, i), phi_max: col(h.phi_max, i),
       coll_e: colOpt(h.coll_e, i), ion_events: colOpt(h.ion_events, i), see_events: colOpt(h.see_events, i),
       surf_q: colOpt(h.surf_q, i),
+      fn_i: colOpt(h.fn_i, i), fn_events: colOpt(h.fn_events, i),
     };
   }
   return out;
@@ -350,6 +371,10 @@ export interface TraceResult {
   final_energy_ev: number[];             // 最終運動エネルギー [eV]
   final_angle_deg: number[];             // 最終速度の向き [度] (x軸から反時計回り、-180〜180)。absorbed 粒子では衝突時の入射方向
   dt: number;                            // 実際に使った dt
+  // FN 電界放出 (prompts/46、fn 指定時のみ非 null): 粒子ごとの担持電流と総放出電流。
+  // 単位は xy: [A/m] (奥行き1m)、rz/rz_x0: [A]
+  currents?: number[] | null;
+  fn_current?: number | null;
 }
 
 export interface MeshResult {

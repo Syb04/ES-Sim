@@ -1200,6 +1200,7 @@ export default function App() {
 
             <div style={{ display: activeTab === "particle" ? "block" : "none" }}>
               <ParticlePanel
+                project={project}
                 particles={particles}
                 onChange={setParticles}
                 busy={busy}
@@ -1213,6 +1214,7 @@ export default function App() {
 
             <div style={{ display: activeTab === "pic" ? "block" : "none" }}>
               <PicPanel
+                project={project}
                 pic={pic}
                 onChange={setPic}
                 emitter={particles.emitter}

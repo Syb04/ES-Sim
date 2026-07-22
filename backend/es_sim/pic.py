@@ -27,6 +27,7 @@ import numpy as np
 import scipy.sparse.linalg as spla
 
 from .fem import EPS0, _material_arrays, assemble
+from .fn import build_fn_surface, fn_segment_currents
 from .mcc import MccModel
 from .meshing import generate_mesh
 from .particles import (
@@ -265,6 +266,32 @@ class PicSimulation:
             # 毎ステップの実電荷 I·dt を n 個のマクロ粒子へ等分
             self._inj_w = inj.current_a_per_m * self.dt / (QE * inj.emitter.n)
 
+        # ---- FN 電界放出 (prompts/46) ----------------------------------------
+        # fn=null なら無効 (従来動作と完全一致)。毎ステップの表面電界から
+        # I·dt 分の電子を放出面 (電極表面エッジ列) から注入する
+        fn = self.pic.fn
+        self._fn_surf = None
+        self.fn_events = 0  # 放出したマクロ電子の累計
+        if fn is not None:
+            self._fn_surf = build_fn_surface(project, self.mesh, self.adjacency, fn)
+        if self._fn_surf is not None:
+            if fn.macro_weight is not None:
+                self._fn_w = float(fn.macro_weight)
+            elif ip is not None:
+                self._fn_w = w0  # 初期プラズマと同じマクロ重み
+            else:
+                raise ValueError(
+                    "pic.fn.macro_weight を指定してください (初期プラズマが無いため自動決定できません)"
+                )
+            # セグメントごとの端数マクロ粒子の持ち越し (毎ステップの床関数の余り)
+            self._fn_frac = np.zeros(len(self._fn_surf.elem))
+            self._fn_rng = np.random.default_rng(fn.seed)
+            self._fn_speed = (
+                math.sqrt(2.0 * fn.init_energy_ev * QE / ME)
+                if fn.init_energy_ev > 0.0
+                else 0.0
+            )
+
         # ---- MCC (モンテカルロ衝突、prompts/19) ------------------------------
         # mcc=null なら無効 (従来の無衝突動作と完全一致)
         self.mcc = MccModel(self.pic.mcc, self.m_ion) if self.pic.mcc is not None else None
@@ -350,6 +377,7 @@ class PicSimulation:
                 "t", "ke_e", "ke_i", "fe", "n_e", "n_i",
                 "wall_e", "wall_i", "phi_min", "phi_max",
                 "coll_e", "ion_events", "see_events", "surf_q",
+                "fn_i", "fn_events",
             )
         }
         self._f_immobile: dict[str, np.ndarray] = {}  # 不動種の堆積キャッシュ
@@ -902,6 +930,49 @@ class PicSimulation:
         sp.elem = np.concatenate([sp.elem, elem])
         self._bary_append(sp, self._inj_bary)
 
+    def _emit_fn(self, exy: np.ndarray) -> float:
+        """FN 電界放出 (prompts/46)。現ステップの表面電界から電子を放出する。
+
+        各セグメントの放出実電子数 I·dt/e をマクロ重み w で割り、床関数の余りを
+        セグメントごとに持ち越す (時間平均で正確に I を再現する)。放出位置は
+        セグメント上の一様乱数、初速は法線方向 init_energy_ev。注入と同様に
+        初期半ステップ後退キックを適用する。
+
+        戻り値: このステップの総放出電流 [A/m]。
+        """
+        surf = self._fn_surf
+        fn = self.pic.fn
+        _f_surf, seg_i = fn_segment_currents(surf, exy, fn, "xy")
+        i_tot = float(seg_i.sum())
+        quota = seg_i * (self.dt / (QE * self._fn_w)) + self._fn_frac
+        n_int = np.floor(quota).astype(np.int64)
+        self._fn_frac = quota - n_int
+        total = int(n_int.sum())
+        if total == 0:
+            return i_tot
+        seg_idx = np.repeat(np.arange(len(seg_i)), n_int)
+        t = self._fn_rng.random(total)
+        pos = (
+            surf.pa[seg_idx]
+            + t[:, None] * (surf.pb[seg_idx] - surf.pa[seg_idx])
+            + surf.delta[seg_idx, None] * surf.nrm[seg_idx]
+        )
+        elem = surf.elem[seg_idx]
+        sp = self.species["electron"]
+        v = np.zeros((total, 3))
+        v[:, :2] = self._fn_speed * surf.nrm[seg_idx]
+        # 初期半ステップ後退キック (注入と同じ規約)
+        e_at = exy[elem]
+        v[:, :2] -= 0.5 * self.dt * (sp.q / sp.m) * e_at
+        bary = self._bary_of(pos, elem)
+        sp.x = np.concatenate([sp.x, pos])
+        sp.v = np.concatenate([sp.v, v])
+        sp.w = np.concatenate([sp.w, np.full(total, self._fn_w)])
+        sp.elem = np.concatenate([sp.elem, elem])
+        self._bary_append(sp, bary)
+        self.fn_events += total
+        return i_tot
+
     def _run_walks(self, pushed) -> list:
         """種ごとの walk を実行する (2種以上なら並列)。
 
@@ -1076,6 +1147,8 @@ class PicSimulation:
         # 6. 注入
         if self.pic.injection is not None:
             self._inject(ex, ey)
+        # 6.5. FN 電界放出 (prompts/46)。表面電界はこのステップの場 (exy) を使う
+        fn_i = self._emit_fn(exy) if self._fn_surf is not None else 0.0
 
         self.t = t + dt
         self.step_count += 1
@@ -1102,6 +1175,9 @@ class PicSimulation:
         h["see_events"].append(self.see_events)
         # 累計表面電荷 (全誘電体合計 [C/m])。誘電体なしなら常に 0
         h["surf_q"].append(float(self.q_surf.sum()))
+        # FN 電界放出: このステップの総放出電流 [A/m] と累計放出マクロ電子数
+        h["fn_i"].append(fn_i)
+        h["fn_events"].append(self.fn_events)
         return phi
 
     # ---- 節点密度の時間平均 ---------------------------------------------------

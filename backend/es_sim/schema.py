@@ -175,12 +175,48 @@ class Emitter(BaseModel):
         return self
 
 
+class FnEmission(BaseModel):
+    """Fowler–Nordheim 電界放出源 (prompts/46)。
+
+    電極 (Dirichlet) 表面の指定区間から、表面電界に応じた FN 電流密度
+    (Murphy-Good 式 + Forbes 近似、fn.py 参照) で電子を放出する。
+    放出面の指定は edges (domain 外周エッジ番号) と regions (conductor 領域 id)
+    の少なくとも一方。
+    """
+
+    edges: list[int] = []
+    regions: list[str] = []
+    phi_ev: float = Field(4.5, gt=0, description="仕事関数 φ [eV]")
+    beta: float = Field(1.0, gt=0, description="電界増倍係数 β")
+    n: int = Field(200, gt=0, description="trace 時の放出マクロ粒子総数")
+    init_energy_ev: float = Field(0.1, ge=0, description="放出電子の初期エネルギー [eV]")
+    # PIC のみ: マクロ重み (実電子数/マクロ粒子)。None なら初期プラズマの重みを使う
+    macro_weight: float | None = Field(None, gt=0)
+    seed: int = 0  # PIC の放出位置サンプリング乱数シード
+
+    @model_validator(mode="after")
+    def _check_sources(self) -> "FnEmission":
+        if not self.edges and not self.regions:
+            raise ValueError("fn には edges か regions を少なくとも1つ指定してください")
+        return self
+
+
 class ParticleSettings(BaseModel):
     species: Species = Species()
-    emitter: Emitter
+    # 通常エミッタ。fn (FN 電界放出) 指定時は省略可 (指定されていても無視される)
+    emitter: Emitter | None = None
+    # FN 電界放出源 (prompts/46)。指定時は emitter の代わりに電極表面から放出する。
+    # 放出種は常に電子 (species は無視される)
+    fn: FnEmission | None = None
     dt: float | None = None  # 秒。None なら自動推定 (particles.py 参照)
     n_steps: int = Field(5000, gt=0)
     save_every: int = Field(10, gt=0)
+
+    @model_validator(mode="after")
+    def _check_source(self) -> "ParticleSettings":
+        if self.emitter is None and self.fn is None:
+            raise ValueError("particles には emitter か fn のどちらかの指定が必要です")
+        return self
 
 
 # ---- PIC (フェーズ3、仕様書 §9) ----------------------------------------------
@@ -297,6 +333,9 @@ class PicSettings(BaseModel):
     # 到達粒子は吸収せず法線速度成分を反転して境界内へ折り返す (壁カウンタに含めない)。
     # 当該エッジは境界条件なし (Neumann) を想定。2D ストリップで 1D 問題を模擬する用途
     reflect_edges: list[int] = Field(default_factory=list)
+    # FN 電界放出源 (prompts/46)。毎ステップの表面電界から I·dt 分の電子を放出する。
+    # null なら無効 (従来動作と完全一致)
+    fn: FnEmission | None = None
 
 
 class Project(BaseModel):
@@ -397,3 +436,7 @@ class TraceResult(BaseModel):
     final_energy_ev: list[float]
     final_angle_deg: list[float]                # 最終速度の向き [度] (x軸から反時計回り, -180〜180)
     dt: float                                  # 実際に使った dt [s]
+    # FN 電界放出 (prompts/46、fn 指定時のみ非 None):
+    # 粒子ごとの担持電流と総放出電流。単位は xy: [A/m] (奥行き1m)、rz/rz_x0: [A]
+    currents: list[float] | None = None
+    fn_current: float | None = None

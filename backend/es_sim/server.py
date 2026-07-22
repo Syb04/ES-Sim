@@ -124,6 +124,8 @@ def trace_endpoint(project: Project) -> TraceResult:
         final_energy_ev=result.final_energy_ev.tolist(),
         final_angle_deg=result.final_angle_deg.tolist(),
         dt=result.dt,
+        currents=None if result.currents is None else result.currents.tolist(),
+        fn_current=result.fn_current,
     )
 
 

@@ -1,16 +1,20 @@
 import { CommitNumberInput } from "../CommitInput";
 import { mToMm, mmToM } from "../units";
-import type { Emitter, ParticleSettings, Species, TraceResult } from "../types";
+import FnEmissionSection from "./FnPanel";
+import { isAxisymmetric } from "../types";
+import type { Emitter, FnEmission, ParticleSettings, Project, Species, TraceResult } from "../types";
 
 /**
  * 粒子パネル
  * - 粒子種 (電子/陽子/カスタム)・エミッタ (line/point)・積分設定の編集
  * - project.particles として保存/読込対象だが、編集操作自体は Undo/Redo 履歴には積まない
  *   (App 側で geometry とは独立な state として管理している)
+ * - FN (Fowler–Nordheim) 電界放出の設定 (有効時はエミッタ・粒子種は無視される)
  * - Trace 実行ボタンと結果サマリの表示
  */
 
 interface Props {
+  project: Project;
   particles: ParticleSettings;
   onChange: (next: ParticleSettings) => void;
   busy: boolean;
@@ -25,6 +29,7 @@ const ELECTRON: Species = { preset: "electron" };
 const PROTON: Species = { preset: "proton" };
 
 export default function ParticlePanel({
+  project,
   particles,
   onChange,
   busy,
@@ -34,11 +39,13 @@ export default function ParticlePanel({
   showTrajectories,
   onToggleTrajectories,
 }: Props) {
-  const { species, emitter } = particles;
+  const { species, emitter, fn } = particles;
+  const fnEnabled = !!fn;
 
   const setSpecies = (next: Species) => onChange({ ...particles, species: next });
   const setEmitter = (patch: Partial<Emitter>) =>
     onChange({ ...particles, emitter: { ...emitter, ...patch } });
+  const setFn = (next: FnEmission | null) => onChange({ ...particles, fn: next });
 
   // Maxwell 分布かどうか (未指定は mono 扱い)
   const energyDist = emitter.energy_dist ?? "mono";
@@ -85,146 +92,156 @@ export default function ParticlePanel({
 
   return (
     <>
-      <h2>粒子種</h2>
-      <div className="field">
-        <span className="label">種類</span>
-        <select
-          value={species.preset}
-          onChange={(e) => {
-            const v = e.target.value;
-            if (v === "electron") setSpecies(ELECTRON);
-            else if (v === "proton") setSpecies(PROTON);
-            else setSpecies({ preset: "custom", q: species.q ?? -1.6e-19, m: species.m ?? 9.1e-31 });
-          }}
-        >
-          <option value="electron">電子</option>
-          <option value="proton">陽子</option>
-          <option value="custom">カスタム</option>
-        </select>
-      </div>
-      {species.preset === "custom" && (
+      {fnEnabled ? (
+        <p className="hint">
+          FN電界放出が有効なため、粒子種・エミッタの設定は無効です (下の「FN電界放出」を参照)。
+        </p>
+      ) : (
         <>
+          <h2>粒子種</h2>
           <div className="field">
-            <span className="label">q [C]</span>
+            <span className="label">種類</span>
+            <select
+              value={species.preset}
+              onChange={(e) => {
+                const v = e.target.value;
+                if (v === "electron") setSpecies(ELECTRON);
+                else if (v === "proton") setSpecies(PROTON);
+                else setSpecies({ preset: "custom", q: species.q ?? -1.6e-19, m: species.m ?? 9.1e-31 });
+              }}
+            >
+              <option value="electron">電子</option>
+              <option value="proton">陽子</option>
+              <option value="custom">カスタム</option>
+            </select>
+          </div>
+          {species.preset === "custom" && (
+            <>
+              <div className="field">
+                <span className="label">q [C]</span>
+                <CommitNumberInput
+                  value={species.q ?? 0}
+                  onCommit={(q) => setSpecies({ preset: "custom", q, m: species.m ?? 9.1e-31 })}
+                />
+              </div>
+              <div className="field">
+                <span className="label">m [kg]</span>
+                <CommitNumberInput
+                  value={species.m ?? 0}
+                  onCommit={(m) => setSpecies({ preset: "custom", q: species.q ?? -1.6e-19, m })}
+                />
+              </div>
+            </>
+          )}
+
+          <h2>エミッタ</h2>
+          <div className="field">
+            <span className="label">種別</span>
+            <select value={emitter.kind} onChange={(e) => setEmitter({ kind: e.target.value as Emitter["kind"] })}>
+              <option value="line">ライン</option>
+              <option value="point">点</option>
+            </select>
+          </div>
+          <div className="field">
+            <span className="label">p1 x [mm]</span>
             <CommitNumberInput
-              value={species.q ?? 0}
-              onCommit={(q) => setSpecies({ preset: "custom", q, m: species.m ?? 9.1e-31 })}
+              value={mToMm(emitter.p1[0])}
+              step="0.1"
+              onCommit={(x) => setEmitter({ p1: [mmToM(x), emitter.p1[1]] })}
             />
           </div>
           <div className="field">
-            <span className="label">m [kg]</span>
+            <span className="label">p1 y [mm]</span>
             <CommitNumberInput
-              value={species.m ?? 0}
-              onCommit={(m) => setSpecies({ preset: "custom", q: species.q ?? -1.6e-19, m })}
+              value={mToMm(emitter.p1[1])}
+              step="0.1"
+              onCommit={(y) => setEmitter({ p1: [emitter.p1[0], mmToM(y)] })}
             />
           </div>
+          {emitter.kind === "line" && (
+            <>
+              <div className="field">
+                <span className="label">p2 x [mm]</span>
+                <CommitNumberInput
+                  value={mToMm(emitter.p2[0])}
+                  step="0.1"
+                  onCommit={(x) => setEmitter({ p2: [mmToM(x), emitter.p2[1]] })}
+                />
+              </div>
+              <div className="field">
+                <span className="label">p2 y [mm]</span>
+                <CommitNumberInput
+                  value={mToMm(emitter.p2[1])}
+                  step="0.1"
+                  onCommit={(y) => setEmitter({ p2: [emitter.p2[0], mmToM(y)] })}
+                />
+              </div>
+            </>
+          )}
+          <div className="field">
+            <span className="label">粒子数 n</span>
+            <CommitNumberInput value={emitter.n} onCommit={(n) => setEmitter({ n: Math.max(1, Math.round(n)) })} />
+          </div>
+          <div className="field">
+            <span className="label">初期エネルギー [eV]</span>
+            <CommitNumberInput value={emitter.energy_ev} onCommit={(v) => setEmitter({ energy_ev: v })} />
+          </div>
+          <div className="field">
+            <span className="label">射出方向 [deg]</span>
+            <CommitNumberInput value={emitter.direction_deg} onCommit={(v) => setEmitter({ direction_deg: v })} />
+          </div>
+          <div className="field">
+            <span className="label">エネルギー分布</span>
+            <select
+              value={energyDist}
+              onChange={(e) => {
+                const v = e.target.value as "mono" | "maxwell";
+                if (v === "maxwell") {
+                  setEmitter({
+                    energy_dist: "maxwell",
+                    temperature_ev: emitter.temperature_ev ?? 1.0,
+                    seed: emitter.seed ?? 0,
+                  });
+                } else {
+                  setEmitter({ energy_dist: "mono" });
+                }
+              }}
+            >
+              <option value="mono">単一エネルギー</option>
+              <option value="maxwell">Maxwell</option>
+            </select>
+          </div>
+          <div className="field">
+            <span className="label">広がり半角 [deg]</span>
+            <CommitNumberInput
+              value={emitter.spread_deg}
+              onCommit={(v) => setEmitter({ spread_deg: v })}
+              disabled={isMaxwell}
+            />
+          </div>
+          {isMaxwell && (
+            <>
+              <p className="hint">Maxwell分布では熱運動が方向広がりを与えます (広がり半角は無視されます)</p>
+              <div className="field">
+                <span className="label">温度 kT [eV]</span>
+                <CommitNumberInput
+                  value={emitter.temperature_ev ?? 1.0}
+                  onCommit={(v) => setEmitter({ temperature_ev: v })}
+                />
+              </div>
+              <div className="field">
+                <span className="label">乱数シード</span>
+                <CommitNumberInput
+                  value={emitter.seed ?? 0}
+                  onCommit={(v) => setEmitter({ seed: Math.round(v) })}
+                />
+              </div>
+            </>
+          )}
         </>
       )}
 
-      <h2>エミッタ</h2>
-      <div className="field">
-        <span className="label">種別</span>
-        <select value={emitter.kind} onChange={(e) => setEmitter({ kind: e.target.value as Emitter["kind"] })}>
-          <option value="line">ライン</option>
-          <option value="point">点</option>
-        </select>
-      </div>
-      <div className="field">
-        <span className="label">p1 x [mm]</span>
-        <CommitNumberInput
-          value={mToMm(emitter.p1[0])}
-          step="0.1"
-          onCommit={(x) => setEmitter({ p1: [mmToM(x), emitter.p1[1]] })}
-        />
-      </div>
-      <div className="field">
-        <span className="label">p1 y [mm]</span>
-        <CommitNumberInput
-          value={mToMm(emitter.p1[1])}
-          step="0.1"
-          onCommit={(y) => setEmitter({ p1: [emitter.p1[0], mmToM(y)] })}
-        />
-      </div>
-      {emitter.kind === "line" && (
-        <>
-          <div className="field">
-            <span className="label">p2 x [mm]</span>
-            <CommitNumberInput
-              value={mToMm(emitter.p2[0])}
-              step="0.1"
-              onCommit={(x) => setEmitter({ p2: [mmToM(x), emitter.p2[1]] })}
-            />
-          </div>
-          <div className="field">
-            <span className="label">p2 y [mm]</span>
-            <CommitNumberInput
-              value={mToMm(emitter.p2[1])}
-              step="0.1"
-              onCommit={(y) => setEmitter({ p2: [emitter.p2[0], mmToM(y)] })}
-            />
-          </div>
-        </>
-      )}
-      <div className="field">
-        <span className="label">粒子数 n</span>
-        <CommitNumberInput value={emitter.n} onCommit={(n) => setEmitter({ n: Math.max(1, Math.round(n)) })} />
-      </div>
-      <div className="field">
-        <span className="label">初期エネルギー [eV]</span>
-        <CommitNumberInput value={emitter.energy_ev} onCommit={(v) => setEmitter({ energy_ev: v })} />
-      </div>
-      <div className="field">
-        <span className="label">射出方向 [deg]</span>
-        <CommitNumberInput value={emitter.direction_deg} onCommit={(v) => setEmitter({ direction_deg: v })} />
-      </div>
-      <div className="field">
-        <span className="label">エネルギー分布</span>
-        <select
-          value={energyDist}
-          onChange={(e) => {
-            const v = e.target.value as "mono" | "maxwell";
-            if (v === "maxwell") {
-              setEmitter({
-                energy_dist: "maxwell",
-                temperature_ev: emitter.temperature_ev ?? 1.0,
-                seed: emitter.seed ?? 0,
-              });
-            } else {
-              setEmitter({ energy_dist: "mono" });
-            }
-          }}
-        >
-          <option value="mono">単一エネルギー</option>
-          <option value="maxwell">Maxwell</option>
-        </select>
-      </div>
-      <div className="field">
-        <span className="label">広がり半角 [deg]</span>
-        <CommitNumberInput
-          value={emitter.spread_deg}
-          onCommit={(v) => setEmitter({ spread_deg: v })}
-          disabled={isMaxwell}
-        />
-      </div>
-      {isMaxwell && (
-        <>
-          <p className="hint">Maxwell分布では熱運動が方向広がりを与えます (広がり半角は無視されます)</p>
-          <div className="field">
-            <span className="label">温度 kT [eV]</span>
-            <CommitNumberInput
-              value={emitter.temperature_ev ?? 1.0}
-              onCommit={(v) => setEmitter({ temperature_ev: v })}
-            />
-          </div>
-          <div className="field">
-            <span className="label">乱数シード</span>
-            <CommitNumberInput
-              value={emitter.seed ?? 0}
-              onCommit={(v) => setEmitter({ seed: Math.round(v) })}
-            />
-          </div>
-        </>
-      )}
+      <FnEmissionSection project={project} fn={fn} onChange={setFn} mode="trace" />
 
       <h2>積分設定</h2>
       <div className="field">
@@ -304,6 +321,14 @@ export default function ParticlePanel({
               {summary.angleMax !== null ? summary.angleMax.toFixed(2) : "-"} deg
             </span>
           </div>
+          {traceResult && traceResult.fn_current != null && (
+            <div className="kv">
+              <span>FN総放出電流</span>
+              <span>
+                {traceResult.fn_current.toExponential(3)} {isAxisymmetric(project.coord) ? "A" : "A/m"}
+              </span>
+            </div>
+          )}
         </>
       )}
     </>

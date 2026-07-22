@@ -197,6 +197,13 @@ button.danger:hover { background: #b34747; }
   flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted);
 }
 
+/* FN電界放出: 放出面 (Dirichlet辺/conductor領域) 選択チェックボックス一覧 (prompts/46) */
+.fn-surface-list {
+  display: flex; flex-direction: column; gap: 2px; max-height: 140px; overflow-y: auto;
+  margin: 4px 0 8px; font-size: 12px;
+}
+.fn-surface-item { display: flex; align-items: center; gap: 6px; padding: 2px 0; }
+
 /* PICパネル: IEDF/IADF コレクタ一覧 (ラベル/座標/tol編集 + 削除ボタンを行内に表示、prompts/37) */
 .collector-list { display: flex; flex-direction: column; gap: 3px; max-height: 170px; overflow-y: auto; margin-bottom: 8px; }
 .collector-row {

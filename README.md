@@ -75,6 +75,7 @@ Tauri を使わずブラウザで動作確認する場合は `npm run dev` → h
 | `coaxial.json` | 同軸円筒コンデンサ | Solve → 対数分布の電位、容量・エネルギーが解析解と一致 |
 | `ccp_demo.json` | 平面2D の RF 容量結合プラズマ (CCP)。PIC-MCC 一式のショーケース | PIC実行 → RF電極(左辺、±150V/13.56MHz)・GND電極(右辺、ギャップ20mm)間のシース形成、MCC衝突(電離/励起/弾性)、両電極のコレクタ(C1/C2)によるIEDF/IADF、RF位相分解アニメーション |
 | `egun_rz.json` | 軸対称 (r-z、下辺が軸) の簡易電子銃 | 粒子軌道追跡(/trace)→ 接地カソードからエミッタ放出した電子が、集束電極(0V、開口あり)の作る電界で軸へ向けて収束しながら加速され、陽極(+2kV)側へ到達する様子(半径方向位置が終端で縮小することを確認済み) |
+| `fn_diode.json` | 平行平板の真空ナノギャップダイオード (10 µm ギャップ、10 kV、β=10) | FN電界放出(/trace)→ 陰極 (エッジ3) の表面電界 1 GV/m×β から Fowler–Nordheim 電流 (~1.1e8 A/m) を計算し、電流比例で放出した電子が陽極へ ~10 keV で到達する |
 
 `ccp_demo.json` の衝突断面積は **実データではなく合成フィクスチャ**
 (`backend/tests/data/synthetic_electron.txt` / `synthetic_ion.txt` をパースして埋め込んだもの。
@@ -113,6 +114,7 @@ PIC-MCC統合ではTurnerベンチマーク(M. M. Turner et al., *Phys. Plasmas*
 - 隣接要素walk探索+リープフロッグ、境界吸収・鏡面反射、dt自動推定
 - エミッタ(line/point)、電子/陽子/カスタム種、Maxwell分布ソース、着地点・TOF・最終エネルギー集計
 - 軸対称(r-z)座標系対応(軸交差の鏡映込み)
+- FN電界放出(Murphy-Good式+Forbes近似、電極エッジ/conductor領域表面から電流比例で放出、総電流・粒子担持電流を出力)
 
 ### PIC-MCC
 
@@ -121,6 +123,7 @@ PIC-MCC統合ではTurnerベンチマーク(M. M. Turner et al., *Phys. Plasmas*
 - MCC衝突(null-collision: 電子 弾性/励起/電離、イオン 等方/電荷交換)+ LXCatインポート
 - 二次電子放出 γ(電極・誘電体境界ごと)、複数IEDF/IADFコレクタ(最大8個)
 - RF位相分解アニメーション、時間平均フィールド、続き実行(保持状態からの追加実行)
+- FN電界放出(毎ステップの表面電界からI·dt分の電子を注入、端数持ち越しで時間平均的に厳密)
 - WebSocketライブ実行(`/ws/pic`: 進捗・φ・粒子・診断のストリーミング、停止可)
 
 ## prompts/ について

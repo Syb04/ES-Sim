@@ -16,6 +16,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from .fem import Solution, _radial_index
+from .fn import build_fn_surface, distribute_particles, fn_segment_currents
 from .meshing import Mesh
 from .schema import Emitter, ParticleSettings, Project, Species
 
@@ -40,6 +41,9 @@ class TraceOutput:
     final_energy_ev: np.ndarray    # (n_particles,)
     final_angle_deg: np.ndarray    # (n_particles,) 最終速度の向き [度] (atan2(vy, vx))
     dt: float                      # 実際に使った dt [s]
+    # FN 電界放出 (prompts/46、fn 指定時のみ非 None)
+    currents: np.ndarray | None = None  # (n_particles,) 粒子ごとの担持電流
+    fn_current: float | None = None     # 総放出電流 (xy: [A/m]、rz: [A])
 
 
 def _species_qm(species: Species) -> tuple[float, float]:
@@ -514,7 +518,10 @@ def trace(project: Project, mesh: Mesh, sol: Solution) -> TraceOutput:
     if settings is None:
         raise ValueError("project.particles が指定されていません")
 
-    q, m = _species_qm(settings.species)
+    if settings.fn is not None:
+        q, m = -QE, ME  # FN 電界放出は常に電子 (species は無視)
+    else:
+        q, m = _species_qm(settings.species)
 
     tris = mesh.triangles
     coeffs = _barycentric_coeffs(mesh.nodes, tris)
@@ -544,7 +551,47 @@ def trace(project: Project, mesh: Mesh, sol: Solution) -> TraceOutput:
     # 両半キックに組み込む。軸交差 (r<0) は径座標・径速度の鏡映で処理する
     ridx = _radial_index(project.coord)
     rz = ridx is not None
-    x0, v0 = _init_particles(settings.emitter, m, vtheta=rz)
+    fn_currents: np.ndarray | None = None
+    fn_total: float | None = None
+    if settings.fn is not None:
+        # FN 電界放出 (prompts/46): 電極表面の電界から放出電流を計算し、
+        # fn.n 個のマクロ電子を電流比例で放出面に配置する
+        n_comp = 3 if rz else 2
+        surf = build_fn_surface(project, mesh, adjacency, settings.fn)
+        if surf is None:
+            seg_i = np.zeros(0)
+            counts = np.zeros(0, dtype=np.int64)
+            fn_total = 0.0
+        else:
+            _f_surf, seg_i = fn_segment_currents(surf, e_field, settings.fn, project.coord)
+            fn_total = float(seg_i.sum())
+            counts = distribute_particles(seg_i, settings.fn.n)
+        total = int(counts.sum())
+        if total == 0:
+            x0 = np.zeros((0, 2))
+            v0 = np.zeros((0, n_comp))
+            fn_currents = np.zeros(0)
+        else:
+            seg_idx = np.repeat(np.arange(len(counts)), counts)
+            # セグメント内は (j+0.5)/k の等間隔配置 (乱数不使用で決定的)
+            offs = np.concatenate(
+                [(np.arange(k) + 0.5) / k for k in counts if k > 0]
+            )
+            x0 = (
+                surf.pa[seg_idx]
+                + offs[:, None] * (surf.pb[seg_idx] - surf.pa[seg_idx])
+                + surf.delta[seg_idx, None] * surf.nrm[seg_idx]
+            )
+            speed = (
+                math.sqrt(2.0 * settings.fn.init_energy_ev * QE / m)
+                if settings.fn.init_energy_ev > 0.0
+                else 0.0
+            )
+            v0 = np.zeros((total, n_comp))
+            v0[:, :2] = speed * surf.nrm[seg_idx]
+            fn_currents = seg_i[seg_idx] / counts[seg_idx]
+    else:
+        x0, v0 = _init_particles(settings.emitter, m, vtheta=rz)
     n = len(x0)
     ang_l = x0[:, ridx] * v0[:, 2] if rz else None  # L = r·vθ (軸鏡映で符号反転)
     _R_TINY = 1e-30  # 軸上 (r=0) のゼロ割ガード
@@ -696,4 +743,6 @@ def trace(project: Project, mesh: Mesh, sol: Solution) -> TraceOutput:
         final_energy_ev=final_energy_ev,
         final_angle_deg=final_angle_deg,
         dt=dt,
+        currents=fn_currents,
+        fn_current=fn_total,
     )

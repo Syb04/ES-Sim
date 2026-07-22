@@ -2,8 +2,10 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api";
 import { saveTextFile } from "../saveFile";
 import { CommitNumberInput, CommitTextInput } from "../CommitInput";
+import FnEmissionSection from "./FnPanel";
 import type {
   Emitter,
+  FnEmission,
   InitialPlasma,
   McSettings,
   PicCollectorResult,
@@ -15,6 +17,7 @@ import type {
   PicInjection,
   PicSettings,
   PicStartedMsg,
+  Project,
   XsProcess,
 } from "../types";
 
@@ -59,6 +62,7 @@ export const PIC_FIELD_META: Record<Exclude<PicResultField, "live">, { unit: str
  */
 
 interface Props {
+  project: Project;
   pic: PicSettings;
   onChange: (next: PicSettings) => void;
   // フェーズ2 (粒子) パネルの現在のエミッタ設定。injection.emitter として共用する
@@ -161,6 +165,7 @@ function emitterSummary(e: Emitter): string {
 }
 
 export default function PicPanel({
+  project,
   pic,
   onChange,
   emitter,
@@ -243,6 +248,9 @@ export default function PicPanel({
     if (!pic.mcc) return;
     onChange({ ...pic, mcc: { ...pic.mcc, gas: { ...pic.mcc.gas, ...patch } } });
   };
+
+  // FN電界放出 (prompts/46)
+  const setFn = (next: FnEmission | null) => onChange({ ...pic, fn: next });
 
   // LXCatインポート (電子/イオン共通)。ファイルテキストを api.lxcatParse に送り、
   // 成功したら該当プロセス列を置換する。失敗時はエラー文言を表示する
@@ -491,6 +499,8 @@ export default function PicPanel({
           onCommit={(v) => onChange({ ...pic, see_energy_ev: v })}
         />
       </div>
+
+      <FnEmissionSection project={project} fn={pic.fn} onChange={setFn} mode="pic" />
 
       <h2>PIC: 計算設定</h2>
       <div className="field">
@@ -755,6 +765,12 @@ export default function PicPanel({
             <span>誘電体表面電荷 [C/m]</span>
             <span>{frame.diag.surf_q !== undefined ? frame.diag.surf_q.toExponential(3) : "-"}</span>
           </div>
+          {frame.diag.fn_i !== undefined && (
+            <div className="kv">
+              <span>FN放出電流 [A/m]</span>
+              <span>{frame.diag.fn_i.toExponential(3)}</span>
+            </div>
+          )}
           <PicHistoryChart history={history} />
         </>
       )}
