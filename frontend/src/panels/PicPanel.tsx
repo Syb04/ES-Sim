@@ -64,6 +64,8 @@ interface Props {
   // フェーズ2 (粒子) パネルの現在のエミッタ設定。injection.emitter として共用する
   emitter: Emitter;
   canRun: boolean;
+  // true (project.coord === "rz") のとき PIC は未対応。開始/続き実行ボタンを無効化し、注記を出す
+  rzDisabled: boolean;
   running: boolean;
   onStart: () => void;
   onStop: () => void;
@@ -162,6 +164,7 @@ export default function PicPanel({
   onChange,
   emitter,
   canRun,
+  rzDisabled,
   running,
   onStart,
   onStop,
@@ -293,6 +296,9 @@ export default function PicPanel({
 
   return (
     <>
+      {rzDisabled && (
+        <div className="hint">軸対称モードでは PIC は利用できません。</div>
+      )}
       <h2>PIC: 初期プラズマ</h2>
       <div className="field">
         <span className="label">有効</span>
@@ -675,7 +681,7 @@ export default function PicPanel({
       )}
 
       <div className="actions">
-        <button onClick={onStart} disabled={!canRun || running}>
+        <button onClick={onStart} disabled={!canRun || running || rzDisabled}>
           {running ? "実行中..." : "PIC開始"}
         </button>
         <button className="secondary" onClick={onStop} disabled={!running}>
@@ -684,11 +690,13 @@ export default function PicPanel({
         <button
           className="secondary"
           onClick={onContinue}
-          disabled={!canContinue}
+          disabled={!canContinue || rzDisabled}
           title={
-            continueDisabledByProjectChange
-              ? "ジオメトリ・プラズマ設定が変更されたため続き実行できません (再度 PIC開始 してください)"
-              : undefined
+            rzDisabled
+              ? "軸対称モードでは PIC は利用できません"
+              : continueDisabledByProjectChange
+                ? "ジオメトリ・プラズマ設定が変更されたため続き実行できません (再度 PIC開始 してください)"
+                : undefined
           }
         >
           続きから実行

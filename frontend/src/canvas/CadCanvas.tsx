@@ -333,6 +333,8 @@ export default function CadCanvas({
   onSetEmitter,
   onSetCollector,
 }: Props) {
+  // 軸対称 (r-z) モードかどうか。x=z(軸方向)・y=r(径方向) と読み替えて表示する
+  const isRz = project.coord === "rz";
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [view, setView] = useState<View | null>(null);
   // キャンバス親要素のサイズ変化 (サイドパネル幅変更・ウィンドウリサイズ) で再描画する
@@ -750,6 +752,23 @@ export default function CadCanvas({
       ctx.setLineDash([]);
     }
 
+    // 軸対称 (r-z) モード: 下辺 (対称軸, r=0) を一点鎖線風 (細い破線+シアン系) でオーバーレイ表示する
+    if (isRz) {
+      const domainPoly = project.geometry.domain.polygon;
+      const a = domainPoly[0];
+      const c = domainPoly[1];
+      if (a && c) {
+        ctx.strokeStyle = "#4dd4ff";
+        ctx.lineWidth = 1.5;
+        ctx.setLineDash([10, 3, 2, 3]); // 一点鎖線風
+        ctx.beginPath();
+        ctx.moveTo(sx(a[0]), sy(a[1]));
+        ctx.lineTo(sx(c[0]), sy(c[1]));
+        ctx.stroke();
+        ctx.setLineDash([]);
+      }
+    }
+
     for (const r of project.geometry.regions) {
       const color = r.type === "conductor" ? "#e0b050" : r.type === "dielectric" ? "#50b0e0" : "#b070e0";
       if (r.shape) drawCircle(r.shape, color);
@@ -1165,6 +1184,15 @@ export default function CadCanvas({
       ctx.fillRect(0, 0, RULER_SIZE, RULER_SIZE);
       ctx.strokeStyle = "#363c48";
       ctx.strokeRect(0.5, 0.5, RULER_SIZE - 1, RULER_SIZE - 1);
+
+      // 軸対称 (r-z) モード: ルーラーの軸ラベルを z (上ルーラー) / r (左ルーラー) 表記にする
+      if (isRz) {
+        ctx.fillStyle = "#8a919e";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.fillText("z", RULER_SIZE / 2, RULER_SIZE / 2 - 5);
+        ctx.fillText("r", RULER_SIZE / 2, RULER_SIZE / 2 + 7);
+      }
     }
   }, [
     resizeTick,
@@ -1193,6 +1221,7 @@ export default function CadCanvas({
     showTrajectories,
     picFrame,
     picFieldView,
+    isRz,
   ]);
 
   // Space キーの追跡 (入力欄にフォーカス中は無視)
@@ -1544,7 +1573,8 @@ export default function CadCanvas({
       />
       {cursor && (
         <div className="coords">
-          x: {(cursor[0] * 1000).toFixed(2)} mm&nbsp;&nbsp;y: {(cursor[1] * 1000).toFixed(2)} mm
+          {isRz ? "z" : "x"}: {(cursor[0] * 1000).toFixed(2)} mm&nbsp;&nbsp;
+          {isRz ? "r" : "y"}: {(cursor[1] * 1000).toFixed(2)} mm
         </div>
       )}
       {/* 境界条件の凡例 (常時表示。色/線種は bcStyle() と対応させる) */}

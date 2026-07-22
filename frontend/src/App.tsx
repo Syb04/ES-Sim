@@ -478,6 +478,8 @@ export default function App() {
   // --- domain ---
   const domainW = Math.max(...project.geometry.domain.polygon.map((p) => p[0]));
   const domainH = Math.max(...project.geometry.domain.polygon.map((p) => p[1]));
+  // 軸対称 (r-z) モードかどうか (未指定 = "xy" 扱い)
+  const isRz = (project.coord ?? "xy") === "rz";
 
   const setDomainSize = (w: number, h: number) => {
     if (!(w > 0) || !(h > 0)) return;
@@ -498,6 +500,15 @@ export default function App() {
   // 対辺も道連れで自然境界(Neumann)に戻る
   const removeEdgeBoundary = (boundaries: BoundaryCondition[], edgeIndex: number): BoundaryCondition[] =>
     boundaries.filter((b) => !b.edges.includes(edgeIndex));
+
+  // --- 座標系 (平面2D / 軸対称 r-z) 切替 ---
+  // rz へ切替える際、下辺(エッジ0)は対称軸 (r=0) となり Dirichlet 等の指定は禁止されるため、
+  // 既存のBC設定があれば道連れで除去する (commitProject 経由なので Undo 対象・解析結果は破棄される)
+  const setCoord = (coord: "xy" | "rz") => {
+    const p = projectRef.current;
+    const boundaries = coord === "rz" ? removeEdgeBoundary(p.geometry.boundaries, 0) : p.geometry.boundaries;
+    commitProject({ ...p, coord, geometry: { ...p.geometry, boundaries } });
+  };
 
   const edgeState = (
     edgeIndex: number,
@@ -1068,6 +1079,7 @@ export default function App() {
                 domainW={domainW}
                 domainH={domainH}
                 setDomainSize={setDomainSize}
+                setCoord={setCoord}
                 edgeState={edgeState}
                 setEdgeType={setEdgeType}
                 setEdgeVoltage={setEdgeVoltage}
@@ -1107,6 +1119,7 @@ export default function App() {
                 onChange={setPic}
                 emitter={particles.emitter}
                 canRun={!!health}
+                rzDisabled={isRz}
                 running={picRunning}
                 onStart={runPicStart}
                 onStop={runPicStop}

@@ -51,26 +51,43 @@ def _material_arrays(project: Project, mesh: Mesh):
 
 
 def assemble(project: Project, mesh: Mesh):
-    """剛性行列 K (csr) と右辺 f を返す。"""
+    """剛性行列 K (csr) と右辺 f を返す。
+
+    coord="rz" (軸対称、prompts/39) では弱形式
+        ∫ ε ∇V·∇W r dr dz = ∫ ρ W r dr dz
+    を使う (x = z, y = r)。剛性は平面の Ke に要素重心半径
+    r̄ = (r_i + r_j + r_k)/3 を乗じる標準近似、右辺は線形 r を厳密に積分する。
+    """
     tris = mesh.triangles
     b, c, area = _element_geometry(mesh.nodes, tris)
     eps, rho = _material_arrays(project, mesh)
 
-    # Ke[i,j] = eps * (b_i b_j + c_i c_j) / (4A)
-    coef = (eps / (4.0 * area))[:, None, None]
-    ke = coef * (b[:, :, None] * b[:, None, :] + c[:, :, None] * c[:, None, :])
-
     # 周期境界: スレーブ節点をマスターへ置換した正準節点番号で組み立てる
     # (要素幾何は元の節点座標で評価済みなので係数は変わらない)
     idx = tris if mesh.periodic_map is None else mesh.periodic_map[tris]
+    n = len(mesh.nodes)
+    f = np.zeros(n)
+
+    if project.coord == "rz":
+        # 軸対称剛性: Ke[i,j] = ε·r̄·(b_i b_j + c_i c_j)/(4A) (r̄ による標準近似。
+        # 軸上 r=0 を含む要素でも r̄ > 0 なので特異にならない)
+        r_nodes = mesh.nodes[tris][:, :, 1]            # (M, 3) 各頂点の r
+        r_bar = r_nodes.mean(axis=1)                   # (M,) 要素重心半径
+        coef = (eps * r_bar / (4.0 * area))[:, None, None]
+        ke = coef * (b[:, :, None] * b[:, None, :] + c[:, :, None] * c[:, None, :])
+        # 右辺 f_i = ρ ∫ N_i r dA = ρ·(A/12)·(2 r_i + r_j + r_k) (線形 r の厳密積分)
+        fw = (rho * area / 12.0)[:, None] * (r_nodes + 3.0 * r_bar[:, None])
+        np.add.at(f, idx.ravel(), fw.ravel())
+    else:
+        # 平面2D: Ke[i,j] = eps * (b_i b_j + c_i c_j) / (4A)
+        coef = (eps / (4.0 * area))[:, None, None]
+        ke = coef * (b[:, :, None] * b[:, None, :] + c[:, :, None] * c[:, None, :])
+        # 一様電荷密度の P1 右辺: 各節点へ rho*A/3
+        np.add.at(f, idx.ravel(), np.repeat(rho * area / 3.0, 3))
+
     rows = np.repeat(idx, 3, axis=1).ravel()           # i index
     cols = np.tile(idx, (1, 3)).ravel()                # j index
-    n = len(mesh.nodes)
     k = sp.coo_matrix((ke.ravel(), (rows, cols)), shape=(n, n)).tocsr()
-
-    # 一様電荷密度の P1 右辺: 各節点へ rho*A/3
-    f = np.zeros(n)
-    np.add.at(f, idx.ravel(), np.repeat(rho * area / 3.0, 3))
     return k, f
 
 
@@ -109,6 +126,12 @@ def solve(project: Project, mesh: Mesh) -> Solution:
     e_field = np.stack([ex, ey], axis=1)
 
     eps, _ = _material_arrays(project, mesh)
-    energy = float(np.sum(0.5 * eps * (ex**2 + ey**2) * area))
+    if project.coord == "rz":
+        # 軸対称エネルギー W = ½ ∫ ε|E|²·2πr dA [J]
+        # (E は要素内一定なので ∫ r dA = r̄·A で厳密。xy モードは [J/m])
+        r_bar = mesh.nodes[tris][:, :, 1].mean(axis=1)
+        energy = float(np.sum(0.5 * eps * (ex**2 + ey**2) * 2.0 * np.pi * r_bar * area))
+    else:
+        energy = float(np.sum(0.5 * eps * (ex**2 + ey**2) * area))
 
     return Solution(v=v, e_field=e_field, energy=energy)

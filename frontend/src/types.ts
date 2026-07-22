@@ -323,6 +323,8 @@ export interface PicLiveFrame {
 export interface Project {
   version: number;
   unit: "m" | "mm";
+  // 座標系。"rz" = 軸対称 (x=z 軸方向, y=r 径方向, y=0 が対称軸)。省略 = "xy"
+  coord?: "xy" | "rz";
   geometry: Geometry;
   // mode: "structured" は軸平行矩形 domain 専用の等間隔構造格子 (省略 = unstructured)
   mesh: {

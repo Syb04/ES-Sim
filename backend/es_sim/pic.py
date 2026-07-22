@@ -91,6 +91,8 @@ class PicSimulation:
     def __init__(self, project: Project):
         if project.pic is None:
             raise ValueError("project.pic が指定されていません")
+        if project.coord == "rz":
+            raise ValueError("PIC は軸対称 (rz) モードに未対応です (coord='xy' を使用してください)")
         self.project = project
         self.pic: PicSettings = project.pic
 

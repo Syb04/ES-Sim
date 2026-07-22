@@ -425,13 +425,19 @@ def _apply_trace_boundaries(
 # ---- エミッタ・dt推定 -------------------------------------------------------
 
 
-def _init_particles(emitter: Emitter, m: float) -> tuple[np.ndarray, np.ndarray]:
-    """エミッタ設定から初期位置・初期速度 (n,2) を作る。
+def _init_particles(
+    emitter: Emitter, m: float, vtheta: bool = False
+) -> tuple[np.ndarray, np.ndarray]:
+    """エミッタ設定から初期位置・初期速度を作る。
 
     energy_dist == "mono" (既定) の場合は乱数を使わず等間隔割り振り (従来動作)。
     energy_dist == "maxwell" の場合はドリフト速度 (energy_ev, direction_deg から。
     spread_deg は無視) に熱速度成分 (2D Maxwell分布) を加算する。乱数は
     np.random.default_rng(seed) を使い、同じ seed で完全再現する。
+
+    vtheta=True (rz 軸対称モード用) では速度を3成分 (vz, vr, vθ) で返す:
+    maxwell は第3成分 vθ も熱速度から抽選し、mono は vθ = 0 とする。
+    既定 (False) は従来通り (n, 2) を返す (既存呼び出しは完全不変)。
     """
     n = emitter.n
     if emitter.kind == "point":
@@ -443,17 +449,18 @@ def _init_particles(emitter: Emitter, m: float) -> tuple[np.ndarray, np.ndarray]
         t = np.linspace(0.0, 1.0, n)
         pos = p1[None, :] + t[:, None] * (p2 - p1)[None, :]
 
+    n_comp = 3 if vtheta else 2
     if emitter.energy_dist == "maxwell":
-        # ドリフト速度は全粒子共通 (spread_deg は無視)
+        # ドリフト速度は全粒子共通 (spread_deg は無視)。vθ 方向のドリフトは無し
         angle = math.radians(emitter.direction_deg)
         speed = math.sqrt(2.0 * emitter.energy_ev * QE / m) if emitter.energy_ev > 0 else 0.0
-        drift = speed * np.array([math.cos(angle), math.sin(angle)])
+        drift = speed * np.array([math.cos(angle), math.sin(angle), 0.0][:n_comp])
         vel = np.tile(drift, (n, 1))
 
-        # 熱速度: vx, vy ~ Normal(0, sigma), sigma = sqrt(kT * q_e / m)
+        # 熱速度: 各成分 ~ Normal(0, sigma), sigma = sqrt(kT * q_e / m)
         sigma = math.sqrt(emitter.temperature_ev * QE / m)
         rng = np.random.default_rng(emitter.seed)
-        vel = vel + rng.normal(0.0, sigma, size=(n, 2))
+        vel = vel + rng.normal(0.0, sigma, size=(n, n_comp))
         return pos, vel
 
     if n == 1:
@@ -468,6 +475,8 @@ def _init_particles(emitter: Emitter, m: float) -> tuple[np.ndarray, np.ndarray]
 
     speed = math.sqrt(2.0 * emitter.energy_ev * QE / m) if emitter.energy_ev > 0 else 0.0
     vel = speed * np.stack([np.cos(angles), np.sin(angles)], axis=1)
+    if vtheta:
+        vel = np.column_stack([vel, np.zeros(n)])  # mono の vθ は 0
     return pos, vel
 
 
@@ -528,8 +537,15 @@ def trace(project: Project, mesh: Mesh, sol: Solution) -> TraceOutput:
     # 誘電体 (固体) 要素のマスク (無ければ None = 従来経路)
     solid = _solid_elements(project, mesh)
 
-    x0, v0 = _init_particles(settings.emitter, m)
+    # rz (軸対称) モード: 位置 (x, y) = (z, r)、速度3成分 (vz, vr, vθ) (prompts/39)。
+    # 角運動量 L = r·vθ を初期に確定し、ステップ後に vθ = L/r で更新する。
+    # 遠心力項 vθ²/r は「現在位置で評価する半陰的」としてリープフロッグの
+    # 両半キックに組み込む。軸交差 (r<0) は位置・速度の鏡映で処理する
+    rz = project.coord == "rz"
+    x0, v0 = _init_particles(settings.emitter, m, vtheta=rz)
     n = len(x0)
+    ang_l = x0[:, 1] * v0[:, 2] if rz else None  # L = r·vθ (軸鏡映で符号反転)
+    _R_TINY = 1e-30  # 軸上 (r=0) のゼロ割ガード
 
     dt = settings.dt
     if dt is None:
@@ -558,8 +574,26 @@ def trace(project: Project, mesh: Mesh, sol: Solution) -> TraceOutput:
             e_at = e_field[elem[idx_active]]
             a_cur = qm * e_at
             x_prev = x[idx_active]
-            v_half = v[idx_active] + 0.5 * dt * a_cur
+            if rz:
+                # 遠心力項 dvr/dt += vθ²/r を現在位置で評価 (半陰的)
+                r_cur = np.maximum(x_prev[:, 1], _R_TINY)
+                l_act = ang_l[idx_active]
+                vth = np.where(l_act != 0.0, l_act / r_cur, 0.0)
+                a_cur[:, 1] += vth * vth / r_cur  # (qm*e_at は新規配列なので in-place 可)
+                v_half = v[idx_active, :2] + 0.5 * dt * a_cur
+            else:
+                v_half = v[idx_active] + 0.5 * dt * a_cur
             x_new = x_prev + dt * v_half
+
+            if rz:
+                # 軸交差: r < 0 → r → −r, vr → −vr, vθ → −vθ (鏡映)。
+                # 所属要素は鏡映後の位置への walk で追従する
+                cross = x_new[:, 1] < 0.0
+                if np.any(cross):
+                    x_new[cross, 1] = -x_new[cross, 1]
+                    v_half[cross, 1] = -v_half[cross, 1]
+                    g_idx = idx_active[cross]
+                    ang_l[g_idx] = -ang_l[g_idx]  # vθ 反転 = L の符号反転
 
             new_elem, absorbed_mask, b_elem, b_loc = _walk_step(
                 coeffs, adjacency, elem[idx_active], x_new, packed=packed
@@ -586,7 +620,16 @@ def trace(project: Project, mesh: Mesh, sol: Solution) -> TraceOutput:
                 elem[cont_idx] = new_elem[cont]
                 e_new = e_field[elem[cont_idx]]
                 a_new = qm * e_new
-                v[cont_idx] = v_half[cont] + 0.5 * dt * a_new
+                if rz:
+                    # 後半キックの遠心力項は新しい位置で評価し、vθ = L/r を更新
+                    r_new = np.maximum(x_new[cont, 1], _R_TINY)
+                    l_cont = ang_l[cont_idx]
+                    vth_new = np.where(l_cont != 0.0, l_cont / r_new, 0.0)
+                    a_new[:, 1] += vth_new * vth_new / r_new
+                    v[cont_idx, :2] = v_half[cont] + 0.5 * dt * a_new
+                    v[cont_idx, 2] = vth_new
+                else:
+                    v[cont_idx] = v_half[cont] + 0.5 * dt * a_new
 
             abs_idx = idx_active[absorbed_mask]
             if abs_idx.size:
@@ -607,7 +650,13 @@ def trace(project: Project, mesh: Mesh, sol: Solution) -> TraceOutput:
                 frac = np.clip(l0 / denom, 0.0, 1.0)
 
                 x[abs_idx] = xp_a + frac[:, None] * (xn_a - xp_a)
-                v[abs_idx] = v[abs_idx] + frac[:, None] * dt * a_cur[absorbed_mask]
+                if rz:
+                    v[abs_idx, :2] = v[abs_idx, :2] + frac[:, None] * dt * a_cur[absorbed_mask]
+                    r_abs = np.maximum(x[abs_idx, 1], _R_TINY)
+                    l_abs = ang_l[abs_idx]
+                    v[abs_idx, 2] = np.where(l_abs != 0.0, l_abs / r_abs, 0.0)
+                else:
+                    v[abs_idx] = v[abs_idx] + frac[:, None] * dt * a_cur[absorbed_mask]
                 tof[abs_idx] = t_elapsed + frac * dt
                 alive[abs_idx] = False
 
@@ -616,7 +665,13 @@ def trace(project: Project, mesh: Mesh, sol: Solution) -> TraceOutput:
                 # 現在位置 (1ステップ分だけ内側) を採用する (厳密な交点補間は不要)
                 hit_idx = idx_active[hit_solid]
                 x[hit_idx] = x_new[hit_solid]
-                v[hit_idx] = v_half[hit_solid]
+                if rz:
+                    v[hit_idx, :2] = v_half[hit_solid]
+                    r_hit = np.maximum(x_new[hit_solid, 1], _R_TINY)
+                    l_hit = ang_l[hit_idx]
+                    v[hit_idx, 2] = np.where(l_hit != 0.0, l_hit / r_hit, 0.0)
+                else:
+                    v[hit_idx] = v_half[hit_solid]
                 tof[hit_idx] = t_elapsed + dt
                 alive[hit_idx] = False
 

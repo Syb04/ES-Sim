@@ -23,13 +23,16 @@ import type {
 const DEFAULT_VOLTAGE_RF: VoltageRf = { amplitude: 100.0, freq_hz: 13.56e6, phase_deg: 0.0 };
 
 // 矩形 domain の外周エッジ順: 0=下, 1=右, 2=上, 3=左
-const EDGE_LABELS = ["下 (y=0)", "右 (x=w)", "上 (y=h)", "左 (x=0)"];
+const EDGE_LABELS_XY = ["下 (y=0)", "右 (x=w)", "上 (y=h)", "左 (x=0)"];
+// 軸対称 (r-z) モード: x=z (軸方向)・y=r (径方向)。下辺 (y=0) は対称軸 (r=0)
+const EDGE_LABELS_RZ = ["対称軸 (r=0)", "右 (z=L)", "上 (r=R)", "左 (z=0)"];
 
 interface Props {
   project: Project;
   domainW: number;
   domainH: number;
   setDomainSize: (w: number, h: number) => void;
+  setCoord: (coord: "xy" | "rz") => void;
   edgeState: (edgeIndex: number) => { type: EdgeBcType; voltage: number; voltageRf?: VoltageRf; seeGamma: number };
   setEdgeType: (edgeIndex: number, type: EdgeBcType) => void;
   setEdgeVoltage: (edgeIndex: number, voltage: number) => void;
@@ -54,6 +57,7 @@ export default function FieldPanel({
   domainW,
   domainH,
   setDomainSize,
+  setCoord,
   edgeState,
   setEdgeType,
   setEdgeVoltage,
@@ -72,11 +76,27 @@ export default function FieldPanel({
   deleteRegion,
   result,
 }: Props) {
+  const coord = project.coord ?? "xy";
+  const isRz = coord === "rz";
+  const edgeLabels = isRz ? EDGE_LABELS_RZ : EDGE_LABELS_XY;
+
   return (
     <>
       <h2>ジオメトリ (domain)</h2>
       <div className="field">
-        <span className="label">幅 [mm]</span>
+        <span className="label">座標系</span>
+        <select value={coord} onChange={(e) => setCoord(e.target.value as "xy" | "rz")}>
+          <option value="xy">平面 2D</option>
+          <option value="rz">軸対称 r-z</option>
+        </select>
+      </div>
+      {isRz && (
+        <div className="hint">
+          軸対称モードでは下辺が対称軸になります。PICは未対応です。
+        </div>
+      )}
+      <div className="field">
+        <span className="label">{isRz ? "長さ z [mm]" : "幅 [mm]"}</span>
         <CommitNumberInput
           value={mToMm(domainW)}
           step="0.1"
@@ -84,7 +104,7 @@ export default function FieldPanel({
         />
       </div>
       <div className="field">
-        <span className="label">高さ [mm]</span>
+        <span className="label">{isRz ? "半径 r [mm]" : "高さ [mm]"}</span>
         <CommitNumberInput
           value={mToMm(domainH)}
           step="0.1"
@@ -93,14 +113,17 @@ export default function FieldPanel({
       </div>
 
       <h2>境界条件</h2>
-      {EDGE_LABELS.map((label, i) => {
+      {edgeLabels.map((label, i) => {
         const st = edgeState(i);
+        // rz モードの下辺 (エッジ0) は対称軸そのもの (自然境界)。切替不可・固定表示とする
+        const isAxisEdge = isRz && i === 0;
         return (
           <div className="edge-row" key={i}>
             <span className="edge-label">{label}</span>
             <div className="edge-controls">
               <select
                 value={st.type}
+                disabled={isAxisEdge}
                 onChange={(e) => setEdgeType(i, e.target.value as EdgeBcType)}
               >
                 <option value="neumann">なし (Neumann)</option>
@@ -108,7 +131,7 @@ export default function FieldPanel({
                 <option value="symmetry">対称 (粒子反射)</option>
                 <option value="periodic">周期</option>
               </select>
-              {st.type === "dirichlet" && (
+              {!isAxisEdge && st.type === "dirichlet" && (
                 <>
                   <CommitNumberInput value={st.voltage} onCommit={(v) => setEdgeVoltage(i, v)} />
                   <label className="rf-check-inline">
@@ -132,7 +155,7 @@ export default function FieldPanel({
                 </>
               )}
             </div>
-            {st.type === "dirichlet" && st.voltageRf && (
+            {!isAxisEdge && st.type === "dirichlet" && st.voltageRf && (
               <div className="edge-rf-row">
                 <CommitNumberInput
                   className="rf-compact"
@@ -363,7 +386,7 @@ export default function FieldPanel({
           <div className="kv"><span>要素数</span><span>{result.mesh.triangles.length}</span></div>
           <div className="kv"><span>V min/max</span><span>{result.v_min.toFixed(1)} / {result.v_max.toFixed(1)} V</span></div>
           <div className="kv"><span>|E| max</span><span>{result.e_abs_max.toExponential(2)} V/m</span></div>
-          <div className="kv"><span>エネルギー</span><span>{result.energy.toExponential(3)} J/m</span></div>
+          <div className="kv"><span>エネルギー</span><span>{result.energy.toExponential(3)} {isRz ? "J" : "J/m"}</span></div>
         </>
       )}
     </>
