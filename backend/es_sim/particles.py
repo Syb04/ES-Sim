@@ -225,6 +225,185 @@ def _walk_step(
     return elem, absorbed, b_elem, b_loc
 
 
+# ---- 境界メッシュエッジの分類 (対称反射・周期ラップ、prompts/22) ---------------
+
+
+@dataclass
+class _BoundaryTables:
+    """境界メッシュエッジ (adjacency == -1) の反射/周期分類表。
+
+    いずれも (要素, ローカルエッジ) で引ける形。対象エッジが無いフィールドは None。
+    """
+
+    reflect: np.ndarray | None = None       # (M, 3) bool 鏡面反射エッジ
+    refl_normal: np.ndarray | None = None   # (M, 3, 2) 内向き単位法線
+    refl_point: np.ndarray | None = None    # (M, 3, 2) エッジ上の基準点 (符号付き距離用)
+    periodic: np.ndarray | None = None      # (M, 3) bool 周期エッジ
+    shift: np.ndarray | None = None         # (M, 3, 2) 周期ラップの平行移動ベクトル
+
+
+def _build_boundary_tables(
+    polygon,
+    mesh: Mesh,
+    adjacency: np.ndarray,
+    reflect_edges,
+    periodic_pairs,
+) -> _BoundaryTables | None:
+    """domain 外周エッジの指定から境界メッシュエッジの分類表を構築する。
+
+    reflect_edges: 鏡面反射する domain エッジ番号列 (symmetry / pic.reflect_edges)
+    periodic_pairs: 周期境界の domain エッジ番号対 [(e1, e2), ...]
+
+    境界メッシュエッジの両端節点が指定 domain エッジ (頂点 i → i+1 の線分) 上に
+    乗っている場合に対象とする。分類対象が無ければ None を返す
+    (従来の吸収のみの経路と完全に一致させるため)。
+    """
+    if not reflect_edges and not periodic_pairs:
+        return None
+    poly = np.asarray(polygon, dtype=np.float64)
+    nv = len(poly)
+    tris = mesh.triangles
+    nodes = mesh.nodes
+    ts, loc = np.nonzero(adjacency == -1)
+    n1 = tris[ts, (loc + 1) % 3]
+    n2 = tris[ts, (loc + 2) % 3]
+    n_opp = tris[ts, loc]
+    p1, p2, po = nodes[n1], nodes[n2], nodes[n_opp]
+    scale = float(np.max(np.abs(poly)))
+    tol = 1e-8 * (scale if scale > 0.0 else 1.0)
+
+    def _on_edge(e: int) -> np.ndarray:
+        q1 = poly[e % nv]
+        q2 = poly[(e + 1) % nv]
+        seg = q2 - q1
+        seg_len = float(np.hypot(seg[0], seg[1]))
+        if seg_len <= 0.0:
+            return np.zeros(len(ts), dtype=bool)
+
+        def _on_segment(p: np.ndarray) -> np.ndarray:
+            # 線分 q1-q2 への共線判定 (距離 tol 以内) + パラメータ範囲チェック
+            d = p - q1
+            dist = np.abs(d[:, 0] * seg[1] - d[:, 1] * seg[0]) / seg_len
+            t = (d[:, 0] * seg[0] + d[:, 1] * seg[1]) / (seg_len * seg_len)
+            return (dist <= tol) & (t >= -1e-9) & (t <= 1.0 + 1e-9)
+
+        return _on_segment(p1) & _on_segment(p2)
+
+    m = len(tris)
+    tables = _BoundaryTables()
+
+    # 内向き単位法線 = 対頂点の側 (反射・周期の両方で使う規約)
+    t_vec = p2 - p1
+    perp = np.stack([-t_vec[:, 1], t_vec[:, 0]], axis=1)
+    mid = 0.5 * (p1 + p2)
+    sgn = np.where(np.sum(perp * (po - mid), axis=1) >= 0.0, 1.0, -1.0)
+    nrm = perp * (sgn / np.linalg.norm(perp, axis=1))[:, None]
+
+    if reflect_edges:
+        on_reflect = np.zeros(len(ts), dtype=bool)
+        for e in reflect_edges:
+            on_reflect |= _on_edge(e)
+        if np.any(on_reflect):
+            tables.reflect = np.zeros((m, 3), dtype=bool)
+            tables.refl_normal = np.zeros((m, 3, 2))
+            tables.refl_point = np.zeros((m, 3, 2))
+            sel = on_reflect
+            tables.reflect[ts[sel], loc[sel]] = True
+            tables.refl_normal[ts[sel], loc[sel]] = nrm[sel]
+            tables.refl_point[ts[sel], loc[sel]] = p1[sel]
+
+    if periodic_pairs:
+        on_per = np.zeros(len(ts), dtype=bool)
+        shift = np.zeros((len(ts), 2))
+        for e1, e2 in periodic_pairs:
+            m1 = 0.5 * (poly[e1 % nv] + poly[(e1 + 1) % nv])
+            m2 = 0.5 * (poly[e2 % nv] + poly[(e2 + 1) % nv])
+            for ea, sh in ((e1, m2 - m1), (e2, m1 - m2)):
+                on = _on_edge(ea)
+                if np.any(on):
+                    shift[on] = sh
+                    on_per |= on
+        if np.any(on_per):
+            tables.periodic = np.zeros((m, 3), dtype=bool)
+            tables.shift = np.zeros((m, 3, 2))
+            tables.periodic[ts[on_per], loc[on_per]] = True
+            tables.shift[ts[on_per], loc[on_per]] = shift[on_per]
+
+    if tables.reflect is None and tables.periodic is None:
+        return None
+    return tables
+
+
+def _apply_trace_boundaries(
+    tables: _BoundaryTables,
+    coeffs,
+    packed: np.ndarray,
+    adjacency: np.ndarray,
+    x_new: np.ndarray,
+    v_new: np.ndarray,
+    elem: np.ndarray,
+    absorbed: np.ndarray,
+    b_elem: np.ndarray,
+    b_loc: np.ndarray,
+) -> None:
+    """壁に達した粒子のうち、対称エッジは鏡面反射・周期エッジはラップする。
+
+    全引数を in-place 更新する。反射は位置を境界線について折り返し、速度の
+    法線成分 (vx, vy) を反転する。ラップは位置を周期ベクトル分平行移動して
+    反対側へ移す (速度不変)。処理後に所属要素を再特定し、コーナーで別の壁に
+    達した粒子は次の反復で処理する。対象外の壁に達した粒子は absorbed のまま
+    残す (通常の吸収として扱われる)。
+    """
+    for _ in range(8):
+        idx = np.nonzero(absorbed)[0]
+        if idx.size == 0:
+            return
+        changed = False
+
+        if tables.reflect is not None:
+            refl = tables.reflect[b_elem[idx], b_loc[idx]]
+            if np.any(refl):
+                r_idx = idx[refl]
+                ea, el = b_elem[r_idx], b_loc[r_idx]
+                nrm = tables.refl_normal[ea, el]
+                # 符号付き距離 d < 0 = 境界の外側。折り返して境界内へ戻す
+                d = np.sum((x_new[r_idx] - tables.refl_point[ea, el]) * nrm, axis=1)
+                x_new[r_idx] -= 2.0 * np.minimum(d, 0.0)[:, None] * nrm
+                vn = np.sum(v_new[r_idx, :2] * nrm, axis=1)
+                v_new[r_idx, :2] -= 2.0 * vn[:, None] * nrm
+                e2, a2, be2, bl2 = _walk_step(
+                    coeffs, adjacency, ea, x_new[r_idx], packed=packed
+                )
+                elem[r_idx] = e2
+                absorbed[r_idx] = a2
+                b_elem[r_idx] = be2
+                b_loc[r_idx] = bl2
+                changed = True
+                idx = np.nonzero(absorbed)[0]
+                if idx.size == 0:
+                    return
+
+        if tables.periodic is not None:
+            per = tables.periodic[b_elem[idx], b_loc[idx]]
+            if np.any(per):
+                p_idx = idx[per]
+                ea, el = b_elem[p_idx], b_loc[p_idx]
+                x_new[p_idx] += tables.shift[ea, el]
+                # ラップした少数粒子のみ総当たりで所属要素を再特定し、walk で確定
+                elem0 = _locate_initial(coeffs, x_new[p_idx])
+                e2, a2, be2, bl2 = _walk_step(
+                    coeffs, adjacency, elem0, x_new[p_idx], packed=packed
+                )
+                elem[p_idx] = e2
+                absorbed[p_idx] = a2
+                b_elem[p_idx] = be2
+                b_loc[p_idx] = bl2
+                changed = True
+
+        if not changed:
+            return
+
+
 # ---- エミッタ・dt推定 -------------------------------------------------------
 
 
@@ -315,6 +494,19 @@ def trace(project: Project, mesh: Mesh, sol: Solution) -> TraceOutput:
     adjacency = _adjacency(tris)
     e_field = sol.e_field  # (M, 2) 要素内一定
 
+    # 対称 (鏡面反射)・周期 (ラップ) 境界の分類表 (指定が無ければ None = 従来経路)
+    refl_edges: set[int] = set()
+    periodic_pairs: list[tuple[int, int]] = []
+    for bc in project.geometry.boundaries:
+        if bc.type == "symmetry":
+            refl_edges.update(bc.edges)
+        elif bc.type == "periodic":
+            periodic_pairs.append((bc.edges[0], bc.edges[1]))
+    tables = _build_boundary_tables(
+        project.geometry.domain.polygon, mesh, adjacency,
+        sorted(refl_edges), periodic_pairs,
+    )
+
     x0, v0 = _init_particles(settings.emitter, m)
     n = len(x0)
 
@@ -351,6 +543,13 @@ def trace(project: Project, mesh: Mesh, sol: Solution) -> TraceOutput:
             new_elem, absorbed_mask, b_elem, b_loc = _walk_step(
                 coeffs, adjacency, elem[idx_active], x_new, packed=packed
             )
+
+            # 対称エッジは鏡面反射、周期エッジは反対側へラップ (吸収しない)
+            if tables is not None and np.any(absorbed_mask):
+                _apply_trace_boundaries(
+                    tables, coeffs, packed, adjacency,
+                    x_new, v_half, new_elem, absorbed_mask, b_elem, b_loc,
+                )
 
             cont = ~absorbed_mask
             cont_idx = idx_active[cont]

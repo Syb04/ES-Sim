@@ -47,13 +47,33 @@ export function regionOutline(region: Region): Point[] {
   return region.polygon ?? [];
 }
 
-export interface BoundaryCondition {
+// Dirichlet境界: 電圧を固定する (voltage/voltage_rf/see_gamma はこのタイプのみ有効)
+export interface DirichletBC {
   edges: number[];
   type: "dirichlet";
   voltage: number;
   voltage_rf?: VoltageRf; // RF重畳 (未指定なら直流のみ)
   see_gamma?: number; // 二次電子放出係数 γ (未指定/0 で無効)
 }
+
+// 対称境界 (Neumann + 粒子鏡面反射): 場は自然境界、粒子はこの辺で反射する
+export interface SymmetryBC {
+  edges: number[];
+  type: "symmetry";
+}
+
+// 周期境界: edges はちょうど2本 (平行・同長の対辺) を指定する。
+// 場は対辺の節点を同一視して解き、粒子は対辺を越えたら反対側へラップする
+export interface PeriodicBC {
+  edges: number[];
+  type: "periodic";
+}
+
+export type BoundaryCondition = DirichletBC | SymmetryBC | PeriodicBC;
+
+// 境界条件セレクトの4択 (フロント内部の表示用タイプ。schema上の type と概ね対応するが
+// "neumann" はBCエントリが無い状態=自然境界を表す仮想的な値)
+export type EdgeBcType = "neumann" | "dirichlet" | "symmetry" | "periodic";
 
 export interface Geometry {
   domain: { polygon: Point[] };

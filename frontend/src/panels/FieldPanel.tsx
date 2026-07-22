@@ -1,6 +1,15 @@
 import { CommitNumberInput, CommitTextInput } from "../CommitInput";
 import { mToMm, mmToM } from "../units";
-import type { CircleShape, MeshResult, Project, Region, RegionType, SolveResult, VoltageRf } from "../types";
+import type {
+  CircleShape,
+  EdgeBcType,
+  MeshResult,
+  Project,
+  Region,
+  RegionType,
+  SolveResult,
+  VoltageRf,
+} from "../types";
 
 /**
  * 静電場パネル (タブ1)
@@ -21,9 +30,9 @@ interface Props {
   domainW: number;
   domainH: number;
   setDomainSize: (w: number, h: number) => void;
-  edgeState: (edgeIndex: number) => { dirichlet: boolean; voltage: number; voltageRf?: VoltageRf; seeGamma: number };
-  setEdgeNeumann: (edgeIndex: number) => void;
-  setEdgeDirichlet: (edgeIndex: number, voltage: number) => void;
+  edgeState: (edgeIndex: number) => { type: EdgeBcType; voltage: number; voltageRf?: VoltageRf; seeGamma: number };
+  setEdgeType: (edgeIndex: number, type: EdgeBcType) => void;
+  setEdgeVoltage: (edgeIndex: number, voltage: number) => void;
   setEdgeVoltageRf: (edgeIndex: number, voltage_rf: VoltageRf | undefined) => void;
   setEdgeSeeGamma: (edgeIndex: number, see_gamma: number) => void;
   setMeshSize: (size: number) => void;
@@ -45,8 +54,8 @@ export default function FieldPanel({
   domainH,
   setDomainSize,
   edgeState,
-  setEdgeNeumann,
-  setEdgeDirichlet,
+  setEdgeType,
+  setEdgeVoltage,
   setEdgeVoltageRf,
   setEdgeSeeGamma,
   setMeshSize,
@@ -89,17 +98,17 @@ export default function FieldPanel({
             <span className="edge-label">{label}</span>
             <div className="edge-controls">
               <select
-                value={st.dirichlet ? "dirichlet" : "neumann"}
-                onChange={(e) =>
-                  e.target.value === "dirichlet" ? setEdgeDirichlet(i, st.voltage) : setEdgeNeumann(i)
-                }
+                value={st.type}
+                onChange={(e) => setEdgeType(i, e.target.value as EdgeBcType)}
               >
                 <option value="neumann">なし (Neumann)</option>
                 <option value="dirichlet">Dirichlet</option>
+                <option value="symmetry">対称 (粒子反射)</option>
+                <option value="periodic">周期</option>
               </select>
-              {st.dirichlet && (
+              {st.type === "dirichlet" && (
                 <>
-                  <CommitNumberInput value={st.voltage} onCommit={(v) => setEdgeDirichlet(i, v)} />
+                  <CommitNumberInput value={st.voltage} onCommit={(v) => setEdgeVoltage(i, v)} />
                   <label className="rf-check-inline">
                     <input
                       type="checkbox"
@@ -121,7 +130,7 @@ export default function FieldPanel({
                 </>
               )}
             </div>
-            {st.dirichlet && st.voltageRf && (
+            {st.type === "dirichlet" && st.voltageRf && (
               <div className="edge-rf-row">
                 <CommitNumberInput
                   className="rf-compact"

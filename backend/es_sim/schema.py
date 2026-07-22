@@ -59,19 +59,57 @@ class BoundaryCondition(BaseModel):
 
     edges: 外周ポリゴンのエッジ番号 (i 番目のエッジは頂点 i → i+1)。
     未指定のエッジは自然境界 (Neumann, dV/dn = 0)。
+
+    type (prompts/22、フロントと共通のスキーマ契約):
+      - "dirichlet": 固定電位。voltage / voltage_rf / see_gamma は dirichlet のみ有効
+      - "symmetry":  対称境界。場は自然境界 (Neumann)、粒子 (trace / PIC) は鏡面反射
+      - "periodic":  周期境界。edges にちょうど2本の対辺 (平行・同長) を指定する。
+                     場は対辺の節点 DOF を同一視して解き、粒子は反対側へラップする
     """
 
     edges: list[int]
-    type: Literal["dirichlet"] = "dirichlet"
+    type: Literal["dirichlet", "symmetry", "periodic"] = "dirichlet"
     voltage: float = 0.0
     voltage_rf: VoltageRF | None = None  # RF 成分 (PIC のみ使用)
     see_gamma: float = Field(0.0, ge=0, description="二次電子放出係数 γ (0 = 無効、PIC のみ使用)")
+
+    @model_validator(mode="after")
+    def _check_periodic_edge_count(self) -> "BoundaryCondition":
+        if self.type == "periodic":
+            if len(self.edges) != 2 or self.edges[0] == self.edges[1]:
+                raise ValueError("periodic 境界には異なるエッジをちょうど2本指定してください")
+        return self
 
 
 class Geometry(BaseModel):
     domain: Domain
     regions: list[Region] = []
     boundaries: list[BoundaryCondition] = []
+
+    @model_validator(mode="after")
+    def _check_periodic_pairs(self) -> "Geometry":
+        """periodic 境界の2辺が domain の平行・同長の対辺であることを検査する。"""
+        poly = self.domain.polygon
+        n = len(poly)
+        for bc in self.boundaries:
+            if bc.type != "periodic":
+                continue
+            for e in bc.edges:
+                if not (0 <= e < n):
+                    raise ValueError(f"periodic 境界のエッジ番号 {e} が範囲外です (0..{n - 1})")
+            e1, e2 = bc.edges
+            d1 = (poly[(e1 + 1) % n][0] - poly[e1][0], poly[(e1 + 1) % n][1] - poly[e1][1])
+            d2 = (poly[(e2 + 1) % n][0] - poly[e2][0], poly[(e2 + 1) % n][1] - poly[e2][1])
+            l1 = (d1[0] ** 2 + d1[1] ** 2) ** 0.5
+            l2 = (d2[0] ** 2 + d2[1] ** 2) ** 0.5
+            if l1 <= 0.0 or l2 <= 0.0:
+                raise ValueError("periodic 境界のエッジが退化しています (長さ 0)")
+            cross = d1[0] * d2[1] - d1[1] * d2[0]
+            if abs(cross) > 1e-6 * l1 * l2 or abs(l1 - l2) > 1e-6 * max(l1, l2):
+                raise ValueError(
+                    f"periodic 境界のエッジ {e1}, {e2} は平行かつ同じ長さの対辺である必要があります"
+                )
+        return self
 
 
 class LocalSize(BaseModel):

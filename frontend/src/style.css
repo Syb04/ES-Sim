@@ -41,6 +41,20 @@ button.secondary { background: var(--panel); border: 1px solid var(--border); co
   pointer-events: none;
 }
 
+/* 境界条件の凡例 (キャンバス右上隅) */
+.bc-legend {
+  position: absolute; top: 36px; right: 8px;
+  background: rgba(20, 22, 28, 0.75); border: 1px solid var(--border); border-radius: 4px;
+  padding: 6px 8px; font-size: 11px; color: var(--text);
+  display: flex; flex-direction: column; gap: 4px;
+  pointer-events: none;
+}
+.bc-legend-item { display: flex; align-items: center; gap: 6px; white-space: nowrap; }
+.bc-swatch { display: inline-block; width: 18px; height: 0; border-top: 4px solid; }
+.bc-swatch.bc-dirichlet { border-top-color: #ff9d33; border-top-style: solid; }
+.bc-swatch.bc-symmetry { border-top-color: #39d353; border-top-style: dashed; border-top-width: 2.5px; }
+.bc-swatch.bc-periodic { border-top-color: #b070f0; border-top-style: dashed; border-top-width: 2.5px; }
+
 /* ラインプロファイルパネル */
 .profile-panel {
   flex: 0 0 220px; height: 220px; display: flex; flex-direction: column;

@@ -35,6 +35,7 @@ from .particles import (
     QE,
     _adjacency,
     _barycentric_coeffs,
+    _build_boundary_tables,
     _init_particles,
     _locate_initial,
     _pack_coeffs,
@@ -101,6 +102,11 @@ class PicSimulation:
         self.area = 0.5 * np.abs(det)          # (M,) 要素面積
         self.eps_elem, _ = _material_arrays(project, mesh)  # (M,) 要素ごとの ε
 
+        # 周期境界の正準化写像 (スレーブ→マスター)。電荷堆積・密度積算・求解は
+        # 正準節点番号 (tris_dep) を使い、粒子 walk・E 補間は元の tris を使う
+        self.canon = mesh.periodic_map
+        self.tris_dep = self.canon[self.tris] if self.canon is not None else self.tris
+
         # ---- FEM 行列: K_ff を splu で1回だけ前分解 --------------------------
         k, self.f_static = assemble(project, mesh)  # 静的 charge 領域の右辺を含む
         items = sorted(mesh.dirichlet.items())      # 節点順に固定して決定的に
@@ -114,7 +120,12 @@ class PicSimulation:
         self.rf_phase = np.array(
             [math.radians(rf.get(i, (0.0, 0.0, 0.0))[2]) for i, _ in items]
         )
-        self.free = np.setdiff1d(np.arange(self.n_nodes), self.fixed)
+        exclude = self.fixed
+        if self.canon is not None:
+            # 周期スレーブ節点は自由度から除外する (剛性行列の行がマスターへ寄っている)
+            slaves = np.nonzero(self.canon != np.arange(self.n_nodes))[0]
+            exclude = np.union1d(self.fixed, slaves)
+        self.free = np.setdiff1d(np.arange(self.n_nodes), exclude)
         if len(self.free) == 0:
             raise ValueError("自由節点がありません (全節点が Dirichlet)")
         self.k_fd = k[self.free][:, self.fixed].tocsr()
@@ -211,16 +222,17 @@ class PicSimulation:
         self._see_speed = math.sqrt(2.0 * self.pic.see_energy_ev * QE / ME)
         self._build_see_edges()
 
-        # ---- 鏡面反射エッジ (reflect_edges) の前計算 --------------------------
-        self._build_reflect_edges()
+        # ---- 鏡面反射 (reflect_edges + symmetry)・周期エッジの前計算 -----------
+        self._build_boundary_edges()
 
         # ---- 節点密度アキュムレータ (enable_density_accum で有効化) -----------
         self._accum_start: int | None = None
         self._accum_count = 0
         self._accum: dict[str, np.ndarray] = {}
-        # 節点集中面積 = Σ隣接要素面積/3 (averaged_density の規格化に使う)
+        # 節点集中面積 = Σ隣接要素面積/3 (averaged_density の規格化に使う)。
+        # 周期境界では正準節点番号で積むため、スレーブ節点の面積は 0 になる
         self._node_area = np.bincount(
-            self.tris.ravel(),
+            self.tris_dep.ravel(),
             weights=np.repeat(self.area / 3.0, 3),
             minlength=self.n_nodes,
         )
@@ -294,64 +306,35 @@ class PicSimulation:
         self._edge_normal[ts, loc] = nrm
         self._edge_delta[ts, loc] = 1e-3 * h  # 境界からわずかに内側
 
-    def _build_reflect_edges(self) -> None:
-        """reflect_edges で指定した domain 外周エッジ上の境界メッシュエッジ表を構築する。
+    def _build_boundary_edges(self) -> None:
+        """鏡面反射・周期の境界メッシュエッジ表を構築する。
 
-        境界メッシュエッジ (adjacency == -1) の両端節点が、指定された domain
-        エッジ (頂点 i → i+1 の線分) 上に乗っている場合に鏡面反射対象とし、
-        内向き単位法線とエッジ上の基準点を (要素, ローカルエッジ) で引ける
-        配列に記録する。
+        鏡面反射エッジは pic.reflect_edges と boundaries の symmetry 指定の和集合。
+        periodic 指定の対辺は周期ラップ対象とする。表の構築は particles.py の
+        _build_boundary_tables (trace と共通) に委譲する。
         """
         self._edge_reflect: np.ndarray | None = None
-        edges = self.pic.reflect_edges
-        if not edges:
+        self._edge_periodic: np.ndarray | None = None
+        refl = set(self.pic.reflect_edges)
+        periodic_pairs: list[tuple[int, int]] = []
+        for bc in self.project.geometry.boundaries:
+            if bc.type == "symmetry":
+                refl.update(bc.edges)
+            elif bc.type == "periodic":
+                periodic_pairs.append((bc.edges[0], bc.edges[1]))
+        tables = _build_boundary_tables(
+            self.project.geometry.domain.polygon, self.mesh, self.adjacency,
+            sorted(refl), periodic_pairs,
+        )
+        if tables is None:
             return
-        poly = np.asarray(self.project.geometry.domain.polygon, dtype=np.float64)
-        nv = len(poly)
-        ts, loc = np.nonzero(self.adjacency == -1)
-        n1 = self.tris[ts, (loc + 1) % 3]
-        n2 = self.tris[ts, (loc + 2) % 3]
-        n_opp = self.tris[ts, loc]
-        nodes = self.mesh.nodes
-        p1, p2, po = nodes[n1], nodes[n2], nodes[n_opp]
-        scale = float(np.max(np.abs(poly)))
-        tol = 1e-8 * (scale if scale > 0.0 else 1.0)
-
-        on_reflect = np.zeros(len(ts), dtype=bool)
-        for e in edges:
-            q1 = poly[e % nv]
-            q2 = poly[(e + 1) % nv]
-            seg = q2 - q1
-            seg_len = float(np.hypot(seg[0], seg[1]))
-            if seg_len <= 0.0:
-                continue
-
-            def _on_segment(p: np.ndarray) -> np.ndarray:
-                # 線分 q1-q2 への共線判定 (距離 tol 以内) + パラメータ範囲チェック
-                d = p - q1
-                dist = np.abs(d[:, 0] * seg[1] - d[:, 1] * seg[0]) / seg_len
-                t = (d[:, 0] * seg[0] + d[:, 1] * seg[1]) / (seg_len * seg_len)
-                return (dist <= tol) & (t >= -1e-9) & (t <= 1.0 + 1e-9)
-
-            on_reflect |= _on_segment(p1) & _on_segment(p2)
-        if not np.any(on_reflect):
-            return
-
-        # 内向き単位法線 = 対頂点の側 (SEE エッジ表と同じ規約)
-        t_vec = p2 - p1
-        perp = np.stack([-t_vec[:, 1], t_vec[:, 0]], axis=1)
-        mid = 0.5 * (p1 + p2)
-        sgn = np.where(np.sum(perp * (po - mid), axis=1) >= 0.0, 1.0, -1.0)
-        nrm = perp * (sgn / np.linalg.norm(perp, axis=1))[:, None]
-
-        m = len(self.tris)
-        self._edge_reflect = np.zeros((m, 3), dtype=bool)
-        self._refl_normal = np.zeros((m, 3, 2))
-        self._refl_point = np.zeros((m, 3, 2))  # エッジ上の基準点 (符号付き距離用)
-        sel = on_reflect
-        self._edge_reflect[ts[sel], loc[sel]] = True
-        self._refl_normal[ts[sel], loc[sel]] = nrm[sel]
-        self._refl_point[ts[sel], loc[sel]] = p1[sel]
+        if tables.reflect is not None:
+            self._edge_reflect = tables.reflect
+            self._refl_normal = tables.refl_normal
+            self._refl_point = tables.refl_point  # エッジ上の基準点 (符号付き距離用)
+        if tables.periodic is not None:
+            self._edge_periodic = tables.periodic
+            self._per_shift = tables.shift
 
     def _apply_reflection(
         self,
@@ -398,6 +381,45 @@ class PicSimulation:
             b_loc[r_idx] = bl2
             if l_out is not None:
                 l_out[r_idx] = sub_l
+
+    def _apply_periodic(
+        self,
+        x_new: np.ndarray,
+        elem: np.ndarray,
+        absorbed: np.ndarray,
+        b_elem: np.ndarray,
+        b_loc: np.ndarray,
+        l_out: np.ndarray | None = None,
+    ) -> bool:
+        """周期エッジで検出された粒子を反対側へラップする (in-place 更新)。
+
+        位置を周期ベクトル分平行移動し (速度不変)、所属要素はラップした
+        少数粒子のみ _locate_initial (総当たり) で再特定して walk で確定する。
+        壁カウンタには計上しない。ラップ対象を処理した場合 True を返す
+        (コーナーで別の壁に達した粒子は呼び出し側の反復で処理する)。
+        """
+        idx = np.nonzero(absorbed)[0]
+        if idx.size == 0:
+            return False
+        per = self._edge_periodic[b_elem[idx], b_loc[idx]]
+        if not np.any(per):
+            return False
+        p_idx = idx[per]
+        ea, el = b_elem[p_idx], b_loc[p_idx]
+        x_new[p_idx] += self._per_shift[ea, el]
+        elem0 = _locate_initial(self.coeffs, x_new[p_idx])
+        sub_l = None if l_out is None else np.empty((p_idx.size, 3))
+        e2, a2, be2, bl2 = _walk_step(
+            self.coeffs, self.adjacency, elem0, x_new[p_idx], sub_l,
+            packed=self._coeffs_packed,
+        )
+        elem[p_idx] = e2
+        absorbed[p_idx] = a2
+        b_elem[p_idx] = be2
+        b_loc[p_idx] = bl2
+        if l_out is not None:
+            l_out[p_idx] = sub_l
+        return True
 
     def _emit_see(
         self,
@@ -490,14 +512,15 @@ class PicSimulation:
             sp.bary = None
 
     def _nidx_cached(self, sp: PicSpecies) -> np.ndarray:
-        """種の所属要素節点番号 tris[elem] を返す (キャッシュが無効なら再計算)。
+        """種の所属要素節点番号 tris_dep[elem] を返す (キャッシュが無効なら再計算)。
 
         密度積算 (ステップ終端) と次ステップの電荷堆積は同じ粒子状態を見るので、
-        キャッシュにより gather を1回に減らせる。
+        キャッシュにより gather を1回に減らせる。周期境界では正準化された
+        節点番号 (スレーブ→マスター置換済み) を使うため、堆積は自動的に整合する。
         """
         ni = sp.nidx
         if ni is None or len(ni) != len(sp.elem):
-            ni = self.tris[sp.elem]
+            ni = self.tris_dep[sp.elem]
             sp.nidx = ni
         return ni
 
@@ -539,6 +562,9 @@ class PicSimulation:
         f = self.f_static + f_dep
         rhs = f[self.free] - self.k_fd @ vd
         v[self.free] = self.lu.solve(rhs)
+        if self.canon is not None:
+            v = v[self.canon]     # スレーブ節点へマスター値をコピー (表示互換)
+            v[self.fixed] = vd    # Dirichlet 値は厳密に保持
         return v
 
     def _e_field(self, phi: np.ndarray):
@@ -660,11 +686,20 @@ class PicSimulation:
         # 5.1. 境界吸収・鏡面反射・SEE (種の順序は従来どおり electron → ion)
         for (sp, v_new, x_new, l_new), res_walk in zip(pushed, walk_results):
             elem_new, absorbed, b_elem, b_loc = res_walk
-            # 鏡面反射エッジに達した粒子は吸収せず折り返す (壁カウンタに含めない)
-            if self._edge_reflect is not None and np.any(absorbed):
-                self._apply_reflection(
-                    x_new, v_new, elem_new, absorbed, b_elem, b_loc, l_new
-                )
+            # 鏡面反射エッジに達した粒子は吸収せず折り返し、周期エッジに達した
+            # 粒子は反対側へラップする (いずれも壁カウンタに含めない)
+            if (
+                self._edge_reflect is not None or self._edge_periodic is not None
+            ) and np.any(absorbed):
+                for _ in range(8):
+                    if self._edge_reflect is not None and np.any(absorbed):
+                        self._apply_reflection(
+                            x_new, v_new, elem_new, absorbed, b_elem, b_loc, l_new
+                        )
+                    if self._edge_periodic is None or not self._apply_periodic(
+                        x_new, elem_new, absorbed, b_elem, b_loc, l_new
+                    ):
+                        break
             n_abs = int(absorbed.sum())
             if n_abs:
                 sp.wall_absorbed += n_abs
@@ -774,10 +809,16 @@ class PicSimulation:
         """
         if self._accum_start is None or self._accum_count == 0:
             raise ValueError("enable_density_accum が呼ばれていないか、まだ積算されていません")
-        return {
-            name: acc / (self._accum_count * self._node_area)
-            for name, acc in self._accum.items()
-        }
+        # 周期スレーブ節点は面積 0 (正準番号で積むため)。ゼロ割を避けてから
+        # マスター値をコピーする
+        na = np.where(self._node_area > 0.0, self._node_area, 1.0)
+        result = {}
+        for name, acc in self._accum.items():
+            dens = acc / (self._accum_count * na)
+            if self.canon is not None:
+                dens = dens[self.canon]
+            result[name] = dens
+        return result
 
     # ---- フレーム・実行 -------------------------------------------------------
 

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type {
+  BoundaryCondition,
   CircleShape,
   Emitter,
   MeshResult,
@@ -88,6 +89,13 @@ function colormap(t: number): string {
   const [r1, g1, b1] = STOPS[i];
   const [r2, g2, b2] = STOPS[i + 1];
   return `rgb(${r1 + (r2 - r1) * f},${g1 + (g2 - g1) * f},${b1 + (b2 - b1) * f})`;
+}
+
+// 境界条件タイプ別の描画スタイル (色・線種・線幅)。凡例 (.bc-legend, style.css) の色と揃える
+function bcStyle(type: BoundaryCondition["type"]): { color: string; dash: number[]; width: number } {
+  if (type === "dirichlet") return { color: "#ff9d33", dash: [], width: 4 };
+  if (type === "symmetry") return { color: "#39d353", dash: [8, 5], width: 2.5 };
+  return { color: "#b070f0", dash: [8, 5], width: 2.5 }; // periodic
 }
 
 // 画面上でグリッド間隔が20px以上になるよう 1,10,100...mm から自動選択
@@ -565,6 +573,29 @@ export default function CadCanvas({
       ctx.stroke();
     };
     drawPoly(project.geometry.domain.polygon, "#d8dce4");
+
+    // 境界条件オーバーレイ: domain外周の各辺をBCタイプ別の色・線種で強調表示する
+    // (なし/Neumannのエッジは上のドメイン輪郭のままで何も重ねない)
+    {
+      const domainPoly = project.geometry.domain.polygon;
+      for (const b of project.geometry.boundaries) {
+        const st = bcStyle(b.type);
+        ctx.strokeStyle = st.color;
+        ctx.lineWidth = st.width;
+        ctx.setLineDash(st.dash);
+        ctx.beginPath();
+        for (const edgeIdx of b.edges) {
+          const a = domainPoly[edgeIdx];
+          const c = domainPoly[(edgeIdx + 1) % domainPoly.length];
+          if (!a || !c) continue;
+          ctx.moveTo(sx(a[0]), sy(a[1]));
+          ctx.lineTo(sx(c[0]), sy(c[1]));
+        }
+        ctx.stroke();
+      }
+      ctx.setLineDash([]);
+    }
+
     for (const r of project.geometry.regions) {
       const color = r.type === "conductor" ? "#e0b050" : r.type === "dielectric" ? "#50b0e0" : "#b070e0";
       if (r.shape) drawCircle(r.shape, color);
@@ -1320,6 +1351,18 @@ export default function CadCanvas({
           x: {(cursor[0] * 1000).toFixed(2)} mm&nbsp;&nbsp;y: {(cursor[1] * 1000).toFixed(2)} mm
         </div>
       )}
+      {/* 境界条件の凡例 (常時表示。色/線種は bcStyle() と対応させる) */}
+      <div className="bc-legend">
+        <div className="bc-legend-item">
+          <span className="bc-swatch bc-dirichlet" />Dirichlet
+        </div>
+        <div className="bc-legend-item">
+          <span className="bc-swatch bc-symmetry" />対称
+        </div>
+        <div className="bc-legend-item">
+          <span className="bc-swatch bc-periodic" />周期
+        </div>
+      </div>
     </div>
   );
 }

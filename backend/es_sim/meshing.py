@@ -1,9 +1,17 @@
-"""gmsh による三角形メッシュ生成。仕様書 §5 参照。
+"""gmsh (OCC カーネル + boolean fragment) による三角形メッシュ生成。仕様書 §5 / prompts/22 参照。
 
-前提 (フェーズ0):
-- regions は domain の内部に完全に含まれ、互いに重ならない
-- conductor 領域は穴として抜き、輪郭節点を Dirichlet にする
-- dielectric / charge 領域は独立サーフェスとして要素タグを保持する
+方針:
+- domain・各領域のポリゴン (円は多角形化) を OCC でサーフェス化し、`occ.fragment`
+  で全て分割する
+- フラグメント面 → 領域の同定は fragment の親子対応 (out_map) で行う
+  - domain 外のフラグメントは破棄する (= 領域は黙って domain にクリップされる)
+  - conductor 内のフラグメントは穴としてメッシュ化しない
+- conductor の Dirichlet 節点は、conductor フラグメントと残存面が共有する
+  境界曲線上の節点とする
+- 外周エッジの境界条件は、フラグメント後の外周曲線の中点が元の domain エッジ i
+  上にあるかで対応付ける (電極が外枠に重なった区間は電極の Dirichlet を優先)
+- periodic 境界 (対辺2本) は fragment 後に `mesh.setPeriodic` を適用して対辺の
+  メッシュを一致させ、スレーブ→マスターの節点対応 (periodic_map) を返す
 """
 
 from __future__ import annotations
@@ -31,17 +39,9 @@ class Mesh:
     dirichlet_rf: dict[int, tuple[float, float, float]] = field(default_factory=dict)
     # 節点番号 -> 二次電子放出係数 γ (>0 の節点のみ)。PIC のみ使用
     see_gamma: dict[int, float] = field(default_factory=dict)
-
-
-def _add_polygon(points, lc: float):
-    """点列から閉曲線ループを作る。(curve_tags, loop_tag) を返す。"""
-    pts = [gmsh.model.geo.addPoint(x, y, 0.0, lc) for x, y in points]
-    curves = [
-        gmsh.model.geo.addLine(pts[i], pts[(i + 1) % len(pts)])
-        for i in range(len(pts))
-    ]
-    loop = gmsh.model.geo.addCurveLoop(curves)
-    return curves, loop
+    # 周期境界の正準化写像 (N,)。periodic_map[i] = 節点 i のマスター節点番号
+    # (スレーブ以外は自分自身)。periodic 境界が無ければ None
+    periodic_map: np.ndarray | None = None
 
 
 def _circle_polygon(center: tuple[float, float], radius: float, h: float) -> list[tuple[float, float]]:
@@ -71,10 +71,35 @@ def _region_polygon(region: Region, h: float) -> list[tuple[float, float]]:
     return _circle_polygon(region.shape.center, region.shape.radius, h)
 
 
+def _occ_polygon_surface(points) -> int:
+    """点列から OCC の閉じた平面サーフェスを作る (サーフェスタグを返す)。"""
+    occ = gmsh.model.occ
+    pts = [occ.addPoint(x, y, 0.0) for x, y in points]
+    curves = [occ.addLine(pts[i], pts[(i + 1) % len(pts)]) for i in range(len(pts))]
+    loop = occ.addCurveLoop(curves)
+    return occ.addPlaneSurface([loop])
+
+
+def _points_on_segment(pts: np.ndarray, q1: np.ndarray, q2: np.ndarray, tol: float) -> np.ndarray:
+    """点列 pts (K, 2) が線分 q1-q2 上 (距離 tol 以内・パラメータ範囲内) にあるか。"""
+    seg = q2 - q1
+    seg_len = float(np.hypot(seg[0], seg[1]))
+    if seg_len <= 0.0 or len(pts) == 0:
+        return np.zeros(len(pts), dtype=bool)
+    d = pts - q1
+    dist = np.abs(d[:, 0] * seg[1] - d[:, 1] * seg[0]) / seg_len
+    t = (d[:, 0] * seg[0] + d[:, 1] * seg[1]) / (seg_len * seg_len)
+    return (dist <= tol) & (t >= -1e-9) & (t <= 1.0 + 1e-9)
+
+
 def generate_mesh(project: Project) -> Mesh:
     geo = project.geometry
     lc = project.mesh.size
     local = {ls.region: ls.size for ls in project.mesh.local_sizes}
+    domain_poly = np.asarray(geo.domain.polygon, dtype=np.float64)
+    n_edges = len(domain_poly)
+    scale = float(np.max(np.abs(domain_poly)))
+    tol = 1e-8 * (scale if scale > 0.0 else 1.0)
 
     # interruptible=False: シグナルハンドラを登録しない
     # (FastAPI はワーカースレッドで実行するため必須)
@@ -82,30 +107,169 @@ def generate_mesh(project: Project) -> Mesh:
     try:
         gmsh.option.setNumber("General.Terminal", 0)
         gmsh.model.add("es_sim")
+        occ = gmsh.model.occ
 
-        outer_curves, outer_loop = _add_polygon(geo.domain.polygon, lc)
-
-        hole_loops = []            # domain サーフェスから抜くループ
-        region_surfaces = []       # (region_index, surface_tag)
-        conductor_curves = []      # (voltage, [curve_tags])
-
-        for i, region in enumerate(geo.regions):
+        # ---- OCC サーフェス化 → boolean fragment ----------------------------
+        s_domain = _occ_polygon_surface(geo.domain.polygon)
+        region_lcs: list[float] = []
+        tool_surfs: list[int] = []
+        for region in geo.regions:
             r_lc = local.get(region.id, lc)
-            polygon = _region_polygon(region, r_lc)
-            curves, loop = _add_polygon(polygon, r_lc)
-            hole_loops.append(loop)
-            if region.type == "conductor":
-                if region.voltage is None:
-                    raise ValueError(f"conductor '{region.id}' に voltage がありません")
-                conductor_curves.append(
-                    (region.voltage, region.voltage_rf, region.see_gamma, curves)
-                )
-            else:
-                surf = gmsh.model.geo.addPlaneSurface([loop])
-                region_surfaces.append((i, surf))
+            region_lcs.append(r_lc)
+            tool_surfs.append(_occ_polygon_surface(_region_polygon(region, r_lc)))
 
-        background_surface = gmsh.model.geo.addPlaneSurface([outer_loop, *hole_loops])
-        gmsh.model.geo.synchronize()
+        if tool_surfs:
+            _, out_map = occ.fragment([(2, s_domain)], [(2, s) for s in tool_surfs])
+        else:
+            out_map = [[(2, s_domain)]]
+        occ.synchronize()
+
+        # ---- フラグメント面 → 領域の同定 (fragment の親子対応で判定) ---------
+        # parents[面タグ] = 親入力のインデックス列 (0: domain、1+i: regions[i])
+        parents: dict[int, list[int]] = {}
+        for pi, children in enumerate(out_map):
+            for dim, tag in children:
+                if dim != 2:
+                    continue
+                ps = parents.setdefault(tag, [])
+                if pi not in ps:
+                    ps.append(pi)
+
+        kept: list[tuple[int, int]] = []            # (面タグ, 領域インデックス。-1 は背景)
+        conductor_surfs: dict[int, list[int]] = {}  # 領域インデックス -> 面タグ列
+        removed_surfs: list[int] = []               # メッシュ化しない面 (domain 外・conductor 内)
+        for tag, ps in parents.items():
+            if 0 not in ps:
+                removed_surfs.append(tag)  # domain 外 → 黙ってクリップ
+                continue
+            ridx = [p - 1 for p in ps if p >= 1]
+            cond = [r for r in ridx if geo.regions[r].type == "conductor"]
+            if cond:
+                conductor_surfs.setdefault(cond[0], []).append(tag)
+                removed_surfs.append(tag)  # conductor 内は穴として除外
+            elif ridx:
+                kept.append((tag, ridx[0]))
+            else:
+                kept.append((tag, -1))
+        if not kept:
+            raise ValueError("メッシュ化できる面がありません (domain 全体が conductor に覆われています)")
+
+        # ---- 曲線・点の分類 (面を削除する前に行う) ---------------------------
+        def _bnd_curves(surface_tag: int) -> list[int]:
+            return [
+                abs(t)
+                for d, t in gmsh.model.getBoundary([(2, surface_tag)], oriented=False)
+                if d == 1
+            ]
+
+        kept_curves: list[int] = []
+        kept_curve_set: set[int] = set()
+        for tag, _ in kept:
+            for c in _bnd_curves(tag):
+                if c not in kept_curve_set:
+                    kept_curve_set.add(c)
+                    kept_curves.append(c)
+
+        # conductor の Dirichlet 曲線 = conductor フラグメントと残存面が共有する曲線
+        conductor_curves: list[tuple[float, object, float, list[int]]] = []
+        for i, region in enumerate(geo.regions):
+            if region.type != "conductor":
+                continue
+            if region.voltage is None:
+                raise ValueError(f"conductor '{region.id}' に voltage がありません")
+            curves: list[int] = []
+            for tag in conductor_surfs.get(i, []):
+                for c in _bnd_curves(tag):
+                    if c in kept_curve_set and c not in curves:
+                        curves.append(c)
+            conductor_curves.append(
+                (region.voltage, region.voltage_rf, region.see_gamma, curves)
+            )
+
+        # 局所メッシュサイズ用: 各領域のフラグメント境界点 (従来相当の挙動維持)
+        region_size_pts: list[tuple[list[int], float]] = []
+        for i in range(len(geo.regions)):
+            r_lc = region_lcs[i]
+            if r_lc == lc:
+                continue  # 全体特性長と同じなら個別設定は不要
+            tags = [t for t, r in kept if r == i] + conductor_surfs.get(i, [])
+            pts: set[int] = set()
+            for tag in tags:
+                for d, p in gmsh.model.getBoundary(
+                    [(2, tag)], recursive=True, oriented=False
+                ):
+                    if d == 0:
+                        pts.add(p)
+            if pts:
+                region_size_pts.append((sorted(pts), r_lc))
+
+        # ---- 不要な面を除去 → 特性長設定 -------------------------------------
+        if removed_surfs:
+            gmsh.model.removeEntities([(2, t) for t in removed_surfs], recursive=False)
+        gmsh.model.mesh.setSize(gmsh.model.getEntities(0), lc)
+        for pts, r_lc in region_size_pts:
+            gmsh.model.mesh.setSize([(0, p) for p in pts], r_lc)
+
+        # ---- 外周曲線 → domain エッジの対応付け (曲線中点がエッジ上か) --------
+        if kept_curves:
+            mids = np.array(
+                [occ.getCenterOfMass(1, c)[:2] for c in kept_curves], dtype=np.float64
+            )
+        else:
+            mids = np.zeros((0, 2))
+        curve_edge = np.full(len(kept_curves), -1, dtype=np.int64)
+        for i in range(n_edges):
+            on = _points_on_segment(
+                mids, domain_poly[i], domain_poly[(i + 1) % n_edges], tol
+            )
+            curve_edge[on & (curve_edge < 0)] = i
+        edge_curves: dict[int, list[int]] = {}
+        for c, e in zip(kept_curves, curve_edge):
+            if e >= 0:
+                edge_curves.setdefault(int(e), []).append(c)
+
+        # ---- periodic 境界: 対辺の曲線を対応付けて setPeriodic ----------------
+        periodic_slave_curves: list[int] = []
+        for bc in geo.boundaries:
+            if bc.type != "periodic":
+                continue
+            e_m, e_s = bc.edges  # [マスター辺, スレーブ辺] とみなす
+            seg_mid_m = 0.5 * (domain_poly[e_m] + domain_poly[(e_m + 1) % n_edges])
+            seg_mid_s = 0.5 * (domain_poly[e_s] + domain_poly[(e_s + 1) % n_edges])
+            t_vec = seg_mid_s - seg_mid_m  # マスター辺 → スレーブ辺の平行移動
+            masters = edge_curves.get(e_m, [])
+            slaves = edge_curves.get(e_s, [])
+            if not masters or len(masters) != len(slaves):
+                raise ValueError(
+                    f"periodic 境界 (エッジ {e_m}, {e_s}) の対辺で曲線分割が一致しません。"
+                    "周期辺には領域を重ねないでください"
+                )
+            master_mids = {
+                cm: np.asarray(occ.getCenterOfMass(1, cm)[:2]) for cm in masters
+            }
+            ordered_masters: list[int] = []
+            for cs in slaves:
+                target = np.asarray(occ.getCenterOfMass(1, cs)[:2]) - t_vec
+                match = [
+                    cm
+                    for cm, mm in master_mids.items()
+                    if float(np.hypot(*(target - mm))) <= 10.0 * tol
+                ]
+                if len(match) != 1:
+                    raise ValueError(
+                        f"periodic 境界 (エッジ {e_m}, {e_s}) の曲線対応が取れません。"
+                        "対辺のメッシュ分割が平行移動で一致する形状にしてください"
+                    )
+                ordered_masters.append(match[0])
+            affine = [
+                1.0, 0.0, 0.0, float(t_vec[0]),
+                0.0, 1.0, 0.0, float(t_vec[1]),
+                0.0, 0.0, 1.0, 0.0,
+                0.0, 0.0, 0.0, 1.0,
+            ]
+            gmsh.model.mesh.setPeriodic(1, slaves, ordered_masters, affine)
+            periodic_slave_curves.extend(slaves)
+
         gmsh.model.mesh.generate(2)
 
         # ---- 節点 ---------------------------------------------------------
@@ -115,10 +279,9 @@ def generate_mesh(project: Project) -> Mesh:
         tag_to_index = np.zeros(node_tags.max() + 1, dtype=np.int64)
         tag_to_index[node_tags] = np.arange(len(node_tags))
 
-        # ---- 要素 (サーフェスごとに領域タグを付ける) ------------------------
+        # ---- 要素 (残存面ごとに領域タグを付ける) -----------------------------
         tri_list, region_list = [], []
-
-        def _collect(surface_tag: int, region_index: int) -> None:
+        for surface_tag, region_index in kept:
             etypes, _, enodes = gmsh.model.mesh.getElements(2, surface_tag)
             for etype, conn in zip(etypes, enodes):
                 if etype != 2:  # 3節点三角形のみ
@@ -126,10 +289,6 @@ def generate_mesh(project: Project) -> Mesh:
                 tris = tag_to_index[np.asarray(conn, dtype=np.int64)].reshape(-1, 3)
                 tri_list.append(tris)
                 region_list.append(np.full(len(tris), region_index, dtype=np.int64))
-
-        _collect(background_surface, -1)
-        for region_index, surf in region_surfaces:
-            _collect(surf, region_index)
 
         triangles = np.concatenate(tri_list)
         tri_region = np.concatenate(region_list)
@@ -156,22 +315,76 @@ def generate_mesh(project: Project) -> Mesh:
             if gamma > 0.0:
                 see_gamma[n] = max(see_gamma.get(n, 0.0), gamma)
 
-        # 外周エッジの境界条件 (エッジ i は outer_curves[i])
+        # 外周エッジの境界条件 (Dirichlet のみ。symmetry / periodic は自然境界)
         for bc in geo.boundaries:
+            if bc.type != "dirichlet":
+                continue
             for edge in bc.edges:
-                for n in _curve_nodes(outer_curves[edge]):
-                    _assign(int(n), bc.voltage, bc.voltage_rf)
-                    _assign_gamma(int(n), bc.see_gamma)
+                for c in edge_curves.get(edge, []):
+                    for n in _curve_nodes(c):
+                        _assign(int(n), bc.voltage, bc.voltage_rf)
+                        _assign_gamma(int(n), bc.see_gamma)
 
-        # 電極輪郭 (電極の指定を優先して上書き)
+        # 電極輪郭 (電極の指定を優先して上書き。外枠に重なった区間も電極が勝つ)
         for voltage, rf, gamma, curves in conductor_curves:
             for c in curves:
                 for n in _curve_nodes(c):
                     _assign(int(n), voltage, rf)
                     _assign_gamma(int(n), gamma)
 
+        # ---- 周期節点対応 (スレーブ → マスター) ------------------------------
+        pairs: dict[int, int] = {}
+        for c in periodic_slave_curves:
+            mtag, ntags, mntags, _ = gmsh.model.mesh.getPeriodicNodes(1, c)
+            if mtag == c or len(ntags) == 0:
+                continue
+            for s_t, m_t in zip(ntags, mntags):
+                si = int(tag_to_index[int(s_t)])
+                mi = int(tag_to_index[int(m_t)])
+                if si != mi:
+                    pairs[si] = mi
+
+        # ---- 未参照節点の除去と再番号付け -------------------------------------
+        # (conductor 内・domain 外のフラグメントや孤立曲線の節点を落とす)
+        used = np.unique(triangles)
+        remap = np.full(len(nodes), -1, dtype=np.int64)
+        remap[used] = np.arange(len(used), dtype=np.int64)
+        nodes = nodes[used]
+        triangles = remap[triangles]
+
+        dirichlet = {int(remap[n]): v for n, v in dirichlet.items() if remap[n] >= 0}
+        dirichlet_rf = {int(remap[n]): v for n, v in dirichlet_rf.items() if remap[n] >= 0}
+        see_gamma = {int(remap[n]): v for n, v in see_gamma.items() if remap[n] >= 0}
+
+        periodic_map: np.ndarray | None = None
+        if pairs:
+            canon = np.arange(len(nodes), dtype=np.int64)
+            for s, m in pairs.items():
+                if remap[s] >= 0 and remap[m] >= 0:
+                    canon[remap[s]] = remap[m]
+            # 二重周期の角などの連鎖を推移的に解決する
+            for _ in range(8):
+                c2 = canon[canon]
+                if np.array_equal(c2, canon):
+                    break
+                canon = c2
+            if np.any(canon != np.arange(len(nodes))):
+                periodic_map = canon
+                # スレーブに付いた Dirichlet / γ をマスターへも伝播する (角の整合)
+                for n in list(dirichlet):
+                    m = int(canon[n])
+                    if m != n and m not in dirichlet:
+                        dirichlet[m] = dirichlet[n]
+                        if n in dirichlet_rf:
+                            dirichlet_rf[m] = dirichlet_rf[n]
+                for n in list(see_gamma):
+                    m = int(canon[n])
+                    if m != n:
+                        see_gamma[m] = max(see_gamma.get(m, 0.0), see_gamma[n])
+
         return Mesh(nodes=nodes, triangles=triangles,
                     tri_region=tri_region, dirichlet=dirichlet,
-                    dirichlet_rf=dirichlet_rf, see_gamma=see_gamma)
+                    dirichlet_rf=dirichlet_rf, see_gamma=see_gamma,
+                    periodic_map=periodic_map)
     finally:
         gmsh.finalize()

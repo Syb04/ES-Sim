@@ -11,7 +11,9 @@ import { useHistory } from "./useHistory";
 import { toDiagArray } from "./types";
 import { mToMm, mmToM } from "./units";
 import type {
+  BoundaryCondition,
   CircleShape,
+  EdgeBcType,
   Health,
   MeshResult,
   ParticleSettings,
@@ -313,35 +315,53 @@ export default function App() {
     });
   };
 
-  // --- 境界条件 (4辺: 0=下,1=右,2=上,3=左) ---
+  // --- 境界条件 (4辺: 0=下,1=右,2=上,3=左)。矩形domain前提で対辺は (i+2)%4 ---
+  const oppositeEdge = (edgeIndex: number) => (edgeIndex + 2) % 4;
+
+  // 指定エッジを含むBCエントリを取り除く。periodicエントリは2辺セットで消えるため、
+  // 対辺も道連れで自然境界(Neumann)に戻る
+  const removeEdgeBoundary = (boundaries: BoundaryCondition[], edgeIndex: number): BoundaryCondition[] =>
+    boundaries.filter((b) => !b.edges.includes(edgeIndex));
+
   const edgeState = (
     edgeIndex: number,
-  ): { dirichlet: boolean; voltage: number; voltageRf?: VoltageRf; seeGamma: number } => {
+  ): { type: EdgeBcType; voltage: number; voltageRf?: VoltageRf; seeGamma: number } => {
     const b = project.geometry.boundaries.find((b) => b.edges.includes(edgeIndex));
-    return b
-      ? { dirichlet: true, voltage: b.voltage, voltageRf: b.voltage_rf, seeGamma: b.see_gamma ?? 0 }
-      : { dirichlet: false, voltage: 0, seeGamma: 0 };
+    if (!b) return { type: "neumann", voltage: 0, seeGamma: 0 };
+    if (b.type === "dirichlet") {
+      return { type: "dirichlet", voltage: b.voltage, voltageRf: b.voltage_rf, seeGamma: b.see_gamma ?? 0 };
+    }
+    return { type: b.type, voltage: 0, seeGamma: 0 };
   };
 
-  const setEdgeNeumann = (edgeIndex: number) => {
+  // 境界条件タイプの一元切替ハンドラ。周期を選ぶと対辺も自動的に周期エントリへまとめ、
+  // 対辺が別タイプ(Dirichlet等)で使用中でも単純に上書きする。他タイプへ切替えた場合、
+  // 元が周期エントリであれば removeEdgeBoundary により対辺も道連れで解除される
+  const setEdgeType = (edgeIndex: number, type: EdgeBcType) => {
     const p = projectRef.current;
-    commitProject({
-      ...p,
-      geometry: {
-        ...p.geometry,
-        boundaries: p.geometry.boundaries.filter((b) => !b.edges.includes(edgeIndex)),
-      },
-    });
+    let boundaries = removeEdgeBoundary(p.geometry.boundaries, edgeIndex);
+    if (type === "dirichlet") {
+      boundaries = [...boundaries, { edges: [edgeIndex], type: "dirichlet" as const, voltage: 0 }];
+    } else if (type === "symmetry") {
+      boundaries = [...boundaries, { edges: [edgeIndex], type: "symmetry" as const }];
+    } else if (type === "periodic") {
+      const opposite = oppositeEdge(edgeIndex);
+      boundaries = [
+        ...removeEdgeBoundary(boundaries, opposite),
+        { edges: [edgeIndex, opposite], type: "periodic" as const },
+      ];
+    }
+    commitProject({ ...p, geometry: { ...p.geometry, boundaries } });
   };
 
-  const setEdgeDirichlet = (edgeIndex: number, voltage: number) => {
+  // Dirichlet辺の電圧値のみ更新 (まだDirichletでなければ新規作成する)
+  const setEdgeVoltage = (edgeIndex: number, voltage: number) => {
     const p = projectRef.current;
-    const exists = p.geometry.boundaries.some((b) => b.edges.includes(edgeIndex));
-    const boundaries = exists
-      ? p.geometry.boundaries.map((b) =>
-          b.edges.includes(edgeIndex) ? { ...b, voltage } : b,
-        )
-      : [...p.geometry.boundaries, { edges: [edgeIndex], type: "dirichlet" as const, voltage }];
+    const cur = p.geometry.boundaries.find((b) => b.edges.includes(edgeIndex));
+    const boundaries =
+      cur && cur.type === "dirichlet"
+        ? p.geometry.boundaries.map((b) => (b === cur ? { ...b, voltage } : b))
+        : [...removeEdgeBoundary(p.geometry.boundaries, edgeIndex), { edges: [edgeIndex], type: "dirichlet" as const, voltage }];
     commitProject({ ...p, geometry: { ...p.geometry, boundaries } });
   };
 
@@ -353,7 +373,7 @@ export default function App() {
       geometry: {
         ...p.geometry,
         boundaries: p.geometry.boundaries.map((b) =>
-          b.edges.includes(edgeIndex) ? { ...b, voltage_rf } : b,
+          b.type === "dirichlet" && b.edges.includes(edgeIndex) ? { ...b, voltage_rf } : b,
         ),
       },
     });
@@ -367,7 +387,7 @@ export default function App() {
       geometry: {
         ...p.geometry,
         boundaries: p.geometry.boundaries.map((b) =>
-          b.edges.includes(edgeIndex) ? { ...b, see_gamma } : b,
+          b.type === "dirichlet" && b.edges.includes(edgeIndex) ? { ...b, see_gamma } : b,
         ),
       },
     });
@@ -586,13 +606,25 @@ export default function App() {
         <button className={`tool ${tool === "select" ? "active" : ""}`} onClick={() => setTool("select")}>
           選択
         </button>
-        <button className={`tool ${tool === "polyline" ? "active" : ""}`} onClick={() => setTool("polyline")}>
+        <button
+          className={`tool ${tool === "polyline" ? "active" : ""}`}
+          onClick={() => setTool("polyline")}
+          title="domain外にはみ出した部分は解析時にクリップされます"
+        >
           ポリライン
         </button>
-        <button className={`tool ${tool === "rect" ? "active" : ""}`} onClick={() => setTool("rect")}>
+        <button
+          className={`tool ${tool === "rect" ? "active" : ""}`}
+          onClick={() => setTool("rect")}
+          title="domain外にはみ出した部分は解析時にクリップされます"
+        >
           矩形
         </button>
-        <button className={`tool ${tool === "circle" ? "active" : ""}`} onClick={() => setTool("circle")}>
+        <button
+          className={`tool ${tool === "circle" ? "active" : ""}`}
+          onClick={() => setTool("circle")}
+          title="domain外にはみ出した部分は解析時にクリップされます"
+        >
           円
         </button>
         <button className={`tool ${tool === "profile" ? "active" : ""}`} onClick={() => setTool("profile")}>
@@ -734,8 +766,8 @@ export default function App() {
                 domainH={domainH}
                 setDomainSize={setDomainSize}
                 edgeState={edgeState}
-                setEdgeNeumann={setEdgeNeumann}
-                setEdgeDirichlet={setEdgeDirichlet}
+                setEdgeType={setEdgeType}
+                setEdgeVoltage={setEdgeVoltage}
                 setEdgeVoltageRf={setEdgeVoltageRf}
                 setEdgeSeeGamma={setEdgeSeeGamma}
                 setMeshSize={setMeshSize}
