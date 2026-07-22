@@ -1,4 +1,4 @@
-# ES-Sim バックエンドの配布ビルド (Windows 用、prompts/44)。
+﻿# ES-Sim バックエンドの配布ビルド (Windows 用、prompts/44)。
 #
 # venv を有効化した PowerShell で実行する:
 #   powershell -ExecutionPolicy Bypass -File scripts\build_backend.ps1
