@@ -797,8 +797,20 @@ export default function App() {
         if (!obj || typeof obj !== "object" || !("geometry" in obj)) {
           throw new Error("不正なプロジェクトファイルです (geometry がありません)");
         }
-        // 型はバックエンドが信頼できるものを書き出す前提で信用する
-        commitProject(obj as Project);
+        // 省略可能フィールドを既定値で補完する。backend の pydantic スキーマは
+        // regions / boundaries 等を省略可 (既定 []) としており、手書き・サンプルの
+        // JSON では欠けていることがある (欠けたまま state に入れると .find 等で落ちる)
+        const raw = obj as Project;
+        const loaded: Project = {
+          ...raw,
+          geometry: {
+            domain: raw.geometry.domain ?? { polygon: [] },
+            regions: raw.geometry.regions ?? [],
+            boundaries: raw.geometry.boundaries ?? [],
+          },
+          mesh: { ...SAMPLE.mesh, ...(raw.mesh ?? {}) },
+        };
+        commitProject(loaded);
         // particles / pic は独立管理の state なので、読込んだファイルにあれば反映し、なければ既定値に戻す
         const loadedParticles = (obj as Project).particles;
         setParticles(loadedParticles ?? DEFAULT_PARTICLES);
