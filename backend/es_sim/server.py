@@ -37,7 +37,9 @@ app = FastAPI(title="ES-Sim backend", version=__version__)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origin_regex=r"http://(localhost|127\.0\.0\.1)(:\d+)?|tauri://localhost",
+    # 開発時: http://localhost:1420 (vite) / ブラウザ直接アクセス
+    # 配布版: Windows (WebView2) は http://tauri.localhost、macOS/Linux は tauri://localhost
+    allow_origin_regex=r"https?://(localhost|127\.0\.0\.1|tauri\.localhost)(:\d+)?|tauri://localhost",
     allow_methods=["*"],
     allow_headers=["*"],
 )
