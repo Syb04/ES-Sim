@@ -39,6 +39,7 @@ from .particles import (
     _init_particles,
     _locate_initial,
     _pack_coeffs,
+    _solid_elements,
     _walk_step,
 )
 from .schema import PicSettings, Project
@@ -107,6 +108,10 @@ class PicSimulation:
         self.canon = mesh.periodic_map
         self.tris_dep = self.canon[self.tris] if self.canon is not None else self.tris
 
+        # 誘電体 (固体) 要素のマスク: 粒子は侵入できず表面で吸収する (prompts/24)。
+        # 場の計算は変更しない (εr 付き要素としてメッシュに残る)。無ければ None
+        self._solid_elem = _solid_elements(project, mesh)
+
         # ---- FEM 行列: K_ff を splu で1回だけ前分解 --------------------------
         k, self.f_static = assemble(project, mesh)  # 静的 charge 領域の右辺を含む
         items = sorted(mesh.dirichlet.items())      # 節点順に固定して決定的に
@@ -173,8 +178,12 @@ class PicSimulation:
         if ip is not None:
             rng = np.random.default_rng(ip.seed)
             n_macro = self.pic.n_macro
-            area_total = float(self.area.sum())
-            w0 = ip.density * area_total / n_macro  # マクロ重み (奥行き1m換算)
+            # 装荷可能面積 = 誘電体 (固体) 要素を除いた面積 (粒子は入れないため)
+            if self._solid_elem is None:
+                area_load = float(self.area.sum())
+            else:
+                area_load = float(self.area[~self._solid_elem].sum())
+            w0 = ip.density * area_load / n_macro  # マクロ重み (奥行き1m換算)
             x0, elem0 = self._sample_uniform(rng, n_macro)
             for name, q, m, t_ev, mobile in (
                 ("electron", -QE, ME, ip.te_ev, True),
@@ -477,9 +486,15 @@ class PicSimulation:
 
         要素を面積比例で選び、要素内は重心座標の一様分布で配置する。
         所属要素が同時に確定するので walk 初期化が不要。
+        誘電体 (固体) 要素は粒子が入れないため装荷対象から除外する。
         """
-        p_elem = self.area / self.area.sum()
-        elem = rng.choice(len(self.tris), size=n, p=p_elem).astype(np.int64)
+        if self._solid_elem is None:
+            p_elem = self.area / self.area.sum()
+            elem = rng.choice(len(self.tris), size=n, p=p_elem).astype(np.int64)
+        else:
+            loadable = np.nonzero(~self._solid_elem)[0]
+            p_elem = self.area[loadable] / self.area[loadable].sum()
+            elem = loadable[rng.choice(len(loadable), size=n, p=p_elem)].astype(np.int64)
         r1 = np.sqrt(rng.random(n))
         r2 = rng.random(n)
         pts = self.mesh.nodes[self.tris[elem]]  # (n, 3, 2)
@@ -700,13 +715,19 @@ class PicSimulation:
                         x_new, elem_new, absorbed, b_elem, b_loc, l_new
                     ):
                         break
-            n_abs = int(absorbed.sum())
+            # 誘電体 (固体) 要素へ入った粒子は表面で吸収する
+            # (壁カウンタに計上するが SEE は発生させない、prompts/24)
+            if self._solid_elem is not None:
+                removed = absorbed | self._solid_elem[elem_new]
+            else:
+                removed = absorbed
+            n_abs = int(removed.sum())
             if n_abs:
                 sp.wall_absorbed += n_abs
                 # SEE: γ>0 電極へのイオン吸収で二次電子を生成 (sp.x は更新前の位置)
-                if sp.name == "ion" and self._edge_gamma is not None:
+                if sp.name == "ion" and self._edge_gamma is not None and np.any(absorbed):
                     self._emit_see(sp, x_new, b_elem, b_loc, absorbed)
-                keep = ~absorbed
+                keep = ~removed
                 sp.x = x_new[keep]
                 sp.v = v_new[keep]
                 sp.w = sp.w[keep]

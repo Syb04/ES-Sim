@@ -225,6 +225,24 @@ def _walk_step(
     return elem, absorbed, b_elem, b_loc
 
 
+# ---- 固体領域 (粒子が侵入できない要素) の判定 (prompts/24) ---------------------
+
+
+def _solid_elements(project: Project, mesh: Mesh) -> np.ndarray | None:
+    """粒子が侵入できない固体要素のマスク (M,) を返す。固体が無ければ None。
+
+    領域種別ごとの粒子透過性:
+      - conductor: 穴 (要素が無いので従来通り壁として吸収)
+      - dielectric: 固体 (場は εr 付きで解くが、粒子は表面で吸収する)
+      - charge: 透過 (空間電荷雲なので従来通り通過)
+    """
+    solid = np.zeros(len(mesh.triangles), dtype=bool)
+    for i, region in enumerate(project.geometry.regions):
+        if region.type == "dielectric":
+            solid |= mesh.tri_region == i
+    return solid if bool(solid.any()) else None
+
+
 # ---- 境界メッシュエッジの分類 (対称反射・周期ラップ、prompts/22) ---------------
 
 
@@ -507,6 +525,9 @@ def trace(project: Project, mesh: Mesh, sol: Solution) -> TraceOutput:
         sorted(refl_edges), periodic_pairs,
     )
 
+    # 誘電体 (固体) 要素のマスク (無ければ None = 従来経路)
+    solid = _solid_elements(project, mesh)
+
     x0, v0 = _init_particles(settings.emitter, m)
     n = len(x0)
 
@@ -551,7 +572,14 @@ def trace(project: Project, mesh: Mesh, sol: Solution) -> TraceOutput:
                     x_new, v_half, new_elem, absorbed_mask, b_elem, b_loc,
                 )
 
-            cont = ~absorbed_mask
+            # 誘電体 (固体) 要素へ入った粒子は表面で吸収する (prompts/24)
+            hit_solid = None
+            if solid is not None:
+                hit_solid = ~absorbed_mask & solid[new_elem]
+                if not np.any(hit_solid):
+                    hit_solid = None
+
+            cont = ~absorbed_mask if hit_solid is None else ~(absorbed_mask | hit_solid)
             cont_idx = idx_active[cont]
             if cont_idx.size:
                 x[cont_idx] = x_new[cont]
@@ -582,6 +610,15 @@ def trace(project: Project, mesh: Mesh, sol: Solution) -> TraceOutput:
                 v[abs_idx] = v[abs_idx] + frac[:, None] * dt * a_cur[absorbed_mask]
                 tof[abs_idx] = t_elapsed + frac * dt
                 alive[abs_idx] = False
+
+            if hit_solid is not None:
+                # 誘電体表面での吸収: 最終位置は侵入直前〜現在位置の間で良いため
+                # 現在位置 (1ステップ分だけ内側) を採用する (厳密な交点補間は不要)
+                hit_idx = idx_active[hit_solid]
+                x[hit_idx] = x_new[hit_solid]
+                v[hit_idx] = v_half[hit_solid]
+                tof[hit_idx] = t_elapsed + dt
+                alive[hit_idx] = False
 
         t_elapsed += dt
         if step % save_every == 0:
