@@ -285,34 +285,35 @@ class PicSimulation:
         # run_batch 完了時の位相分解データ (cycle_data() の結果)
         self.cycle: dict | None = None
 
-        # ---- IEDF/IADF コレクタ (prompts/30) ----------------------------------
-        # 平均区間中に吸収されたイオンのうち、コレクタ線分から距離 tol 以内かつ
-        # 線分区間内で吸収されたものを記録する (collector=null なら完全に無効)
-        self._collector = self.pic.collector
-        self.collector_result: dict | None = None
-        if self._collector is not None:
-            p1 = np.asarray(self._collector.p1, dtype=np.float64)
-            p2 = np.asarray(self._collector.p2, dtype=np.float64)
+        # ---- IEDF/IADF コレクタ (prompts/30、複数対応 prompts/36) -------------
+        # 平均区間中に吸収されたイオンのうち、各コレクタ線分から距離 tol 以内かつ
+        # 線分区間内で吸収されたものをコレクタごとに記録する。
+        # 旧単数形 collector はスキーマ側で collectors へ正規化済み (空なら無効)
+        self.collector_results: list[dict] | None = None
+        self.collector_result: dict | None = None  # 先頭コレクタのエイリアス (後方互換)
+        self._collectors_st: list[dict] = []  # コレクタごとの前計算 + 記録ストレージ
+        for col in self.pic.collectors:
+            p1 = np.asarray(col.p1, dtype=np.float64)
+            p2 = np.asarray(col.p2, dtype=np.float64)
             seg = p2 - p1
             seg_len = float(np.hypot(seg[0], seg[1]))
             if seg_len <= 0.0:
                 raise ValueError("collector の p1 と p2 が同一点です")
-            self._col_p1 = p1
-            self._col_len = seg_len
-            self._col_tan = seg / seg_len                              # 接線 (p1→p2)
-            self._col_nrm = np.array([-self._col_tan[1], self._col_tan[0]])  # 法線
-            self._col_tol = (
-                self._collector.tol
-                if self._collector.tol is not None
-                else project.mesh.size
+            tan = seg / seg_len  # 接線 (p1→p2)
+            self._collectors_st.append(
+                {
+                    "p1": p1,
+                    "len": seg_len,
+                    "tan": tan,
+                    "nrm": np.array([-tan[1], tan[0]]),  # 法線
+                    "tol": col.tol if col.tol is not None else project.mesh.size,
+                    # チャンク追記 (numpy 配列のリスト) で高速に記録する
+                    "e": [], "a": [], "w": [],
+                    "count": 0,     # 記録したマクロイオン数 (総数)
+                    "weight": 0.0,  # 総実イオン数 [1/m]
+                    "samples": 0,   # 保存済みサンプル数 (上限はコレクタごとに適用)
+                }
             )
-            # チャンク追記 (numpy 配列のリスト) で高速に記録する
-            self._col_e: list[np.ndarray] = []
-            self._col_a: list[np.ndarray] = []
-            self._col_w: list[np.ndarray] = []
-            self._col_count = 0        # 記録したマクロイオン数 (総数)
-            self._col_weight = 0.0     # 総実イオン数 [1/m]
-            self._col_samples = 0      # 保存済みサンプル数 (上限 COLLECTOR_MAX_SAMPLES)
         # 節点集中面積 = Σ隣接要素面積/3 (averaged_density の規格化に使う)。
         # 周期境界では正準節点番号で積むため、スレーブ節点の面積は 0 になる
         self._node_area = np.bincount(
@@ -585,48 +586,53 @@ class PicSimulation:
             # 誘電体表面吸収: 現在位置 (侵入直前〜現在の間で良い)
             pos[~wall] = x_new[idx[~wall]]
 
-        # コレクタ線分との距離 (法線方向) と区間 (接線方向の射影) の判定
-        d = pos - self._col_p1
-        proj = d[:, 0] * self._col_tan[0] + d[:, 1] * self._col_tan[1]
-        dist = np.abs(d[:, 0] * self._col_nrm[0] + d[:, 1] * self._col_nrm[1])
-        sel = (dist <= self._col_tol) & (proj >= 0.0) & (proj <= self._col_len)
-        if not np.any(sel):
-            return
-        s_idx = idx[sel]
-        vel = v_new[s_idx]
-        wgt = sp.w[s_idx].astype(np.float64)
-        k = len(s_idx)
-        self._col_count += k
-        self._col_weight += float(wgt.sum())
+        # 各コレクタ線分との距離 (法線方向) と区間 (接線方向の射影) の判定。
+        # 1つのイオンが複数コレクタに同時該当する場合は両方に記録する
+        for st in self._collectors_st:
+            d = pos - st["p1"]
+            proj = d[:, 0] * st["tan"][0] + d[:, 1] * st["tan"][1]
+            dist = np.abs(d[:, 0] * st["nrm"][0] + d[:, 1] * st["nrm"][1])
+            sel = (dist <= st["tol"]) & (proj >= 0.0) & (proj <= st["len"])
+            if not np.any(sel):
+                continue
+            s_idx = idx[sel]
+            vel = v_new[s_idx]
+            wgt = sp.w[s_idx].astype(np.float64)
+            k = len(s_idx)
+            st["count"] += k
+            st["weight"] += float(wgt.sum())
 
-        # サンプル上限到達後は count / total_weight のみ加算する
-        room = COLLECTOR_MAX_SAMPLES - self._col_samples
-        if room <= 0:
-            return
-        if k > room:
-            vel, wgt, k = vel[:room], wgt[:room], room
-        e_ev = 0.5 * sp.m * (vel[:, 0] ** 2 + vel[:, 1] ** 2 + vel[:, 2] ** 2) / QE
-        vt = vel[:, 0] * self._col_tan[0] + vel[:, 1] * self._col_tan[1]
-        vn = vel[:, 0] * self._col_nrm[0] + vel[:, 1] * self._col_nrm[1]
-        ang = np.degrees(np.arctan2(vt, np.abs(vn)))
-        self._col_e.append(e_ev)
-        self._col_a.append(ang)
-        self._col_w.append(wgt)
-        self._col_samples += k
+            # サンプル上限 (コレクタごと) 到達後は count / total_weight のみ加算する
+            room = COLLECTOR_MAX_SAMPLES - st["samples"]
+            if room <= 0:
+                continue
+            if k > room:
+                vel, wgt, k = vel[:room], wgt[:room], room
+            e_ev = 0.5 * sp.m * (vel[:, 0] ** 2 + vel[:, 1] ** 2 + vel[:, 2] ** 2) / QE
+            vt = vel[:, 0] * st["tan"][0] + vel[:, 1] * st["tan"][1]
+            vn = vel[:, 0] * st["nrm"][0] + vel[:, 1] * st["nrm"][1]
+            ang = np.degrees(np.arctan2(vt, np.abs(vn)))
+            st["e"].append(e_ev)
+            st["a"].append(ang)
+            st["w"].append(wgt)
+            st["samples"] += k
 
-    def _collector_data(self) -> dict | None:
-        """コレクタの記録を dict にまとめる (WS done / self.collector_result 用)。"""
-        if self._collector is None:
+    def _collector_data(self) -> list[dict] | None:
+        """各コレクタの記録を dict のリストにまとめる (collectors と同順)。"""
+        if not self._collectors_st:
             return None
         empty = np.zeros(0)
-        return {
-            "count": self._col_count,
-            "total_weight": self._col_weight,
-            "energies_ev": np.concatenate(self._col_e) if self._col_e else empty,
-            "angles_deg": np.concatenate(self._col_a) if self._col_a else empty,
-            "weights": np.concatenate(self._col_w) if self._col_w else empty,
-            "truncated": self._col_count > self._col_samples,
-        }
+        return [
+            {
+                "count": st["count"],
+                "total_weight": st["weight"],
+                "energies_ev": np.concatenate(st["e"]) if st["e"] else empty,
+                "angles_deg": np.concatenate(st["a"]) if st["a"] else empty,
+                "weights": np.concatenate(st["w"]) if st["w"] else empty,
+                "truncated": st["count"] > st["samples"],
+            }
+            for st in self._collectors_st
+        ]
 
     def _emit_see(
         self,
@@ -936,7 +942,7 @@ class PicSimulation:
                 sp.wall_absorbed += n_abs
                 # IEDF/IADF コレクタ: 平均区間中に吸収されたイオンを記録
                 # (外周・電極輪郭・誘電体表面のすべて。電子・SEE は対象外)
-                if sp.name == "ion" and self._collector is not None and accumulating:
+                if sp.name == "ion" and self._collectors_st and accumulating:
                     self._collect_ions(
                         sp, x_new, v_new, absorbed, b_elem, b_loc, removed
                     )
@@ -1271,12 +1277,13 @@ class PicSimulation:
         self._snap_t_start = math.inf
         self.fields = None
         self.cycle = None
+        self.collector_results = None
         self.collector_result = None
-        if self._collector is not None:
-            self._col_e, self._col_a, self._col_w = [], [], []
-            self._col_count = 0
-            self._col_weight = 0.0
-            self._col_samples = 0
+        for st in self._collectors_st:
+            st["e"], st["a"], st["w"] = [], [], []
+            st["count"] = 0
+            st["weight"] = 0.0
+            st["samples"] = 0
         # 不動種の堆積キャッシュは維持して良い (粒子状態が変わらない限り有効)
 
     def _make_frame(self, phi: np.ndarray) -> dict:
@@ -1344,5 +1351,9 @@ class PicSimulation:
                     callback(frame)
         self.fields = self.averaged_fields()
         self.cycle = self.cycle_data()
-        self.collector_result = self._collector_data()
+        self.collector_results = self._collector_data()
+        # 旧単数形の後方互換: 先頭コレクタの結果をエイリアスとして残す
+        self.collector_result = (
+            self.collector_results[0] if self.collector_results else None
+        )
         return self.history, frames

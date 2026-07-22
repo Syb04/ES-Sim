@@ -27,6 +27,28 @@ export type Tool = "select" | "polyline" | "rect" | "circle" | "profile" | "emit
 // カラーマップの対象: 電位 V か |E|
 export type FieldView = "v" | "e_abs";
 
+// IEDF/IADF コレクタ線分の描画用ビュー (キャンバス表示に必要な最小限のみ)
+export interface PicCollectorView {
+  label: string;
+  p1: Point;
+  p2: Point;
+}
+
+// コレクタ表示の固定パレット (黄・シアン・マゼンタ・緑…)。インデックスを長さで循環させる
+const COLLECTOR_COLORS = [
+  "#ffd400", // 黄
+  "#4dd4ff", // シアン
+  "#ff4dd4", // マゼンタ
+  "#4ddd8c", // 緑
+  "#ff9d4d", // オレンジ
+  "#b070f0", // 紫
+  "#39d3d3", // ティール
+  "#ff6666", // 赤
+];
+function collectorColor(i: number): string {
+  return COLLECTOR_COLORS[i % COLLECTOR_COLORS.length];
+}
+
 // PIC結果フィールド表示 (done後の「結果表示」セレクトでライブ以外を選んだ場合の描画データ)。
 // 値配列・節点/要素の別・単位・対数フラグを1つにまとめて渡すことで、描画分岐の散乱を避ける。
 // 周期アニメーション再生時もこの型を流用し (App側で優先的に構築して渡す)、
@@ -59,8 +81,10 @@ interface Props {
   showIsolines: boolean;
   showVectors: boolean;
   profileLine: [Point, Point] | null;
-  // IEDF/IADF コレクタ線分 (常時オーバーレイ表示の対象)。未配置なら null
-  collectorLine: [Point, Point] | null;
+  // IEDF/IADF コレクタ線分 (複数、常時オーバーレイ表示の対象。最大8個、prompts/37)
+  collectors: PicCollectorView[];
+  // コレクタ一覧 (PICパネル) で選択中のインデックス。キャンバス上で該当線分を強調表示する
+  selectedCollectorIndex: number | null;
   // 粒子エミッタ (常時オーバーレイ表示の対象)。粒子パネル側で必ず既定値を持つため常に非 null
   emitter: Emitter;
   // 粒子軌道トレース結果 (Trace 実行前は null)
@@ -292,7 +316,8 @@ export default function CadCanvas({
   showIsolines,
   showVectors,
   profileLine,
-  collectorLine,
+  collectors,
+  selectedCollectorIndex,
   emitter,
   traceResult,
   showTrajectories,
@@ -928,26 +953,48 @@ export default function CadCanvas({
       }
     }
 
-    // 配置済み IEDF/IADF コレクタ線分のオーバーレイ (常時表示、黄系太めの線分+両端マーカー)
-    if (collectorLine) {
-      const [[xc0, yc0], [xc1, yc1]] = collectorLine;
-      ctx.strokeStyle = "#ffd400";
-      ctx.lineWidth = 3.5;
+    // 配置済み IEDF/IADF コレクタ線分のオーバーレイ (常時表示、コレクタごとに固定パレットを循環)。
+    // 選択中 (一覧行クリック) のコレクタは白破線のハローで強調し、線分中点付近にラベルを描く
+    collectors.forEach((c, i) => {
+      const color = collectorColor(i);
+      const isSelected = selectedCollectorIndex === i;
+      const [xc0, yc0] = c.p1;
+      const [xc1, yc1] = c.p2;
+      ctx.strokeStyle = color;
+      ctx.lineWidth = isSelected ? 5 : 3.5;
       ctx.setLineDash([]);
       ctx.beginPath();
       ctx.moveTo(sx(xc0), sy(yc0));
       ctx.lineTo(sx(xc1), sy(yc1));
       ctx.stroke();
-      ctx.fillStyle = "#ffd400";
+      if (isSelected) {
+        ctx.strokeStyle = "rgba(255,255,255,0.85)";
+        ctx.lineWidth = 1.5;
+        ctx.setLineDash([3, 3]);
+        ctx.beginPath();
+        ctx.moveTo(sx(xc0), sy(yc0));
+        ctx.lineTo(sx(xc1), sy(yc1));
+        ctx.stroke();
+        ctx.setLineDash([]);
+      }
+      ctx.fillStyle = color;
       ctx.strokeStyle = "#1b1e24";
       ctx.lineWidth = 1;
-      for (const [px, py] of collectorLine) {
+      for (const [px, py] of [c.p1, c.p2]) {
         ctx.beginPath();
         ctx.arc(sx(px), sy(py), 5, 0, Math.PI * 2);
         ctx.fill();
         ctx.stroke();
       }
-    }
+      // ラベル (線分中点のやや上に小さく描く)
+      const mx = (xc0 + xc1) / 2;
+      const my = (yc0 + yc1) / 2;
+      ctx.font = "11px system-ui, sans-serif";
+      ctx.fillStyle = color;
+      ctx.textAlign = "center";
+      ctx.textBaseline = "bottom";
+      ctx.fillText(c.label, sx(mx), sy(my) - 6);
+    });
 
     // 粒子軌道 (trace 結果): シアン系半透明ポリライン。粒子数が多くても見えるように線幅は細く保つ
     if (showTrajectories && traceResult) {
@@ -1138,7 +1185,8 @@ export default function CadCanvas({
     vertexPreviewPolygon,
     shapeRadiusPreview,
     profileLine,
-    collectorLine,
+    collectors,
+    selectedCollectorIndex,
     rulerFontSize,
     emitter,
     traceResult,

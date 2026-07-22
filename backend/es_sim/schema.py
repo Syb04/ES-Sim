@@ -257,6 +257,7 @@ class Collector(BaseModel):
     p1: Point
     p2: Point
     tol: float | None = Field(None, gt=0, description="判定距離 [m]。None なら mesh.size と同値")
+    label: str = ""  # 表示用ラベル (空ならフロントが "C1" 等を振る、prompts/36)
 
 
 class PicSettings(BaseModel):
@@ -274,8 +275,21 @@ class PicSettings(BaseModel):
     # RF 1周期の位相分解データ (アニメーション用) の位相ビン数 (prompts/28)。
     # 0 で無効。RF (voltage_rf) が未設定の場合も無効
     phase_bins: int = Field(40, ge=0)
-    # IEDF/IADF コレクタ線分 (prompts/30)。null なら無効
+    # IEDF/IADF コレクタ線分 (prompts/30)。null なら無効。
+    # 旧単数形 (後方互換用)。validator で collectors へ正規化される
     collector: Collector | None = None
+    # 複数コレクタ (prompts/36、最大8個)。内部処理はこちらのみを参照する
+    collectors: list[Collector] = []
+
+    @model_validator(mode="after")
+    def _normalize_collectors(self) -> "PicSettings":
+        """旧単数形 collector を collectors へ正規化する (後方互換)。"""
+        if self.collector is not None and not self.collectors:
+            self.collectors = [self.collector]
+            self.collector = None
+        if len(self.collectors) > 8:
+            raise ValueError("collectors は最大 8 個までです")
+        return self
     # 鏡面反射する domain 外周エッジ番号のリスト (エッジ i は頂点 i → i+1)。
     # 到達粒子は吸収せず法線速度成分を反転して境界内へ折り返す (壁カウンタに含めない)。
     # 当該エッジは境界条件なし (Neumann) を想定。2D ストリップで 1D 問題を模擬する用途

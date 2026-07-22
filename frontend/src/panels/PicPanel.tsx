@@ -7,6 +7,7 @@ import type {
   InitialPlasma,
   McSettings,
   PicCollectorResult,
+  PicCollectorSettings,
   PicCycle,
   PicDiag,
   PicFields,
@@ -101,9 +102,15 @@ interface Props {
   cycleShowParticles: boolean;
   onCycleShowParticlesChange: (v: boolean) => void;
 
-  // done で受信した IEDF/IADF コレクタの記録結果 (collector 未配置・未受信では null)。
-  // 新しい実行開始時に App 側で null にリセットされる
-  collectorResult: PicCollectorResult | null;
+  // done で受信した IEDF/IADF コレクタの記録結果一覧 (pic.collectors と同順)。
+  // 新しい実行開始時に App 側で [] にリセットされる
+  collectorResults: PicCollectorResult[];
+  // コレクタ一覧で選択中のインデックス (未配置なら null)。一覧行クリック/「表示コレクタ」
+  // セレクトのどちらからでも更新でき、キャンバス上の強調表示にも使われる (App 側で共有管理)
+  selectedCollectorIndex: number | null;
+  onSelectCollector: (index: number | null) => void;
+  onUpdateCollector: (index: number, patch: Partial<PicCollectorSettings>) => void;
+  onDeleteCollector: (index: number) => void;
 }
 
 const DEFAULT_INITIAL_PLASMA: InitialPlasma = {
@@ -183,7 +190,11 @@ export default function PicPanel({
   onCycleFpsChange,
   cycleShowParticles,
   onCycleShowParticlesChange,
-  collectorResult,
+  collectorResults,
+  selectedCollectorIndex,
+  onSelectCollector,
+  onUpdateCollector,
+  onDeleteCollector,
 }: Props) {
   // 有効チェックを一度オフにしても、再度オンにしたときに直前の値を復元できるよう保持する
   const plasmaDefaultsRef = useRef<InitialPlasma>(pic.initial_plasma ?? DEFAULT_INITIAL_PLASMA);
@@ -261,15 +272,21 @@ export default function PicPanel({
   // コレクタCSV保存の失敗を表示するためのローカルエラー状態
   const [csvError, setCsvError] = useState<string | null>(null);
 
-  // コレクタ生サンプル (energy_ev, angle_deg, weight) をCSVで保存する
+  const collectors = pic.collectors ?? [];
+  // 「表示コレクタ」セレクト/一覧行クリックで選んでいるコレクタの設定・結果
+  const selectedCollector = selectedCollectorIndex !== null ? collectors[selectedCollectorIndex] : undefined;
+  const selectedResult = selectedCollectorIndex !== null ? collectorResults[selectedCollectorIndex] : undefined;
+
+  // 選択中コレクタの生サンプル (energy_ev, angle_deg, weight) をCSVで保存する (ファイル名にラベルを含める)
   const downloadCollectorCsv = () => {
-    if (!collectorResult) return;
+    if (!selectedResult) return;
+    const label = selectedCollector?.label || `C${(selectedCollectorIndex ?? 0) + 1}`;
     const lines = ["energy_ev,angle_deg,weight"];
-    for (let i = 0; i < collectorResult.energies_ev.length; i++) {
-      lines.push(`${collectorResult.energies_ev[i]},${collectorResult.angles_deg[i]},${collectorResult.weights[i]}`);
+    for (let i = 0; i < selectedResult.energies_ev.length; i++) {
+      lines.push(`${selectedResult.energies_ev[i]},${selectedResult.angles_deg[i]},${selectedResult.weights[i]}`);
     }
     setCsvError(null);
-    saveTextFile("iedf_iadf.csv", lines.join("\n"), "CSV", ["csv"]).catch((err) => {
+    saveTextFile(`iedf_iadf_${label}.csv`, lines.join("\n"), "CSV", ["csv"]).catch((err) => {
       setCsvError(String(err));
     });
   };
@@ -532,96 +549,128 @@ export default function PicPanel({
         />
       </div>
 
-      <h2>PIC: IEDF/IADF (コレクタ)</h2>
+      <h2>PIC: IEDF/IADF (コレクタ、最大8個)</h2>
       <p className="hint">
-        キャンバスの「コレクタ」ツールでウエハ面上に2点クリックして線分を配置します。
+        キャンバスの「コレクタ」ツールでウエハ面上に2点クリックして線分を追加します。
+        一覧の行をクリックするとキャンバス上で選択中のコレクタを強調表示します。
       </p>
-      <div className="kv">
-        <span>p1 [mm]</span>
-        <span>
-          {pic.collector
-            ? `(${(pic.collector.p1[0] * 1000).toFixed(2)}, ${(pic.collector.p1[1] * 1000).toFixed(2)})`
-            : "未配置"}
-        </span>
-      </div>
-      <div className="kv">
-        <span>p2 [mm]</span>
-        <span>
-          {pic.collector
-            ? `(${(pic.collector.p2[0] * 1000).toFixed(2)}, ${(pic.collector.p2[1] * 1000).toFixed(2)})`
-            : "未配置"}
-        </span>
-      </div>
-      <div className="field">
-        <span className="label">判定距離 tol [mm] (空欄=メッシュサイズ)</span>
-        <input
-          type="text"
-          disabled={!pic.collector}
-          value={pic.collector?.tol == null ? "" : String(pic.collector.tol * 1000)}
-          placeholder="メッシュサイズ"
-          onChange={(e) => {
-            if (!pic.collector) return;
-            const raw = e.target.value;
-            if (raw.trim() === "") {
-              onChange({ ...pic, collector: { ...pic.collector, tol: null } });
-              return;
-            }
-            const n = Number(raw);
-            if (Number.isFinite(n)) onChange({ ...pic, collector: { ...pic.collector, tol: n / 1000 } });
-          }}
-        />
-      </div>
-      <div className="actions">
-        <button className="secondary" onClick={() => onChange({ ...pic, collector: null })} disabled={!pic.collector}>
-          コレクタをクリア
-        </button>
-      </div>
-
-      {collectorResult && (
-        <>
-          <div className="kv">
-            <span>記録サンプル数</span>
-            <span>{collectorResult.count}</span>
-          </div>
-          <div className="kv">
-            <span>総実イオン数 [1/m]</span>
-            <span>{collectorResult.total_weight.toExponential(3)}</span>
-          </div>
-          {collectorResult.truncated && (
-            <div className="pic-warnings">
-              警告: サンプル数上限に達したため、以降は個数のみ集計しています (ヒストグラムは記録分のみ反映)
-            </div>
-          )}
-          <div className="field">
-            <span className="label">ビン数</span>
-            <CommitNumberInput
-              value={collectorBins}
-              onCommit={(v) => setCollectorBins(Math.max(1, Math.round(v)))}
+      <div className="collector-list">
+        {collectors.length === 0 && <div className="muted">(コレクタなし。キャンバスで配置してください)</div>}
+        {collectors.map((c, i) => (
+          <div
+            key={i}
+            className={`collector-row ${selectedCollectorIndex === i ? "selected" : ""}`}
+            onClick={() => onSelectCollector(i)}
+          >
+            <input
+              type="text"
+              className="collector-label-input"
+              value={c.label ?? ""}
+              onClick={(e) => e.stopPropagation()}
+              onChange={(e) => onUpdateCollector(i, { label: e.target.value })}
             />
-          </div>
-          <p className="hint">IEDF (入射エネルギー分布、横軸 eV)</p>
-          <HistogramChart
-            values={collectorResult.energies_ev}
-            weights={collectorResult.weights}
-            bins={collectorBins}
-            unit="eV"
-            color="#4da3ff"
-          />
-          <p className="hint">IADF (入射角分布、横軸 deg、-90〜90)</p>
-          <HistogramChart
-            values={collectorResult.angles_deg}
-            weights={collectorResult.weights}
-            bins={collectorBins}
-            unit="deg"
-            color="#ffb84d"
-            fixedRange={[-90, 90]}
-          />
-          {csvError && <div className="error">{csvError}</div>}
-          <div className="actions">
-            <button className="secondary" onClick={downloadCollectorCsv}>
-              CSV保存
+            <span
+              className="collector-points"
+              title={`(${(c.p1[0] * 1000).toFixed(2)}, ${(c.p1[1] * 1000).toFixed(2)}) - (${(c.p2[0] * 1000).toFixed(2)}, ${(c.p2[1] * 1000).toFixed(2)}) mm`}
+            >
+              ({(c.p1[0] * 1000).toFixed(1)},{(c.p1[1] * 1000).toFixed(1)})–({(c.p2[0] * 1000).toFixed(1)},{(c.p2[1] * 1000).toFixed(1)})
+            </span>
+            <input
+              type="text"
+              inputMode="decimal"
+              className="collector-tol-input"
+              placeholder="mesh"
+              title="判定距離 tol [mm] (空欄=メッシュサイズ)"
+              value={c.tol == null ? "" : String(c.tol * 1000)}
+              onClick={(e) => e.stopPropagation()}
+              onChange={(e) => {
+                const raw = e.target.value;
+                if (raw.trim() === "") {
+                  onUpdateCollector(i, { tol: null });
+                  return;
+                }
+                const n = Number(raw);
+                if (Number.isFinite(n)) onUpdateCollector(i, { tol: n / 1000 });
+              }}
+            />
+            <button
+              className="danger collector-delete"
+              onClick={(e) => {
+                e.stopPropagation();
+                onDeleteCollector(i);
+              }}
+              title="このコレクタを削除"
+            >
+              ×
             </button>
           </div>
+        ))}
+      </div>
+
+      {collectorResults.length > 0 && (
+        <>
+          <div className="field">
+            <span className="label">表示コレクタ</span>
+            <select
+              value={selectedCollectorIndex ?? 0}
+              onChange={(e) => onSelectCollector(Number(e.target.value))}
+            >
+              {collectors.map((c, i) => (
+                <option key={i} value={i}>
+                  {c.label || `C${i + 1}`}
+                </option>
+              ))}
+            </select>
+          </div>
+          {selectedResult ? (
+            <>
+              <div className="kv">
+                <span>記録サンプル数</span>
+                <span>{selectedResult.count}</span>
+              </div>
+              <div className="kv">
+                <span>総実イオン数 [1/m]</span>
+                <span>{selectedResult.total_weight.toExponential(3)}</span>
+              </div>
+              {selectedResult.truncated && (
+                <div className="pic-warnings">
+                  警告: サンプル数上限に達したため、以降は個数のみ集計しています (ヒストグラムは記録分のみ反映)
+                </div>
+              )}
+              <div className="field">
+                <span className="label">ビン数</span>
+                <CommitNumberInput
+                  value={collectorBins}
+                  onCommit={(v) => setCollectorBins(Math.max(1, Math.round(v)))}
+                />
+              </div>
+              <p className="hint">IEDF (入射エネルギー分布、横軸 eV)</p>
+              <HistogramChart
+                values={selectedResult.energies_ev}
+                weights={selectedResult.weights}
+                bins={collectorBins}
+                unit="eV"
+                color="#4da3ff"
+              />
+              <p className="hint">IADF (入射角分布、横軸 deg、-90〜90)</p>
+              <HistogramChart
+                values={selectedResult.angles_deg}
+                weights={selectedResult.weights}
+                bins={collectorBins}
+                unit="deg"
+                color="#ffb84d"
+                fixedRange={[-90, 90]}
+              />
+              {csvError && <div className="error">{csvError}</div>}
+              <div className="actions">
+                <button className="secondary" onClick={downloadCollectorCsv}>
+                  CSV保存
+                </button>
+              </div>
+            </>
+          ) : (
+            <div className="muted">(選択中のコレクタの実行結果がありません)</div>
+          )}
         </>
       )}
 

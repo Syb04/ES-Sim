@@ -256,17 +256,22 @@ async def _stream_run(ws: WebSocket, sim: PicSimulation) -> None:
                     for name, snaps in c["particles"].items()
                 },
             }
-        # IEDF/IADF コレクタ (prompts/30)。collector 有効時のみ添付する
-        if sim.collector_result is not None:
-            cr = sim.collector_result
-            done_msg["collector"] = {
-                "count": cr["count"],
-                "total_weight": cr["total_weight"],
-                "energies_ev": cr["energies_ev"].tolist(),
-                "angles_deg": cr["angles_deg"].tolist(),
-                "weights": cr["weights"].tolist(),
-                "truncated": cr["truncated"],
-            }
+        # IEDF/IADF コレクタ (prompts/30、複数対応 prompts/36)。有効時のみ添付する
+        if sim.collector_results is not None:
+            def _cr_json(cr: dict) -> dict:
+                return {
+                    "count": cr["count"],
+                    "total_weight": cr["total_weight"],
+                    "energies_ev": cr["energies_ev"].tolist(),
+                    "angles_deg": cr["angles_deg"].tolist(),
+                    "weights": cr["weights"].tolist(),
+                    "truncated": cr["truncated"],
+                }
+
+            done_msg["collectors"] = [_cr_json(cr) for cr in sim.collector_results]
+            if len(sim.collector_results) == 1:
+                # 後方互換: コレクタが1個のときのみ従来の単数キーも出力する
+                done_msg["collector"] = done_msg["collectors"][0]
         await ws.send_json(done_msg)
     except Exception as exc:
         try:

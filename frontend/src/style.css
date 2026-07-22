@@ -192,6 +192,21 @@ button.danger:hover { background: #b34747; }
   flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted);
 }
 
+/* PICパネル: IEDF/IADF コレクタ一覧 (ラベル/座標/tol編集 + 削除ボタンを行内に表示、prompts/37) */
+.collector-list { display: flex; flex-direction: column; gap: 3px; max-height: 170px; overflow-y: auto; margin-bottom: 8px; }
+.collector-row {
+  display: flex; align-items: center; gap: 4px; padding: 4px 6px; border-radius: 3px;
+  cursor: pointer; font-size: 11px; border: 1px solid transparent;
+}
+.collector-row:hover { background: rgba(255, 255, 255, 0.05); }
+.collector-row.selected { background: rgba(77, 163, 255, 0.15); border-color: var(--accent); }
+.collector-row .collector-label-input { width: 42px; flex: none; padding: 2px 4px; font-size: 11px; }
+.collector-row .collector-points {
+  flex: 1; min-width: 0; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.collector-row .collector-tol-input { width: 52px; flex: none; padding: 2px 4px; font-size: 11px; }
+.collector-row .collector-delete { flex: none; padding: 1px 7px; font-size: 12px; line-height: 1.4; }
+
 /* PICパネル: 進捗バー・警告・履歴チャート */
 .pic-progress { height: 8px; background: var(--bg); border: 1px solid var(--border); border-radius: 4px; overflow: hidden; margin: 6px 0; }
 .pic-progress-bar { height: 100%; background: var(--accent); }

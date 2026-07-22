@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "./api";
 import CadCanvas from "./canvas/CadCanvas";
-import type { FieldView, PicFieldView, Tool } from "./canvas/CadCanvas";
+import type { FieldView, PicCollectorView, PicFieldView, Tool } from "./canvas/CadCanvas";
 import ProfilePanel from "./panels/ProfilePanel";
 import FieldPanel from "./panels/FieldPanel";
 import ParticlePanel from "./panels/ParticlePanel";
@@ -21,6 +21,7 @@ import type {
   MeshResult,
   ParticleSettings,
   PicCollectorResult,
+  PicCollectorSettings,
   PicCycle,
   PicDiag,
   PicFields,
@@ -73,6 +74,29 @@ const DEFAULT_PIC: PicSettings = {
 function withInjectionEmitter(pic: PicSettings, emitter: ParticleSettings["emitter"]): PicSettings {
   if (!pic.injection) return pic;
   return { ...pic, injection: { ...pic.injection, emitter } };
+}
+
+// コレクタ追加数の上限 (バックエンドの validator と同じ、prompts/36/37)
+const MAX_COLLECTORS = 8;
+
+// 次のコレクタラベルを生成する ("C1", "C2", ...)。既存ラベルが "C<数字>" 形式の場合のみ
+// 番号を拾い、その最大値+1を使う (欠番があっても詰めない。カスタムラベルは無視する)
+function nextCollectorLabel(collectors: PicCollectorSettings[]): string {
+  let maxN = 0;
+  for (const c of collectors) {
+    const m = /^C(\d+)$/.exec(c.label ?? "");
+    if (m) maxN = Math.max(maxN, parseInt(m[1], 10));
+  }
+  return `C${maxN + 1}`;
+}
+
+// 旧形式 (単数 collector) を持つ pic 設定を collectors 配列へ正規化する (後方互換、prompts/37)
+function normalizeCollectors(pic: PicSettings): PicSettings {
+  if (pic.collector && (!pic.collectors || pic.collectors.length === 0)) {
+    const label = pic.collector.label && pic.collector.label.trim() !== "" ? pic.collector.label : "C1";
+    return { ...pic, collectors: [{ ...pic.collector, label }], collector: undefined };
+  }
+  return pic;
 }
 
 // フェーズ0 のサンプル (examples/parallel_plates.json と同内容)。
@@ -159,8 +183,12 @@ export default function App() {
   // 編集されたら続き実行を無効化する。新しい start を送るとサーバー状態も同期し直されるので false に戻す
   const [picProjectChangedSinceRun, setPicProjectChangedSinceRun] = useState(false);
 
-  // done メッセージで受け取った IEDF/IADF コレクタの記録結果。新規実行開始時にリセットする
-  const [picCollector, setPicCollector] = useState<PicCollectorResult | null>(null);
+  // done メッセージで受け取った IEDF/IADF コレクタの記録結果 (pic.collectors と同順)。
+  // 新規実行開始時にリセットする
+  const [picCollectors, setPicCollectors] = useState<PicCollectorResult[]>([]);
+  // コレクタ一覧 (PICパネル) で選択中のインデックス。範囲外になった場合は下の
+  // selectedCollectorIndex (派生値) で自動的に補正する
+  const [selectedCollectorIndexRaw, setSelectedCollectorIndexRaw] = useState<number | null>(null);
 
   // RF 1周期の位相分解データ (done で受信、RFなし/phase_bins=0 では null)。
   // 周期アニメーションプレイヤー (PicPanel) の状態一式も新規実行開始時にリセットする
@@ -322,7 +350,9 @@ export default function App() {
       setPicHistory((h) => (isContinue ? [...h, ...added] : added));
       setPicFields(msg.fields ?? null);
       setPicCycle(msg.cycle ?? null);
-      setPicCollector(msg.collector ?? null);
+      // collectors 配列が来ればそちらを使い、旧バックエンドで単数 collector のみの場合は
+      // 先頭(1個)として扱う (prompts/37、必須ではないが安全に対応しておく)
+      setPicCollectors(msg.collectors ?? (msg.collector ? [msg.collector] : []));
       setPicRunning(false);
       setPicContinueReady(true); // done (stop 済みも含む) したので続き実行が可能になる
     },
@@ -354,7 +384,7 @@ export default function App() {
     setCycleBinIndex(0);
     setCycleShowParticles(true);
     // IEDF/IADF コレクタ結果も新規実行開始時にリセットする (前回 done の残骸を消す)
-    setPicCollector(null);
+    setPicCollectors([]);
     const client = new PicClient(makePicCallbacks(false));
     picClientRef.current = client;
     // 現在のプロジェクト状態をサーバーへ送るので、続き実行の食い違いフラグをここで解消する
@@ -391,11 +421,35 @@ export default function App() {
     setActiveTab("particle");
   };
 
-  // コレクタ配置ツール (CadCanvas) からの確定通知。tol は既存設定があれば維持する。
-  // 配置したら PIC 設定の collector を更新し、PIC タブへ切替える
+  // コレクタ配置ツール (CadCanvas) からの確定通知。線分を確定するたびに pic.collectors へ
+  // 1件追加する (最大 MAX_COLLECTORS 個、達したら追加しない)。ラベルは "C1","C2",... を自動採番
+  // (欠番があっても詰めない)。配置したら PIC タブへ切替え、追加したコレクタを選択状態にする
   const setCollectorPoints = (p1: Point, p2: Point) => {
-    setPic((prev) => ({ ...prev, collector: { p1, p2, tol: prev.collector?.tol ?? null } }));
+    const collectors = pic.collectors ?? [];
+    if (collectors.length < MAX_COLLECTORS) {
+      const label = nextCollectorLabel(collectors);
+      const next = [...collectors, { p1, p2, tol: null, label }];
+      setPic({ ...pic, collectors: next });
+      setSelectedCollectorIndexRaw(next.length - 1);
+    }
     setActiveTab("pic");
+  };
+
+  // コレクタ一覧 (PICパネル) の1件を更新する (ラベル・tol の編集)
+  const updateCollector = (index: number, patch: Partial<PicCollectorSettings>) => {
+    const collectors = pic.collectors ?? [];
+    if (index < 0 || index >= collectors.length) return;
+    const next = collectors.slice();
+    next[index] = { ...next[index], ...patch };
+    setPic({ ...pic, collectors: next });
+  };
+
+  // コレクタ一覧の1件を削除する
+  const deleteCollector = (index: number) => {
+    const collectors = pic.collectors ?? [];
+    if (index < 0 || index >= collectors.length) return;
+    setPic({ ...pic, collectors: collectors.filter((_, i) => i !== index) });
+    setSelectedCollectorIndexRaw((sel) => (sel === index ? null : sel));
   };
 
   // キャンバス上で領域を選択したら「静電場」タブに切替える (選択解除時はタブ切替しない)
@@ -656,8 +710,10 @@ export default function App() {
         const loadedParticles = (obj as Project).particles;
         setParticles(loadedParticles ?? DEFAULT_PARTICLES);
         const loadedPic = (obj as Project).pic;
-        // mcc/see_energy_ev が無い旧形式のファイルでも安全に読み込めるよう、既定値をベースに合成する
-        setPic(loadedPic ? { ...DEFAULT_PIC, ...loadedPic } : DEFAULT_PIC);
+        // mcc/see_energy_ev が無い旧形式のファイルでも安全に読み込めるよう、既定値をベースに合成し、
+        // 旧形式 (単数 collector) のプロジェクトは collectors 配列へ移行する
+        setPic(loadedPic ? normalizeCollectors({ ...DEFAULT_PIC, ...loadedPic }) : DEFAULT_PIC);
+        setSelectedCollectorIndexRaw(null);
         setSelectedRegionId(null);
         setError(null);
       } catch (err) {
@@ -674,10 +730,21 @@ export default function App() {
   // かつ前回実行以降にジオメトリが編集されていないこと (health 未接続時も不可)
   const picCanContinue = !!health && picContinueReady && !picRunning && !picProjectChangedSinceRun;
 
-  // 配置済み IEDF/IADF コレクタ線分 (CadCanvas への常時オーバーレイ表示用)
-  const collectorLine: [Point, Point] | null = pic.collector
-    ? [pic.collector.p1, pic.collector.p2]
-    : null;
+  // 配置済み IEDF/IADF コレクタ線分一覧 (CadCanvas への常時オーバーレイ表示用)。
+  // label が未設定 (旧データ等) でも表示できるよう "C<n>" のフォールバックを与える
+  const collectorsList: PicCollectorView[] = (pic.collectors ?? []).map((c, i) => ({
+    p1: c.p1,
+    p2: c.p2,
+    label: c.label && c.label.trim() !== "" ? c.label : `C${i + 1}`,
+  }));
+
+  // コレクタ一覧の選択インデックス (範囲外・未選択なら先頭を既定選択とする)
+  const selectedCollectorIndex: number | null =
+    selectedCollectorIndexRaw !== null && selectedCollectorIndexRaw < collectorsList.length
+      ? selectedCollectorIndexRaw
+      : collectorsList.length > 0
+        ? 0
+        : null;
 
   // PICライブ描画用ビュー (started の mesh + 最新 frame)。実行中〜done後の最終フレームまで保持する
   const picLiveFrame: PicLiveFrame | null =
@@ -809,9 +876,22 @@ export default function App() {
         <button className={`tool ${tool === "emitter" ? "active" : ""}`} onClick={() => setTool("emitter")}>
           エミッタ
         </button>
-        <button className={`tool ${tool === "collector" ? "active" : ""}`} onClick={() => setTool("collector")}>
-          コレクタ
+        <button
+          className={`tool ${tool === "collector" ? "active" : ""}`}
+          onClick={() => setTool("collector")}
+          title={
+            collectorsList.length >= MAX_COLLECTORS
+              ? `コレクタは最大${MAX_COLLECTORS}個までです`
+              : "2点クリックでコレクタ線分を追加します"
+          }
+        >
+          コレクタ ({collectorsList.length}/{MAX_COLLECTORS})
         </button>
+        {tool === "collector" && collectorsList.length >= MAX_COLLECTORS && (
+          <span className="snap" style={{ color: "#e0b050" }}>
+            コレクタは最大{MAX_COLLECTORS}個に達しました
+          </span>
+        )}
         <div className="sep" />
         <label className="snap">
           <input
@@ -876,7 +956,8 @@ export default function App() {
             showIsolines={showIsolines}
             showVectors={showVectors}
             profileLine={profileLine}
-            collectorLine={collectorLine}
+            collectors={collectorsList}
+            selectedCollectorIndex={selectedCollectorIndex}
             emitter={particles.emitter}
             traceResult={traceResult}
             showTrajectories={showTrajectories}
@@ -1037,7 +1118,11 @@ export default function App() {
                 onCycleFpsChange={setCycleFps}
                 cycleShowParticles={cycleShowParticles}
                 onCycleShowParticlesChange={setCycleShowParticles}
-                collectorResult={picCollector}
+                collectorResults={picCollectors}
+                selectedCollectorIndex={selectedCollectorIndex}
+                onSelectCollector={setSelectedCollectorIndexRaw}
+                onUpdateCollector={updateCollector}
+                onDeleteCollector={deleteCollector}
               />
             </div>
 
