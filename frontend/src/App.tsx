@@ -504,6 +504,12 @@ export default function App() {
     commitProject({ ...p, mesh: { ...p.mesh, size } });
   };
 
+  // メッシュモード (非構造 gmsh / 構造格子)。構造格子は矩形 domain のみ対応
+  const setMeshMode = (mode: "unstructured" | "structured") => {
+    const p = projectRef.current;
+    commitProject({ ...p, mesh: { ...p.mesh, mode } });
+  };
+
   // --- 領域 ---
   // ポリゴン (ポリライン/矩形ツール) または circle shape (円ツール) のどちらでも領域を追加できる
   const addRegion = (geom: Point[] | CircleShape) => {
@@ -973,6 +979,7 @@ export default function App() {
                 setEdgeVoltageRf={setEdgeVoltageRf}
                 setEdgeSeeGamma={setEdgeSeeGamma}
                 setMeshSize={setMeshSize}
+                setMeshMode={setMeshMode}
                 meshResult={meshResult}
                 selectedRegionId={selectedRegionId}
                 onSelectRegion={setSelectedRegionId}

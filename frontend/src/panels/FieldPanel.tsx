@@ -36,6 +36,7 @@ interface Props {
   setEdgeVoltageRf: (edgeIndex: number, voltage_rf: VoltageRf | undefined) => void;
   setEdgeSeeGamma: (edgeIndex: number, see_gamma: number) => void;
   setMeshSize: (size: number) => void;
+  setMeshMode: (mode: "unstructured" | "structured") => void;
   meshResult: MeshResult | null;
   selectedRegionId: string | null;
   onSelectRegion: (id: string) => void;
@@ -59,6 +60,7 @@ export default function FieldPanel({
   setEdgeVoltageRf,
   setEdgeSeeGamma,
   setMeshSize,
+  setMeshMode,
   meshResult,
   selectedRegionId,
   onSelectRegion,
@@ -162,6 +164,22 @@ export default function FieldPanel({
           onCommit={(v) => setMeshSize(mmToM(v))}
         />
       </div>
+      <div className="field">
+        <span className="label">モード</span>
+        <select
+          value={project.mesh.mode ?? "unstructured"}
+          onChange={(e) => setMeshMode(e.target.value as "unstructured" | "structured")}
+        >
+          <option value="unstructured">非構造 (三角形)</option>
+          <option value="structured">構造格子</option>
+        </select>
+      </div>
+      {(project.mesh.mode ?? "unstructured") === "structured" && (
+        <div className="hint">
+          構造格子は矩形domainのみ対応。等間隔格子を三角形2分割で切り、
+          円・斜め境界は要素中心判定による階段近似になります(局所サイズは無効)。
+        </div>
+      )}
       {meshResult && (
         <>
           <div className="kv"><span>節点数</span><span>{meshResult.nodes.length}</span></div>

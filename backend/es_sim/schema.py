@@ -120,6 +120,9 @@ class LocalSize(BaseModel):
 class MeshSettings(BaseModel):
     size: float = Field(..., gt=0, description="全体特性長 [m]")
     local_sizes: list[LocalSize] = []
+    # メッシュ生成モード (prompts/34)。structured は軸平行矩形 domain 専用の
+    # 等間隔構造格子 (三角形2分割)。local_sizes は structured では無視される
+    mode: Literal["unstructured", "structured"] = "unstructured"
 
 
 class SolverSettings(BaseModel):

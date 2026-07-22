@@ -93,6 +93,13 @@ def _points_on_segment(pts: np.ndarray, q1: np.ndarray, q2: np.ndarray, tol: flo
 
 
 def generate_mesh(project: Project) -> Mesh:
+    """メッシュ生成の入口。mesh.mode に応じて非構造 (gmsh) / 構造格子を切り替える。"""
+    if project.mesh.mode == "structured":
+        return _generate_structured(project)
+    return _generate_unstructured(project)
+
+
+def _generate_unstructured(project: Project) -> Mesh:
     geo = project.geometry
     lc = project.mesh.size
     local = {ls.region: ls.size for ls in project.mesh.local_sizes}
@@ -344,47 +351,261 @@ def generate_mesh(project: Project) -> Mesh:
                 if si != mi:
                     pairs[si] = mi
 
-        # ---- 未参照節点の除去と再番号付け -------------------------------------
-        # (conductor 内・domain 外のフラグメントや孤立曲線の節点を落とす)
-        used = np.unique(triangles)
-        remap = np.full(len(nodes), -1, dtype=np.int64)
-        remap[used] = np.arange(len(used), dtype=np.int64)
-        nodes = nodes[used]
-        triangles = remap[triangles]
-
-        dirichlet = {int(remap[n]): v for n, v in dirichlet.items() if remap[n] >= 0}
-        dirichlet_rf = {int(remap[n]): v for n, v in dirichlet_rf.items() if remap[n] >= 0}
-        see_gamma = {int(remap[n]): v for n, v in see_gamma.items() if remap[n] >= 0}
-
-        periodic_map: np.ndarray | None = None
-        if pairs:
-            canon = np.arange(len(nodes), dtype=np.int64)
-            for s, m in pairs.items():
-                if remap[s] >= 0 and remap[m] >= 0:
-                    canon[remap[s]] = remap[m]
-            # 二重周期の角などの連鎖を推移的に解決する
-            for _ in range(8):
-                c2 = canon[canon]
-                if np.array_equal(c2, canon):
-                    break
-                canon = c2
-            if np.any(canon != np.arange(len(nodes))):
-                periodic_map = canon
-                # スレーブに付いた Dirichlet / γ をマスターへも伝播する (角の整合)
-                for n in list(dirichlet):
-                    m = int(canon[n])
-                    if m != n and m not in dirichlet:
-                        dirichlet[m] = dirichlet[n]
-                        if n in dirichlet_rf:
-                            dirichlet_rf[m] = dirichlet_rf[n]
-                for n in list(see_gamma):
-                    m = int(canon[n])
-                    if m != n:
-                        see_gamma[m] = max(see_gamma.get(m, 0.0), see_gamma[n])
-
-        return Mesh(nodes=nodes, triangles=triangles,
-                    tri_region=tri_region, dirichlet=dirichlet,
-                    dirichlet_rf=dirichlet_rf, see_gamma=see_gamma,
-                    periodic_map=periodic_map)
+        # ---- 未参照節点の除去・再番号付け・周期正準化 (共通後処理) -------------
+        return _finalize_mesh(
+            nodes, triangles, tri_region, dirichlet, dirichlet_rf, see_gamma, pairs
+        )
     finally:
         gmsh.finalize()
+
+
+def _finalize_mesh(
+    nodes: np.ndarray,
+    triangles: np.ndarray,
+    tri_region: np.ndarray,
+    dirichlet: dict[int, float],
+    dirichlet_rf: dict[int, tuple[float, float, float]],
+    see_gamma: dict[int, float],
+    pairs: dict[int, int],
+) -> Mesh:
+    """メッシュの共通後処理: 未参照節点の除去と再番号付け、周期対応の正準化。
+
+    (conductor 内・domain 外の節点を落とし、periodic のスレーブ→マスター写像
+    periodic_map を構築して Dirichlet / γ をマスターへ伝播する)
+    """
+    used = np.unique(triangles)
+    remap = np.full(len(nodes), -1, dtype=np.int64)
+    remap[used] = np.arange(len(used), dtype=np.int64)
+    nodes = nodes[used]
+    triangles = remap[triangles]
+
+    dirichlet = {int(remap[n]): v for n, v in dirichlet.items() if remap[n] >= 0}
+    dirichlet_rf = {int(remap[n]): v for n, v in dirichlet_rf.items() if remap[n] >= 0}
+    see_gamma = {int(remap[n]): v for n, v in see_gamma.items() if remap[n] >= 0}
+
+    periodic_map: np.ndarray | None = None
+    if pairs:
+        canon = np.arange(len(nodes), dtype=np.int64)
+        for s, m in pairs.items():
+            if remap[s] >= 0 and remap[m] >= 0:
+                canon[remap[s]] = remap[m]
+        # 二重周期の角などの連鎖を推移的に解決する
+        for _ in range(8):
+            c2 = canon[canon]
+            if np.array_equal(c2, canon):
+                break
+            canon = c2
+        if np.any(canon != np.arange(len(nodes))):
+            periodic_map = canon
+            # スレーブに付いた Dirichlet / γ をマスターへも伝播する (角の整合)
+            for n in list(dirichlet):
+                m = int(canon[n])
+                if m != n and m not in dirichlet:
+                    dirichlet[m] = dirichlet[n]
+                    if n in dirichlet_rf:
+                        dirichlet_rf[m] = dirichlet_rf[n]
+            for n in list(see_gamma):
+                m = int(canon[n])
+                if m != n:
+                    see_gamma[m] = max(see_gamma.get(m, 0.0), see_gamma[n])
+
+    return Mesh(nodes=nodes, triangles=triangles,
+                tri_region=tri_region, dirichlet=dirichlet,
+                dirichlet_rf=dirichlet_rf, see_gamma=see_gamma,
+                periodic_map=periodic_map)
+
+
+# ---- 構造格子メッシュ (prompts/34) --------------------------------------------
+
+
+def _points_in_polygon(pts: np.ndarray, poly: np.ndarray) -> np.ndarray:
+    """点列 pts (K, 2) がポリゴン内部にあるか (ray casting、偶奇則)。
+
+    境界上の点の判定は不定 (要素中心の判定用。節点の境界含む判定は
+    _points_in_region を使う)。
+    """
+    x, y = pts[:, 0], pts[:, 1]
+    inside = np.zeros(len(pts), dtype=bool)
+    n = len(poly)
+    for k in range(n):
+        x1, y1 = poly[k]
+        x2, y2 = poly[(k + 1) % n]
+        if y1 == y2:
+            continue  # 水平エッジは交差判定に寄与しない
+        cond = (y1 > y) != (y2 > y)
+        x_cross = x1 + (y - y1) * (x2 - x1) / (y2 - y1)
+        inside ^= cond & (x < x_cross)
+    return inside
+
+
+def _points_in_region(region: Region, pts: np.ndarray, tol: float) -> np.ndarray:
+    """点列が領域に内包されるか (境界上を含む、許容誤差 tol)。
+
+    circle は中心距離、polygon は ray casting + 辺への距離判定。
+    """
+    if region.shape is not None:
+        cx, cy = region.shape.center
+        dist = np.hypot(pts[:, 0] - cx, pts[:, 1] - cy)
+        return dist <= region.shape.radius + tol
+    poly = np.asarray(region.polygon, dtype=np.float64)
+    inc = _points_in_polygon(pts, poly)
+    for k in range(len(poly)):
+        inc |= _points_on_segment(pts, poly[k], poly[(k + 1) % len(poly)], tol)
+    return inc
+
+
+def _region_centroid_mask(region: Region, pts: np.ndarray) -> np.ndarray:
+    """要素中心の領域内包判定 (polygon: ray casting、circle: 中心距離)。"""
+    if region.shape is not None:
+        cx, cy = region.shape.center
+        return np.hypot(pts[:, 0] - cx, pts[:, 1] - cy) <= region.shape.radius
+    return _points_in_polygon(pts, np.asarray(region.polygon, dtype=np.float64))
+
+
+def _generate_structured(project: Project) -> Mesh:
+    """軸平行矩形 domain 用の等間隔構造格子メッシュ (三角形2分割) を生成する。
+
+    - 格子: nx = max(1, round(W/size)), ny = max(1, round(H/size))。
+      各セルを対角線で2三角形に分割 (向きは市松に交互 = 等方性向上、反時計回り)
+    - 領域割り当て: 要素中心の点内包判定 (曲線境界は階段近似、
+      domain 外へのはみ出しは自然にクリップ)
+    - conductor: 内包要素を穴として除去し、conductor に内包される節点
+      (境界上含む、許容誤差 1e-12 相対) のうち残存要素から参照されるものを
+      Dirichlet にする
+    - periodic: 対辺の節点が格子で完全一致するため座標対応で periodic_map を構築
+    - local_sizes は構造格子では非対応 (指定されていても無視する)
+    """
+    geo = project.geometry
+    size = project.mesh.size
+    poly = np.asarray(geo.domain.polygon, dtype=np.float64)
+    scale = float(np.max(np.abs(poly)))
+    scale = scale if scale > 0.0 else 1.0
+    tol = 1e-12 * scale  # 節点内包・エッジ判定の相対許容誤差
+
+    # ---- 前提検査: 軸平行の矩形 (4頂点、各辺が x/y 軸に平行) -----------------
+    if len(poly) != 4:
+        raise ValueError(
+            "構造格子 (mesh.mode='structured') には4頂点の矩形 domain が必要です"
+        )
+    for k in range(4):
+        d = poly[(k + 1) % 4] - poly[k]
+        ax_x = abs(d[0]) <= tol  # x が一定 (縦辺)
+        ax_y = abs(d[1]) <= tol  # y が一定 (横辺)
+        if ax_x == ax_y:  # 両方 True (退化) か両方 False (斜め辺)
+            raise ValueError(
+                "構造格子 (mesh.mode='structured') には軸平行の矩形 domain が必要です "
+                f"(辺 {k} が x/y 軸に平行ではありません)"
+            )
+
+    x0, x1 = float(poly[:, 0].min()), float(poly[:, 0].max())
+    y0, y1 = float(poly[:, 1].min()), float(poly[:, 1].max())
+    w, h = x1 - x0, y1 - y0
+    nx = max(1, int(round(w / size)))
+    ny = max(1, int(round(h / size)))
+
+    # ---- 節点 (等間隔格子) と三角形 (市松に対角線を交互) ----------------------
+    xs = np.linspace(x0, x1, nx + 1)
+    ys = np.linspace(y0, y1, ny + 1)
+    gx, gy = np.meshgrid(xs, ys)  # (ny+1, nx+1)
+    nodes = np.stack([gx.ravel(), gy.ravel()], axis=1)
+
+    ii, jj = np.meshgrid(np.arange(nx), np.arange(ny))
+    ii, jj = ii.ravel(), jj.ravel()
+    a = jj * (nx + 1) + ii        # 左下
+    b = a + 1                     # 右下
+    c = b + (nx + 1)              # 右上
+    d = a + (nx + 1)              # 左上
+    even = ((ii + jj) % 2 == 0)[:, None]
+    # 偶数セルは a-c 対角 (abc, acd)、奇数セルは b-d 対角 (abd, bcd)。全て反時計回り
+    t1 = np.where(even, np.stack([a, b, c], axis=1), np.stack([a, b, d], axis=1))
+    t2 = np.where(even, np.stack([a, c, d], axis=1), np.stack([b, c, d], axis=1))
+    triangles = np.empty((2 * len(a), 3), dtype=np.int64)
+    triangles[0::2] = t1
+    triangles[1::2] = t2
+
+    # ---- 領域割り当て (要素中心の内包判定。conductor を優先) ------------------
+    centroids = nodes[triangles].mean(axis=1)
+    tri_region = np.full(len(triangles), -1, dtype=np.int64)
+    conductor_ids = [i for i, r in enumerate(geo.regions) if r.type == "conductor"]
+    other_ids = [i for i, r in enumerate(geo.regions) if r.type != "conductor"]
+    for i in conductor_ids + other_ids:
+        sel = _region_centroid_mask(geo.regions[i], centroids) & (tri_region == -1)
+        tri_region[sel] = i
+
+    # conductor 内包要素は穴として除去する
+    for i in conductor_ids:
+        if geo.regions[i].voltage is None:
+            raise ValueError(f"conductor '{geo.regions[i].id}' に voltage がありません")
+    if conductor_ids:
+        keep = ~np.isin(tri_region, conductor_ids)
+        triangles = triangles[keep]
+        tri_region = tri_region[keep]
+    if len(triangles) == 0:
+        raise ValueError("メッシュ化できる要素がありません (domain 全体が conductor に覆われています)")
+
+    # ---- Dirichlet 節点 -------------------------------------------------------
+    dirichlet: dict[int, float] = {}
+    dirichlet_rf: dict[int, tuple[float, float, float]] = {}
+    see_gamma: dict[int, float] = {}
+
+    def _assign(n: int, voltage: float, rf) -> None:
+        """節点に直流分と RF 成分を設定する (RF なしなら既存 RF を消して上書き)。"""
+        dirichlet[n] = voltage
+        if rf is not None:
+            dirichlet_rf[n] = (rf.amplitude, rf.freq_hz, rf.phase_deg)
+        else:
+            dirichlet_rf.pop(n, None)
+
+    def _assign_gamma(n: int, gamma: float) -> None:
+        """節点に SEE 係数 γ を設定する (共有節点は最大値を採用)。"""
+        if gamma > 0.0:
+            see_gamma[n] = max(see_gamma.get(n, 0.0), gamma)
+
+    # 外周エッジの境界条件 (Dirichlet のみ。symmetry / periodic は自然境界)
+    for bc in geo.boundaries:
+        if bc.type != "dirichlet":
+            continue
+        for edge in bc.edges:
+            q1, q2 = poly[edge % 4], poly[(edge + 1) % 4]
+            for n in np.nonzero(_points_on_segment(nodes, q1, q2, tol))[0]:
+                _assign(int(n), bc.voltage, bc.voltage_rf)
+                _assign_gamma(int(n), bc.see_gamma)
+
+    # 電極: conductor に内包される節点 (電極の指定を優先して上書き)。
+    # 残存要素から参照されない節点 (電極内部) は後処理で除去される
+    for i in conductor_ids:
+        region = geo.regions[i]
+        for n in np.nonzero(_points_in_region(region, nodes, tol))[0]:
+            _assign(int(n), region.voltage, region.voltage_rf)
+            _assign_gamma(int(n), region.see_gamma)
+
+    # ---- periodic: 対辺の節点は格子で完全一致するので座標対応で組む -----------
+    pairs: dict[int, int] = {}
+    for bc in geo.boundaries:
+        if bc.type != "periodic":
+            continue
+        e_m, e_s = bc.edges  # [マスター辺, スレーブ辺] とみなす
+        seg_m = (poly[e_m % 4], poly[(e_m + 1) % 4])
+        seg_s = (poly[e_s % 4], poly[(e_s + 1) % 4])
+        t_vec = 0.5 * (seg_s[0] + seg_s[1]) - 0.5 * (seg_m[0] + seg_m[1])
+        m_idx = np.nonzero(_points_on_segment(nodes, seg_m[0], seg_m[1], tol))[0]
+        s_idx = np.nonzero(_points_on_segment(nodes, seg_s[0], seg_s[1], tol))[0]
+        if len(m_idx) != len(s_idx) or len(m_idx) == 0:
+            raise ValueError(
+                f"periodic 境界 (エッジ {e_m}, {e_s}) の対辺で節点数が一致しません"
+            )
+        # 座標の辞書順で並べれば平行移動で一対一に対応する
+        m_srt = m_idx[np.lexsort((nodes[m_idx, 1], nodes[m_idx, 0]))]
+        s_srt = s_idx[np.lexsort((nodes[s_idx, 1], nodes[s_idx, 0]))]
+        if not np.allclose(nodes[s_srt] - t_vec, nodes[m_srt], atol=10.0 * tol + 1e-15):
+            raise ValueError(
+                f"periodic 境界 (エッジ {e_m}, {e_s}) の対辺節点が平行移動で一致しません"
+            )
+        for s, m in zip(s_srt, m_srt):
+            if int(s) != int(m):
+                pairs[int(s)] = int(m)
+
+    # ---- 共通後処理 (未参照節点の除去・再番号付け・周期正準化) ----------------
+    return _finalize_mesh(
+        nodes, triangles, tri_region, dirichlet, dirichlet_rf, see_gamma, pairs
+    )

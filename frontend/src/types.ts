@@ -320,7 +320,12 @@ export interface Project {
   version: number;
   unit: "m" | "mm";
   geometry: Geometry;
-  mesh: { size: number; local_sizes?: { region: string; size: number }[] };
+  // mode: "structured" は軸平行矩形 domain 専用の等間隔構造格子 (省略 = unstructured)
+  mesh: {
+    size: number;
+    local_sizes?: { region: string; size: number }[];
+    mode?: "unstructured" | "structured";
+  };
   solver?: { backend: "numpy" | "cupy" | "auto" };
   particles?: ParticleSettings;
   pic?: PicSettings;
