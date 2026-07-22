@@ -1,5 +1,6 @@
 import { CommitNumberInput, CommitTextInput } from "../CommitInput";
 import { mToMm, mmToM } from "../units";
+import { isAxisymmetric } from "../types";
 import type {
   CircleShape,
   EdgeBcType,
@@ -26,13 +27,15 @@ const DEFAULT_VOLTAGE_RF: VoltageRf = { amplitude: 100.0, freq_hz: 13.56e6, phas
 const EDGE_LABELS_XY = ["下 (y=0)", "右 (x=w)", "上 (y=h)", "左 (x=0)"];
 // 軸対称 (r-z) モード: x=z (軸方向)・y=r (径方向)。下辺 (y=0) は対称軸 (r=0)
 const EDGE_LABELS_RZ = ["対称軸 (r=0)", "右 (z=L)", "上 (r=R)", "左 (z=0)"];
+// 軸対称 (r-z、左辺が軸) モード: x=r (径方向)・y=z (軸方向)。左辺 (x=0) は対称軸 (r=0)
+const EDGE_LABELS_RZ_X0 = ["下 (z=0)", "右 (r=R)", "上 (z=L)", "対称軸 (r=0)"];
 
 interface Props {
   project: Project;
   domainW: number;
   domainH: number;
   setDomainSize: (w: number, h: number) => void;
-  setCoord: (coord: "xy" | "rz") => void;
+  setCoord: (coord: "xy" | "rz" | "rz_x0") => void;
   edgeState: (edgeIndex: number) => { type: EdgeBcType; voltage: number; voltageRf?: VoltageRf; seeGamma: number };
   setEdgeType: (edgeIndex: number, type: EdgeBcType) => void;
   setEdgeVoltage: (edgeIndex: number, voltage: number) => void;
@@ -81,25 +84,33 @@ export default function FieldPanel({
 }: Props) {
   const coord = project.coord ?? "xy";
   const isRz = coord === "rz";
-  const edgeLabels = isRz ? EDGE_LABELS_RZ : EDGE_LABELS_XY;
+  const isRzX0 = coord === "rz_x0";
+  const isAxisym = isAxisymmetric(coord);
+  const edgeLabels = isRz ? EDGE_LABELS_RZ : isRzX0 ? EDGE_LABELS_RZ_X0 : EDGE_LABELS_XY;
+  // 座標系ごとの対称軸エッジ番号 (rz: 下辺=0、rz_x0: 左辺=3。xy は該当なし)
+  const axisEdge = isRz ? 0 : isRzX0 ? 3 : null;
+  // domain 幅/高さのラベル。rz は x=z(軸方向)・y=r(径方向)、rz_x0 は x=r(径方向)・y=z(軸方向)
+  const widthLabel = isRz ? "長さ z [mm]" : isRzX0 ? "半径 r [mm]" : "幅 [mm]";
+  const heightLabel = isRz ? "半径 r [mm]" : isRzX0 ? "長さ z [mm]" : "高さ [mm]";
 
   return (
     <>
       <h2>ジオメトリ (domain)</h2>
       <div className="field">
         <span className="label">座標系</span>
-        <select value={coord} onChange={(e) => setCoord(e.target.value as "xy" | "rz")}>
+        <select value={coord} onChange={(e) => setCoord(e.target.value as "xy" | "rz" | "rz_x0")}>
           <option value="xy">平面 2D</option>
-          <option value="rz">軸対称 r-z</option>
+          <option value="rz">軸対称 r-z (下辺が軸)</option>
+          <option value="rz_x0">軸対称 r-z (左辺が軸)</option>
         </select>
       </div>
-      {isRz && (
+      {isAxisym && (
         <div className="hint">
-          軸対称モードでは下辺が対称軸になります。PICは未対応です。
+          軸対称モードでは{isRz ? "下辺" : "左辺"}が対称軸になります。PICは未対応です。
         </div>
       )}
       <div className="field">
-        <span className="label">{isRz ? "長さ z [mm]" : "幅 [mm]"}</span>
+        <span className="label">{widthLabel}</span>
         <CommitNumberInput
           value={mToMm(domainW)}
           step="0.1"
@@ -107,7 +118,7 @@ export default function FieldPanel({
         />
       </div>
       <div className="field">
-        <span className="label">{isRz ? "半径 r [mm]" : "高さ [mm]"}</span>
+        <span className="label">{heightLabel}</span>
         <CommitNumberInput
           value={mToMm(domainH)}
           step="0.1"
@@ -118,8 +129,8 @@ export default function FieldPanel({
       <h2>境界条件</h2>
       {edgeLabels.map((label, i) => {
         const st = edgeState(i);
-        // rz モードの下辺 (エッジ0) は対称軸そのもの (自然境界)。切替不可・固定表示とする
-        const isAxisEdge = isRz && i === 0;
+        // 対称軸そのものとなる辺 (自然境界) は切替不可・固定表示とする
+        const isAxisEdge = axisEdge === i;
         return (
           <div className="edge-row" key={i}>
             <span className="edge-label">{label}</span>
@@ -402,7 +413,7 @@ export default function FieldPanel({
           <div className="kv"><span>要素数</span><span>{result.mesh.triangles.length}</span></div>
           <div className="kv"><span>V min/max</span><span>{result.v_min.toFixed(1)} / {result.v_max.toFixed(1)} V</span></div>
           <div className="kv"><span>|E| max</span><span>{result.e_abs_max.toExponential(2)} V/m</span></div>
-          <div className="kv"><span>エネルギー</span><span>{result.energy.toExponential(3)} {isRz ? "J" : "J/m"}</span></div>
+          <div className="kv"><span>エネルギー</span><span>{result.energy.toExponential(3)} {isAxisym ? "J" : "J/m"}</span></div>
         </>
       )}
     </>

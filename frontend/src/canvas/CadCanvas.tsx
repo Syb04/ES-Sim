@@ -335,6 +335,9 @@ export default function CadCanvas({
 }: Props) {
   // 軸対称 (r-z) モードかどうか。x=z(軸方向)・y=r(径方向) と読み替えて表示する
   const isRz = project.coord === "rz";
+  // 軸対称 (r-z、左辺が軸) モードかどうか。x=r(径方向)・y=z(軸方向) と読み替えて表示する
+  const isRzX0 = project.coord === "rz_x0";
+  const isAxisym = isRz || isRzX0;
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [view, setView] = useState<View | null>(null);
   // キャンバス親要素のサイズ変化 (サイドパネル幅変更・ウィンドウリサイズ) で再描画する
@@ -752,11 +755,11 @@ export default function CadCanvas({
       ctx.setLineDash([]);
     }
 
-    // 軸対称 (r-z) モード: 下辺 (対称軸, r=0) を一点鎖線風 (細い破線+シアン系) でオーバーレイ表示する
-    if (isRz) {
+    // 軸対称モード: 対称軸 (r=0) を一点鎖線風 (細い破線+シアン系) でオーバーレイ表示する。
+    // rz は下辺 (domainPoly[0]-[1])、rz_x0 は左辺 (domainPoly[3]-[0]) が対称軸になる
+    if (isAxisym) {
       const domainPoly = project.geometry.domain.polygon;
-      const a = domainPoly[0];
-      const c = domainPoly[1];
+      const [a, c] = isRzX0 ? [domainPoly[3], domainPoly[0]] : [domainPoly[0], domainPoly[1]];
       if (a && c) {
         ctx.strokeStyle = "#4dd4ff";
         ctx.lineWidth = 1.5;
@@ -1185,13 +1188,16 @@ export default function CadCanvas({
       ctx.strokeStyle = "#363c48";
       ctx.strokeRect(0.5, 0.5, RULER_SIZE - 1, RULER_SIZE - 1);
 
-      // 軸対称 (r-z) モード: ルーラーの軸ラベルを z (上ルーラー) / r (左ルーラー) 表記にする
-      if (isRz) {
+      // 軸対称モード: ルーラーの軸ラベルを表記する (上ルーラー=x方向, 左ルーラー=y方向)。
+      // rz は x=z・y=r、rz_x0 は x=r・y=z
+      if (isAxisym) {
+        const xAxisLabel = isRzX0 ? "r" : "z";
+        const yAxisLabel = isRzX0 ? "z" : "r";
         ctx.fillStyle = "#8a919e";
         ctx.textAlign = "center";
         ctx.textBaseline = "middle";
-        ctx.fillText("z", RULER_SIZE / 2, RULER_SIZE / 2 - 5);
-        ctx.fillText("r", RULER_SIZE / 2, RULER_SIZE / 2 + 7);
+        ctx.fillText(xAxisLabel, RULER_SIZE / 2, RULER_SIZE / 2 - 5);
+        ctx.fillText(yAxisLabel, RULER_SIZE / 2, RULER_SIZE / 2 + 7);
       }
     }
   }, [
@@ -1222,6 +1228,8 @@ export default function CadCanvas({
     picFrame,
     picFieldView,
     isRz,
+    isRzX0,
+    isAxisym,
   ]);
 
   // Space キーの追跡 (入力欄にフォーカス中は無視)
@@ -1573,8 +1581,8 @@ export default function CadCanvas({
       />
       {cursor && (
         <div className="coords">
-          {isRz ? "z" : "x"}: {(cursor[0] * 1000).toFixed(2)} mm&nbsp;&nbsp;
-          {isRz ? "r" : "y"}: {(cursor[1] * 1000).toFixed(2)} mm
+          {isRzX0 ? "r" : isRz ? "z" : "x"}: {(cursor[0] * 1000).toFixed(2)} mm&nbsp;&nbsp;
+          {isRzX0 ? "z" : isRz ? "r" : "y"}: {(cursor[1] * 1000).toFixed(2)} mm
         </div>
       )}
       {/* 境界条件の凡例 (常時表示。色/線種は bcStyle() と対応させる) */}

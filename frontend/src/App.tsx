@@ -11,7 +11,7 @@ import { PicClient } from "./picClient";
 import type { PicClientCallbacks } from "./picClient";
 import { useHistory } from "./useHistory";
 import { saveTextFile } from "./saveFile";
-import { toDiagArray } from "./types";
+import { isAxisymmetric, toDiagArray } from "./types";
 import { mToMm, mmToM } from "./units";
 import type {
   BoundaryCondition,
@@ -478,8 +478,8 @@ export default function App() {
   // --- domain ---
   const domainW = Math.max(...project.geometry.domain.polygon.map((p) => p[0]));
   const domainH = Math.max(...project.geometry.domain.polygon.map((p) => p[1]));
-  // 軸対称 (r-z) モードかどうか (未指定 = "xy" 扱い)
-  const isRz = (project.coord ?? "xy") === "rz";
+  // 軸対称 (r-z または r-z_x0) モードかどうか (未指定 = "xy" 扱い)
+  const isAxisym = isAxisymmetric(project.coord);
 
   const setDomainSize = (w: number, h: number) => {
     if (!(w > 0) || !(h > 0)) return;
@@ -501,12 +501,20 @@ export default function App() {
   const removeEdgeBoundary = (boundaries: BoundaryCondition[], edgeIndex: number): BoundaryCondition[] =>
     boundaries.filter((b) => !b.edges.includes(edgeIndex));
 
-  // --- 座標系 (平面2D / 軸対称 r-z) 切替 ---
-  // rz へ切替える際、下辺(エッジ0)は対称軸 (r=0) となり Dirichlet 等の指定は禁止されるため、
+  // --- 座標系 (平面2D / 軸対称 r-z (下辺軸) / 軸対称 r-z (左辺軸)) 切替 ---
+  // 座標系ごとに対称軸となるエッジ番号 (rz: 下辺=0、rz_x0: 左辺=3。xy は該当なし)
+  const axisEdgeIndex = (coord: "xy" | "rz" | "rz_x0"): number | null => {
+    if (coord === "rz") return 0;
+    if (coord === "rz_x0") return 3;
+    return null;
+  };
+
+  // 軸対称モードへ切替える際、対称軸となる辺には Dirichlet 等の指定は禁止されるため、
   // 既存のBC設定があれば道連れで除去する (commitProject 経由なので Undo 対象・解析結果は破棄される)
-  const setCoord = (coord: "xy" | "rz") => {
+  const setCoord = (coord: "xy" | "rz" | "rz_x0") => {
     const p = projectRef.current;
-    const boundaries = coord === "rz" ? removeEdgeBoundary(p.geometry.boundaries, 0) : p.geometry.boundaries;
+    const axisEdge = axisEdgeIndex(coord);
+    const boundaries = axisEdge !== null ? removeEdgeBoundary(p.geometry.boundaries, axisEdge) : p.geometry.boundaries;
     commitProject({ ...p, coord, geometry: { ...p.geometry, boundaries } });
   };
 
@@ -1140,7 +1148,7 @@ export default function App() {
                 onChange={setPic}
                 emitter={particles.emitter}
                 canRun={!!health}
-                rzDisabled={isRz}
+                rzDisabled={isAxisym}
                 running={picRunning}
                 onStart={runPicStart}
                 onStop={runPicStop}

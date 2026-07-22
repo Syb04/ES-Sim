@@ -302,9 +302,10 @@ class PicSettings(BaseModel):
 class Project(BaseModel):
     version: int = 1
     unit: Literal["m", "mm"] = "m"
-    # 座標系 (prompts/39)。"xy": 平面2D (従来)。"rz": 軸対称 — x = z (軸方向)、
-    # y = r (径方向) と解釈し、y=0 が対称軸 (自然境界)
-    coord: Literal["xy", "rz"] = "xy"
+    # 座標系 (prompts/39, 41)。"xy": 平面2D (従来)。
+    # "rz":    軸対称 — x = z (軸方向)、y = r (径方向)。対称軸は y=0 (自然境界)
+    # "rz_x0": 軸対称 — x = r (径方向)、y = z (軸方向)。対称軸は x=0 (自然境界)
+    coord: Literal["xy", "rz", "rz_x0"] = "xy"
     geometry: Geometry
     mesh: MeshSettings
     solver: SolverSettings = SolverSettings()
@@ -313,19 +314,23 @@ class Project(BaseModel):
 
     @model_validator(mode="after")
     def _check_rz(self) -> "Project":
-        """rz (軸対称) モードの制約検査。
+        """軸対称モード (rz / rz_x0) の制約検査。
 
-        - domain の全頂点が y (= r) ≥ 0 であること
-        - y=0 (対称軸) 上の辺への Dirichlet 指定は禁止 (対称軸は自然境界)
+        径方向座標 (rz: y、rz_x0: x) について、
+        - domain の全頂点が r ≥ 0 であること
+        - r=0 (対称軸) 上の辺への Dirichlet 指定は禁止 (対称軸は自然境界)
         """
-        if self.coord != "rz":
+        if self.coord == "xy":
             return self
+        ridx = 1 if self.coord == "rz" else 0  # 径方向座標インデックス
+        axis = "y" if ridx == 1 else "x"
         poly = self.geometry.domain.polygon
         scale = max((max(abs(p[0]), abs(p[1])) for p in poly), default=1.0)
         tol = 1e-12 * (scale if scale > 0.0 else 1.0)
-        if any(p[1] < -tol for p in poly):
+        if any(p[ridx] < -tol for p in poly):
             raise ValueError(
-                "rz (軸対称) モードでは domain の全頂点が y (= r) ≥ 0 である必要があります"
+                f"{self.coord} (軸対称) モードでは domain の全頂点が "
+                f"{axis} (= r) ≥ 0 である必要があります"
             )
         n = len(poly)
         for bc in self.geometry.boundaries:
@@ -333,10 +338,10 @@ class Project(BaseModel):
                 continue
             for e in bc.edges:
                 p1, p2 = poly[e % n], poly[(e + 1) % n]
-                if abs(p1[1]) <= tol and abs(p2[1]) <= tol:
+                if abs(p1[ridx]) <= tol and abs(p2[ridx]) <= tol:
                     raise ValueError(
-                        f"rz (軸対称) モードでは対称軸 (y = 0) 上の辺 (エッジ {e}) に "
-                        "Dirichlet を指定できません (対称軸は自然境界です)"
+                        f"{self.coord} (軸対称) モードでは対称軸 ({axis} = 0) 上の辺 "
+                        f"(エッジ {e}) に Dirichlet を指定できません (対称軸は自然境界です)"
                     )
         return self
 

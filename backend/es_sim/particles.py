@@ -15,7 +15,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from .fem import Solution
+from .fem import Solution, _radial_index
 from .meshing import Mesh
 from .schema import Emitter, ParticleSettings, Project, Species
 
@@ -537,14 +537,16 @@ def trace(project: Project, mesh: Mesh, sol: Solution) -> TraceOutput:
     # 誘電体 (固体) 要素のマスク (無ければ None = 従来経路)
     solid = _solid_elements(project, mesh)
 
-    # rz (軸対称) モード: 位置 (x, y) = (z, r)、速度3成分 (vz, vr, vθ) (prompts/39)。
+    # 軸対称モード (prompts/39, 41): 面内速度2成分 + 第3成分 vθ。
+    # 径方向座標インデックス ridx (rz: y=1、rz_x0: x=0) で径成分を一般化する。
     # 角運動量 L = r·vθ を初期に確定し、ステップ後に vθ = L/r で更新する。
     # 遠心力項 vθ²/r は「現在位置で評価する半陰的」としてリープフロッグの
-    # 両半キックに組み込む。軸交差 (r<0) は位置・速度の鏡映で処理する
-    rz = project.coord == "rz"
+    # 両半キックに組み込む。軸交差 (r<0) は径座標・径速度の鏡映で処理する
+    ridx = _radial_index(project.coord)
+    rz = ridx is not None
     x0, v0 = _init_particles(settings.emitter, m, vtheta=rz)
     n = len(x0)
-    ang_l = x0[:, 1] * v0[:, 2] if rz else None  # L = r·vθ (軸鏡映で符号反転)
+    ang_l = x0[:, ridx] * v0[:, 2] if rz else None  # L = r·vθ (軸鏡映で符号反転)
     _R_TINY = 1e-30  # 軸上 (r=0) のゼロ割ガード
 
     dt = settings.dt
@@ -576,10 +578,10 @@ def trace(project: Project, mesh: Mesh, sol: Solution) -> TraceOutput:
             x_prev = x[idx_active]
             if rz:
                 # 遠心力項 dvr/dt += vθ²/r を現在位置で評価 (半陰的)
-                r_cur = np.maximum(x_prev[:, 1], _R_TINY)
+                r_cur = np.maximum(x_prev[:, ridx], _R_TINY)
                 l_act = ang_l[idx_active]
                 vth = np.where(l_act != 0.0, l_act / r_cur, 0.0)
-                a_cur[:, 1] += vth * vth / r_cur  # (qm*e_at は新規配列なので in-place 可)
+                a_cur[:, ridx] += vth * vth / r_cur  # (qm*e_at は新規配列なので in-place 可)
                 v_half = v[idx_active, :2] + 0.5 * dt * a_cur
             else:
                 v_half = v[idx_active] + 0.5 * dt * a_cur
@@ -588,10 +590,10 @@ def trace(project: Project, mesh: Mesh, sol: Solution) -> TraceOutput:
             if rz:
                 # 軸交差: r < 0 → r → −r, vr → −vr, vθ → −vθ (鏡映)。
                 # 所属要素は鏡映後の位置への walk で追従する
-                cross = x_new[:, 1] < 0.0
+                cross = x_new[:, ridx] < 0.0
                 if np.any(cross):
-                    x_new[cross, 1] = -x_new[cross, 1]
-                    v_half[cross, 1] = -v_half[cross, 1]
+                    x_new[cross, ridx] = -x_new[cross, ridx]
+                    v_half[cross, ridx] = -v_half[cross, ridx]
                     g_idx = idx_active[cross]
                     ang_l[g_idx] = -ang_l[g_idx]  # vθ 反転 = L の符号反転
 
@@ -622,10 +624,10 @@ def trace(project: Project, mesh: Mesh, sol: Solution) -> TraceOutput:
                 a_new = qm * e_new
                 if rz:
                     # 後半キックの遠心力項は新しい位置で評価し、vθ = L/r を更新
-                    r_new = np.maximum(x_new[cont, 1], _R_TINY)
+                    r_new = np.maximum(x_new[cont, ridx], _R_TINY)
                     l_cont = ang_l[cont_idx]
                     vth_new = np.where(l_cont != 0.0, l_cont / r_new, 0.0)
-                    a_new[:, 1] += vth_new * vth_new / r_new
+                    a_new[:, ridx] += vth_new * vth_new / r_new
                     v[cont_idx, :2] = v_half[cont] + 0.5 * dt * a_new
                     v[cont_idx, 2] = vth_new
                 else:
@@ -652,7 +654,7 @@ def trace(project: Project, mesh: Mesh, sol: Solution) -> TraceOutput:
                 x[abs_idx] = xp_a + frac[:, None] * (xn_a - xp_a)
                 if rz:
                     v[abs_idx, :2] = v[abs_idx, :2] + frac[:, None] * dt * a_cur[absorbed_mask]
-                    r_abs = np.maximum(x[abs_idx, 1], _R_TINY)
+                    r_abs = np.maximum(x[abs_idx, ridx], _R_TINY)
                     l_abs = ang_l[abs_idx]
                     v[abs_idx, 2] = np.where(l_abs != 0.0, l_abs / r_abs, 0.0)
                 else:
@@ -667,7 +669,7 @@ def trace(project: Project, mesh: Mesh, sol: Solution) -> TraceOutput:
                 x[hit_idx] = x_new[hit_solid]
                 if rz:
                     v[hit_idx, :2] = v_half[hit_solid]
-                    r_hit = np.maximum(x_new[hit_solid, 1], _R_TINY)
+                    r_hit = np.maximum(x_new[hit_solid, ridx], _R_TINY)
                     l_hit = ang_l[hit_idx]
                     v[hit_idx, 2] = np.where(l_hit != 0.0, l_hit / r_hit, 0.0)
                 else:

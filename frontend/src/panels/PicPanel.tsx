@@ -64,7 +64,8 @@ interface Props {
   // フェーズ2 (粒子) パネルの現在のエミッタ設定。injection.emitter として共用する
   emitter: Emitter;
   canRun: boolean;
-  // true (project.coord === "rz") のとき PIC は未対応。開始/続き実行ボタンを無効化し、注記を出す
+  // true (project.coord が "rz" または "rz_x0"、isAxisymmetric() 判定) のとき PIC は未対応。
+  // 開始/続き実行ボタンを無効化し、注記を出す
   rzDisabled: boolean;
   running: boolean;
   onStart: () => void;

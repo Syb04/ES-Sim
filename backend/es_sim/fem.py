@@ -18,6 +18,11 @@ from .schema import Project
 EPS0 = 8.8541878128e-12  # 真空の誘電率 [F/m]
 
 
+def _radial_index(coord: str) -> int | None:
+    """軸対称モードの径方向座標インデックスを返す (rz: y=1、rz_x0: x=0。xy は None)。"""
+    return {"rz": 1, "rz_x0": 0}.get(coord)
+
+
 @dataclass
 class Solution:
     v: np.ndarray        # (N,) 節点電位 [V]
@@ -53,10 +58,11 @@ def _material_arrays(project: Project, mesh: Mesh):
 def assemble(project: Project, mesh: Mesh):
     """剛性行列 K (csr) と右辺 f を返す。
 
-    coord="rz" (軸対称、prompts/39) では弱形式
+    軸対称モード (prompts/39, 41) では弱形式
         ∫ ε ∇V·∇W r dr dz = ∫ ρ W r dr dz
-    を使う (x = z, y = r)。剛性は平面の Ke に要素重心半径
-    r̄ = (r_i + r_j + r_k)/3 を乗じる標準近似、右辺は線形 r を厳密に積分する。
+    を使う (径方向座標は coord="rz" なら y、"rz_x0" なら x)。剛性は平面の Ke に
+    要素重心半径 r̄ = (r_i + r_j + r_k)/3 を乗じる標準近似、右辺は線形 r を
+    厳密に積分する。
     """
     tris = mesh.triangles
     b, c, area = _element_geometry(mesh.nodes, tris)
@@ -68,10 +74,11 @@ def assemble(project: Project, mesh: Mesh):
     n = len(mesh.nodes)
     f = np.zeros(n)
 
-    if project.coord == "rz":
+    ridx = _radial_index(project.coord)
+    if ridx is not None:
         # 軸対称剛性: Ke[i,j] = ε·r̄·(b_i b_j + c_i c_j)/(4A) (r̄ による標準近似。
         # 軸上 r=0 を含む要素でも r̄ > 0 なので特異にならない)
-        r_nodes = mesh.nodes[tris][:, :, 1]            # (M, 3) 各頂点の r
+        r_nodes = mesh.nodes[tris][:, :, ridx]         # (M, 3) 各頂点の r
         r_bar = r_nodes.mean(axis=1)                   # (M,) 要素重心半径
         coef = (eps * r_bar / (4.0 * area))[:, None, None]
         ke = coef * (b[:, :, None] * b[:, None, :] + c[:, :, None] * c[:, None, :])
@@ -126,10 +133,11 @@ def solve(project: Project, mesh: Mesh) -> Solution:
     e_field = np.stack([ex, ey], axis=1)
 
     eps, _ = _material_arrays(project, mesh)
-    if project.coord == "rz":
+    ridx = _radial_index(project.coord)
+    if ridx is not None:
         # 軸対称エネルギー W = ½ ∫ ε|E|²·2πr dA [J]
         # (E は要素内一定なので ∫ r dA = r̄·A で厳密。xy モードは [J/m])
-        r_bar = mesh.nodes[tris][:, :, 1].mean(axis=1)
+        r_bar = mesh.nodes[tris][:, :, ridx].mean(axis=1)
         energy = float(np.sum(0.5 * eps * (ex**2 + ey**2) * 2.0 * np.pi * r_bar * area))
     else:
         energy = float(np.sum(0.5 * eps * (ex**2 + ey**2) * area))

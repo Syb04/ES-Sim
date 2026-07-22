@@ -323,8 +323,8 @@ export interface PicLiveFrame {
 export interface Project {
   version: number;
   unit: "m" | "mm";
-  // 座標系。"rz" = 軸対称 (x=z 軸方向, y=r 径方向, y=0 が対称軸)。省略 = "xy"
-  coord?: "xy" | "rz";
+  // 座標系。"rz" = 軸対称 (x=z, y=r, 対称軸 y=0)、"rz_x0" = 軸対称 (x=r, y=z, 対称軸 x=0)。省略 = "xy"
+  coord?: "xy" | "rz" | "rz_x0";
   geometry: Geometry;
   // mode: "structured" は軸平行矩形 domain 専用の等間隔構造格子 (省略 = unstructured)
   mesh: {
@@ -335,6 +335,12 @@ export interface Project {
   solver?: { backend: "numpy" | "cupy" | "auto" };
   particles?: ParticleSettings;
   pic?: PicSettings;
+}
+
+// 軸対称モード判定 (rz: 下辺 y=0 が対称軸、rz_x0: 左辺 x=0 が対称軸)。
+// PIC無効化・エネルギー単位 [J] 表示など「rz または rz_x0 で共通に発動する」判定はここに集約する
+export function isAxisymmetric(coord: Project["coord"]): boolean {
+  return coord === "rz" || coord === "rz_x0";
 }
 
 export interface TraceResult {
