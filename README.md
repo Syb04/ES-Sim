@@ -88,6 +88,9 @@ Tauri を使わずブラウザで動作確認する場合は `npm run dev` → h
 - [x] 性能: 4万マクロ粒子×2000ステップ ≈ 8秒(CPU/numpy)
 - [x] MCC衝突(null-collision: 電子 弾性/励起/電離、イオン 等方/電荷交換)+LXCatインポート
 - [x] 二次電子放出 γ(電極・境界辺ごと)、衝突・電離・SEEの診断カウンタ
+- [x] **Turnerベンチマーク ケース1で検証済み**(He CCP、密度プロファイルが基準解と2%以内で一致。
+      [docs/VALIDATION.md](docs/VALIDATION.md) 参照)
+- [x] PIC粒子の速度3成分化 (2d3v)、鏡面反射境界 (reflect_edges)
 - [ ] CuPy によるGPU化(粒子数を増やす場合)
 
 ※ LXCat実データ(`backend/tests/data/Ar*.txt`)は再配布条件のため git 管理外。
