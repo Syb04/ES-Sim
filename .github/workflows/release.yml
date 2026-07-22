@@ -36,7 +36,17 @@ jobs:
           pip install -e .
           pip install pyinstaller
       - name: Build backend exe (sidecar)
-        run: powershell -ExecutionPolicy Bypass -File scripts\build_backend.ps1
+        shell: pwsh
+        run: |
+          # 失敗時に原因を公開の Job Summary へ書き出す (ログは要ログインのため)
+          $out = & powershell -ExecutionPolicy Bypass -File scripts\build_backend.ps1 2>&1 | Out-String
+          Write-Host $out
+          if ($LASTEXITCODE -ne 0) {
+            $tail = if ($out.Length -gt 6000) { $out.Substring($out.Length - 6000) } else { $out }
+            "## build_backend.ps1 failed (exit $LASTEXITCODE)`n``````text`n$tail`n``````" |
+              Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
+            exit 1
+          }
       - name: Smoke test backend exe
         shell: pwsh
         run: |
@@ -72,7 +82,16 @@ jobs:
         run: npm ci
       - name: Tauri build
         working-directory: frontend
-        run: npm run tauri build
+        shell: pwsh
+        run: |
+          $out = & npm run tauri build 2>&1 | Out-String
+          Write-Host $out
+          if ($LASTEXITCODE -ne 0) {
+            $tail = if ($out.Length -gt 6000) { $out.Substring($out.Length - 6000) } else { $out }
+            "## tauri build failed (exit $LASTEXITCODE)`n``````text`n$tail`n``````" |
+              Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
+            exit 1
+          }
 
       # ---- 成果物 ----
       - name: Collect installers
