@@ -20,6 +20,7 @@
 from __future__ import annotations
 
 import math
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
 import numpy as np
@@ -36,12 +37,23 @@ from .particles import (
     _barycentric_coeffs,
     _init_particles,
     _locate_initial,
+    _pack_coeffs,
     _walk_step,
 )
 from .schema import PicSettings, Project
 
 # フレーム送出時の種ごとの最大粒子数 (間引き)
 MAX_FRAME_PARTICLES = 2000
+
+# walk 並列実行用の共有ワーカースレッド (遅延生成、プロセスで1本)
+_WALK_POOL: ThreadPoolExecutor | None = None
+
+
+def _walk_pool() -> ThreadPoolExecutor:
+    global _WALK_POOL
+    if _WALK_POOL is None:
+        _WALK_POOL = ThreadPoolExecutor(max_workers=1, thread_name_prefix="pic-walk")
+    return _WALK_POOL
 
 
 @dataclass
@@ -52,11 +64,16 @@ class PicSpecies:
     q: float               # 電荷 [C]
     m: float               # 質量 [kg]
     x: np.ndarray          # (n, 2) 位置 [m]
-    v: np.ndarray          # (n, 2) 速度 [m/s] (リープフロッグの半整数ステップ)
+    v: np.ndarray          # (n, 3) 速度 [m/s] (2d3v。E は vx, vy のみに作用。半整数ステップ)
     w: np.ndarray          # (n,) マクロ重み (実粒子数/マクロ粒子)
     elem: np.ndarray       # (n,) 所属要素番号
     mobile: bool = True    # False ならプッシュしない (immobile_ions)
     wall_absorbed: int = 0  # 壁吸収の累計 (マクロ粒子数)
+    # (n, 3) 所属要素での重心座標キャッシュ (walk が計算した値の再利用)。
+    # None または長さ不一致なら電荷堆積時に再計算する。x を差し替えたら None にすること
+    bary: np.ndarray | None = None
+    # (n, 3) 所属要素の節点番号キャッシュ (tris[elem] の再利用)。同上のルール
+    nidx: np.ndarray | None = None
 
 
 class PicSimulation:
@@ -78,6 +95,7 @@ class PicSimulation:
         self.n_nodes = len(mesh.nodes)
         self.tris = mesh.triangles
         self.coeffs = _barycentric_coeffs(mesh.nodes, self.tris)  # (a, b, c, det)
+        self._coeffs_packed = _pack_coeffs(self.coeffs)  # walk 用 (M,10) 詰め込み係数
         self.adjacency = _adjacency(self.tris)
         det = self.coeffs[3]
         self.area = 0.5 * np.abs(det)          # (M,) 要素面積
@@ -152,10 +170,11 @@ class PicSimulation:
                 ("ion", QE, self.m_ion, ip.ti_ev, not ip.immobile_ions),
             ):
                 sigma = math.sqrt(t_ev * QE / m) if t_ev > 0.0 else 0.0
+                # 2d3v: Maxwell 速度は3成分で抽選する
                 v = (
-                    rng.normal(0.0, sigma, size=(n_macro, 2))
+                    rng.normal(0.0, sigma, size=(n_macro, 3))
                     if sigma > 0.0
-                    else np.zeros((n_macro, 2))
+                    else np.zeros((n_macro, 3))
                 )
                 self.species[name] = PicSpecies(
                     name, q, m, x0.copy(), v, np.full(n_macro, w0), elem0.copy(), mobile
@@ -164,7 +183,7 @@ class PicSimulation:
             for name, q, m in (("electron", -QE, ME), ("ion", QE, self.m_ion)):
                 self.species[name] = PicSpecies(
                     name, q, m,
-                    np.zeros((0, 2)), np.zeros((0, 2)),
+                    np.zeros((0, 2)), np.zeros((0, 3)),
                     np.zeros(0), np.zeros(0, dtype=np.int64),
                 )
 
@@ -176,6 +195,8 @@ class PicSimulation:
             self._inj_pos = pos
             self._inj_vel_base = vel  # mono の場合の決定的な速度
             self._inj_elem = _locate_initial(self.coeffs, pos)
+            # 注入位置・所属要素は固定なので重心座標も前計算できる
+            self._inj_bary = self._bary_of(pos, self._inj_elem)
             self._inj_rng = np.random.default_rng(inj.emitter.seed)
             # 毎ステップの実電荷 I·dt を n 個のマクロ粒子へ等分
             self._inj_w = inj.current_a_per_m * self.dt / (QE * inj.emitter.n)
@@ -189,6 +210,20 @@ class PicSimulation:
         self._see_rng = np.random.default_rng(mcc_seed + 12345)
         self._see_speed = math.sqrt(2.0 * self.pic.see_energy_ev * QE / ME)
         self._build_see_edges()
+
+        # ---- 鏡面反射エッジ (reflect_edges) の前計算 --------------------------
+        self._build_reflect_edges()
+
+        # ---- 節点密度アキュムレータ (enable_density_accum で有効化) -----------
+        self._accum_start: int | None = None
+        self._accum_count = 0
+        self._accum: dict[str, np.ndarray] = {}
+        # 節点集中面積 = Σ隣接要素面積/3 (averaged_density の規格化に使う)
+        self._node_area = np.bincount(
+            self.tris.ravel(),
+            weights=np.repeat(self.area / 3.0, 3),
+            minlength=self.n_nodes,
+        )
 
         # ---- 診断・時刻 -------------------------------------------------------
         self.t = 0.0
@@ -208,12 +243,13 @@ class PicSimulation:
         self._f_immobile: dict[str, np.ndarray] = {}  # 不動種の堆積キャッシュ
 
         # ---- 初期半ステップ後退キック (t=0 の場で v を -dt/2 へ) --------------
+        # E は vx, vy のみに作用する (vz は不変)
         phi0 = self._solve_phi(self._deposit(), 0.0)
         ex, ey = self._e_field(phi0)
         for sp in self.species.values():
             if sp.mobile and len(sp.x):
                 e_at = np.stack([ex[sp.elem], ey[sp.elem]], axis=1)
-                sp.v -= 0.5 * self.dt * (sp.q / sp.m) * e_at
+                sp.v[:, :2] -= 0.5 * self.dt * (sp.q / sp.m) * e_at
 
     # ---- 内部処理 -----------------------------------------------------------
 
@@ -258,6 +294,111 @@ class PicSimulation:
         self._edge_normal[ts, loc] = nrm
         self._edge_delta[ts, loc] = 1e-3 * h  # 境界からわずかに内側
 
+    def _build_reflect_edges(self) -> None:
+        """reflect_edges で指定した domain 外周エッジ上の境界メッシュエッジ表を構築する。
+
+        境界メッシュエッジ (adjacency == -1) の両端節点が、指定された domain
+        エッジ (頂点 i → i+1 の線分) 上に乗っている場合に鏡面反射対象とし、
+        内向き単位法線とエッジ上の基準点を (要素, ローカルエッジ) で引ける
+        配列に記録する。
+        """
+        self._edge_reflect: np.ndarray | None = None
+        edges = self.pic.reflect_edges
+        if not edges:
+            return
+        poly = np.asarray(self.project.geometry.domain.polygon, dtype=np.float64)
+        nv = len(poly)
+        ts, loc = np.nonzero(self.adjacency == -1)
+        n1 = self.tris[ts, (loc + 1) % 3]
+        n2 = self.tris[ts, (loc + 2) % 3]
+        n_opp = self.tris[ts, loc]
+        nodes = self.mesh.nodes
+        p1, p2, po = nodes[n1], nodes[n2], nodes[n_opp]
+        scale = float(np.max(np.abs(poly)))
+        tol = 1e-8 * (scale if scale > 0.0 else 1.0)
+
+        on_reflect = np.zeros(len(ts), dtype=bool)
+        for e in edges:
+            q1 = poly[e % nv]
+            q2 = poly[(e + 1) % nv]
+            seg = q2 - q1
+            seg_len = float(np.hypot(seg[0], seg[1]))
+            if seg_len <= 0.0:
+                continue
+
+            def _on_segment(p: np.ndarray) -> np.ndarray:
+                # 線分 q1-q2 への共線判定 (距離 tol 以内) + パラメータ範囲チェック
+                d = p - q1
+                dist = np.abs(d[:, 0] * seg[1] - d[:, 1] * seg[0]) / seg_len
+                t = (d[:, 0] * seg[0] + d[:, 1] * seg[1]) / (seg_len * seg_len)
+                return (dist <= tol) & (t >= -1e-9) & (t <= 1.0 + 1e-9)
+
+            on_reflect |= _on_segment(p1) & _on_segment(p2)
+        if not np.any(on_reflect):
+            return
+
+        # 内向き単位法線 = 対頂点の側 (SEE エッジ表と同じ規約)
+        t_vec = p2 - p1
+        perp = np.stack([-t_vec[:, 1], t_vec[:, 0]], axis=1)
+        mid = 0.5 * (p1 + p2)
+        sgn = np.where(np.sum(perp * (po - mid), axis=1) >= 0.0, 1.0, -1.0)
+        nrm = perp * (sgn / np.linalg.norm(perp, axis=1))[:, None]
+
+        m = len(self.tris)
+        self._edge_reflect = np.zeros((m, 3), dtype=bool)
+        self._refl_normal = np.zeros((m, 3, 2))
+        self._refl_point = np.zeros((m, 3, 2))  # エッジ上の基準点 (符号付き距離用)
+        sel = on_reflect
+        self._edge_reflect[ts[sel], loc[sel]] = True
+        self._refl_normal[ts[sel], loc[sel]] = nrm[sel]
+        self._refl_point[ts[sel], loc[sel]] = p1[sel]
+
+    def _apply_reflection(
+        self,
+        x_new: np.ndarray,
+        v_new: np.ndarray,
+        elem: np.ndarray,
+        absorbed: np.ndarray,
+        b_elem: np.ndarray,
+        b_loc: np.ndarray,
+        l_out: np.ndarray | None = None,
+    ) -> None:
+        """反射エッジで検出された粒子を鏡面反射する (全引数を in-place 更新)。
+
+        位置は境界線について折り返し、速度は法線成分 (vx, vy のみ) を反転する。
+        反射後に所属要素を再探索し、コーナーで別の壁に到達した粒子は次の反復で
+        処理する。反射エッジ以外の壁に達した粒子は absorbed のまま残す
+        (通常の壁吸収として扱われる)。
+        """
+        for _ in range(8):
+            idx = np.nonzero(absorbed)[0]
+            if idx.size == 0:
+                return
+            ea, el = b_elem[idx], b_loc[idx]
+            refl = self._edge_reflect[ea, el]
+            if not np.any(refl):
+                return
+            r_idx = idx[refl]
+            ea, el = ea[refl], el[refl]
+            nrm = self._refl_normal[ea, el]
+            # 符号付き距離 d < 0 = 境界の外側。折り返して境界内へ戻す
+            d = np.sum((x_new[r_idx] - self._refl_point[ea, el]) * nrm, axis=1)
+            x_new[r_idx] -= 2.0 * np.minimum(d, 0.0)[:, None] * nrm
+            vn = np.sum(v_new[r_idx, :2] * nrm, axis=1)
+            v_new[r_idx, :2] -= 2.0 * vn[:, None] * nrm
+            # 反射後の所属要素を境界要素から再探索 (再度壁に達したら次の反復へ)
+            sub_l = None if l_out is None else np.empty((r_idx.size, 3))
+            e2, a2, be2, bl2 = _walk_step(
+                self.coeffs, self.adjacency, ea, x_new[r_idx], sub_l,
+                packed=self._coeffs_packed,
+            )
+            elem[r_idx] = e2
+            absorbed[r_idx] = a2
+            b_elem[r_idx] = be2
+            b_loc[r_idx] = bl2
+            if l_out is not None:
+                l_out[r_idx] = sub_l
+
     def _emit_see(
         self,
         sp: PicSpecies,
@@ -301,9 +442,12 @@ class PicSimulation:
         pos = x_hit + self._edge_delta[ea, eloc][:, None] * nrm
         el = self.species["electron"]
         el.x = np.concatenate([el.x, pos])
-        el.v = np.concatenate([el.v, self._see_speed * nrm])
+        # SEE 電子は法線方向のみ (vz = 0)
+        v_see = np.column_stack([self._see_speed * nrm, np.zeros(len(nrm))])
+        el.v = np.concatenate([el.v, v_see])
         el.w = np.concatenate([el.w, sp.w[c_idx]])
         el.elem = np.concatenate([el.elem, ea])
+        self._bary_append(el, self._bary_of(pos, ea))
         self.see_events += len(c_idx)
 
     def _sample_uniform(self, rng: np.random.Generator, n: int):
@@ -324,18 +468,49 @@ class PicSimulation:
         )
         return x, elem
 
+    def _bary_of(self, x: np.ndarray, elem: np.ndarray) -> np.ndarray:
+        """位置・所属要素から P1 重心座標 (n, 3) を計算する。"""
+        a, b, c, det = self.coeffs
+        return (a[elem] + b[elem] * x[:, 0:1] + c[elem] * x[:, 1:2]) / det[elem][:, None]
+
+    def _bary_cached(self, sp: PicSpecies) -> np.ndarray:
+        """種の重心座標キャッシュを返す (無効なら再計算して保存)。"""
+        l = sp.bary
+        if l is None or len(l) != len(sp.x):
+            l = self._bary_of(sp.x, sp.elem)
+            sp.bary = l
+        return l
+
+    @staticmethod
+    def _bary_append(sp: PicSpecies, l_new: np.ndarray) -> None:
+        """粒子追加後にキャッシュへ重心座標行を追記する (不整合なら破棄して遅延再計算)。"""
+        if sp.bary is not None and len(sp.bary) + len(l_new) == len(sp.x):
+            sp.bary = np.concatenate([sp.bary, l_new])
+        else:
+            sp.bary = None
+
+    def _nidx_cached(self, sp: PicSpecies) -> np.ndarray:
+        """種の所属要素節点番号 tris[elem] を返す (キャッシュが無効なら再計算)。
+
+        密度積算 (ステップ終端) と次ステップの電荷堆積は同じ粒子状態を見るので、
+        キャッシュにより gather を1回に減らせる。
+        """
+        ni = sp.nidx
+        if ni is None or len(ni) != len(sp.elem):
+            ni = self.tris[sp.elem]
+            sp.nidx = ni
+        return ni
+
     def _deposit_species(self, sp: PicSpecies) -> np.ndarray:
         """1種の電荷を P1 形状関数 (重心座標) の重みで節点へ散布する。
 
         f_i = Σ_p w_p q_p L_i(x_p)。散布は np.add.at と等価だが高速な
-        np.bincount で行う。
+        np.bincount で行う。重心座標は walk のキャッシュを再利用する。
         """
-        a, b, c, det = self.coeffs
-        e = sp.elem
-        l = (a[e] + b[e] * sp.x[:, 0:1] + c[e] * sp.x[:, 1:2]) / det[e][:, None]  # (n,3)
+        l = self._bary_cached(sp)
         contrib = (sp.q * sp.w)[:, None] * l
         return np.bincount(
-            self.tris[e].ravel(), weights=contrib.ravel(), minlength=self.n_nodes
+            self._nidx_cached(sp).ravel(), weights=contrib.ravel(), minlength=self.n_nodes
         )
 
     def _deposit(self) -> np.ndarray:
@@ -382,10 +557,13 @@ class PicSimulation:
         if em.energy_dist == "maxwell":
             angle = math.radians(em.direction_deg)
             speed = math.sqrt(2.0 * em.energy_ev * QE / sp.m) if em.energy_ev > 0 else 0.0
-            drift = speed * np.array([math.cos(angle), math.sin(angle)])
+            drift = speed * np.array([math.cos(angle), math.sin(angle), 0.0])
             sigma = math.sqrt(em.temperature_ev * QE / sp.m)
-            return drift[None, :] + self._inj_rng.normal(0.0, sigma, size=(em.n, 2))
-        return self._inj_vel_base.copy()
+            # 2d3v: 熱速度成分は3成分で抽選する
+            return drift[None, :] + self._inj_rng.normal(0.0, sigma, size=(em.n, 3))
+        # mono: フェーズ2 の2成分速度に vz = 0 を付加
+        base = self._inj_vel_base
+        return np.column_stack([base, np.zeros(len(base))])
 
     def _inject(self, ex: np.ndarray, ey: np.ndarray) -> None:
         """エミッタ定常注入。初期半ステップ後退キックを適用して追加する。"""
@@ -394,12 +572,44 @@ class PicSimulation:
         elem = self._inj_elem
         v = self._injection_velocities()
         e_at = np.stack([ex[elem], ey[elem]], axis=1)
-        v -= 0.5 * self.dt * (sp.q / sp.m) * e_at
+        v[:, :2] -= 0.5 * self.dt * (sp.q / sp.m) * e_at
         n = len(elem)
         sp.x = np.concatenate([sp.x, self._inj_pos])
         sp.v = np.concatenate([sp.v, v])
         sp.w = np.concatenate([sp.w, np.full(n, self._inj_w)])
         sp.elem = np.concatenate([sp.elem, elem])
+        self._bary_append(sp, self._inj_bary)
+
+    def _run_walks(self, pushed) -> list:
+        """種ごとの walk を実行する (2種以上なら並列)。
+
+        walk は乱数を使わず入力のみで決まる決定的処理で、種間で共有する
+        書き込み先も無いため、並列化しても結果はビット単位で不変。
+        """
+        if len(pushed) <= 1:
+            return [
+                _walk_step(
+                    self.coeffs, self.adjacency, sp.elem, x_new, l_new,
+                    packed=self._coeffs_packed,
+                )
+                for sp, _v, x_new, l_new in pushed
+            ]
+        # 先頭の種 (通常は電子 = 最も重い walk) をワーカーへ、残りを主スレッドで
+        futures = [
+            _walk_pool().submit(
+                _walk_step, self.coeffs, self.adjacency, sp.elem, x_new, l_new,
+                self._coeffs_packed,
+            )
+            for sp, _v, x_new, l_new in pushed[:1]
+        ]
+        rest = [
+            _walk_step(
+                self.coeffs, self.adjacency, sp.elem, x_new, l_new,
+                packed=self._coeffs_packed,
+            )
+            for sp, _v, x_new, l_new in pushed[1:]
+        ]
+        return [f.result() for f in futures] + rest
 
     # ---- 1ステップ -----------------------------------------------------------
 
@@ -416,9 +626,12 @@ class PicSimulation:
         # 3. E 補間の準備 (要素ごとの一定値)
         ex, ey = self._e_field(phi)
         fe = float(np.sum(0.5 * self.eps_elem * (ex**2 + ey**2) * self.area))
+        # 要素ごとの E を (M,2) に詰め、粒子への補間 gather を1回で済ませる
+        exy = np.stack([ex, ey], axis=1)
 
-        # 4. リープフロッグでプッシュ → 5. walk 更新・境界吸収
+        # 4. リープフロッグでプッシュ (種ごとの v_new, x_new を先に全て計算する)
         ke: dict[str, float] = {}
+        pushed: list[tuple[PicSpecies, np.ndarray, np.ndarray, np.ndarray]] = []
         for sp in self.species.values():
             if len(sp.x) == 0:
                 ke[sp.name] = 0.0
@@ -427,14 +640,31 @@ class PicSimulation:
                 # 不動種: 運動エネルギーのみ評価
                 ke[sp.name] = 0.5 * sp.m * float(np.sum(sp.w * np.sum(sp.v**2, axis=1)))
                 continue
-            e_at = np.stack([ex[sp.elem], ey[sp.elem]], axis=1)
-            v_new = sp.v + (sp.q / sp.m) * dt * e_at
+            e_at = exy[sp.elem]
+            # 2d3v: E は vx, vy のみに作用し、vz はそのまま
+            v_new = sp.v.copy()
+            v_new[:, :2] += (sp.q / sp.m) * dt * e_at
             # 時刻中心化した運動エネルギー: KE(t_n) ≈ ½ m Σ w v(n-1/2)·v(n+1/2)
-            ke[sp.name] = 0.5 * sp.m * float(np.sum(sp.w * np.sum(sp.v * v_new, axis=1)))
-            x_new = sp.x + dt * v_new
-            elem_new, absorbed, b_elem, b_loc = _walk_step(
-                self.coeffs, self.adjacency, sp.elem, x_new
-            )
+            # (v·v_new は列ごとの積和で評価: axis 縮約より高速で結果はビット一致)
+            vdot = (
+                sp.v[:, 0] * v_new[:, 0] + sp.v[:, 1] * v_new[:, 1]
+            ) + sp.v[:, 2] * v_new[:, 2]
+            ke[sp.name] = 0.5 * sp.m * float(np.sum(sp.w * vdot))
+            x_new = sp.x + dt * v_new[:, :2]
+            pushed.append((sp, v_new, x_new, np.empty((len(x_new), 3))))
+
+        # 5. walk 更新 (種ごとに独立・決定的なので、2種のときは並列に実行して
+        #    2コアを使う。numpy の大きな ufunc は GIL を解放するため実効的)
+        walk_results = self._run_walks(pushed)
+
+        # 5.1. 境界吸収・鏡面反射・SEE (種の順序は従来どおり electron → ion)
+        for (sp, v_new, x_new, l_new), res_walk in zip(pushed, walk_results):
+            elem_new, absorbed, b_elem, b_loc = res_walk
+            # 鏡面反射エッジに達した粒子は吸収せず折り返す (壁カウンタに含めない)
+            if self._edge_reflect is not None and np.any(absorbed):
+                self._apply_reflection(
+                    x_new, v_new, elem_new, absorbed, b_elem, b_loc, l_new
+                )
             n_abs = int(absorbed.sum())
             if n_abs:
                 sp.wall_absorbed += n_abs
@@ -446,10 +676,13 @@ class PicSimulation:
                 sp.v = v_new[keep]
                 sp.w = sp.w[keep]
                 sp.elem = elem_new[keep]
+                sp.bary = l_new[keep]
             else:
                 sp.x = x_new
                 sp.v = v_new
                 sp.elem = elem_new
+                sp.bary = l_new
+            sp.nidx = None  # 所属要素が変わったので節点番号キャッシュを無効化
 
         # 5.5. MCC 衝突 (衝突は位置を変えないので所属要素の更新は不要)
         if self.mcc is not None:
@@ -461,14 +694,17 @@ class PicSimulation:
                 self.ion_events += res.n_ionization
                 if res.new_x is not None:
                     # 電離: 衝突位置に新電子 + 新イオン (ガス温度 Maxwell) を生成
+                    new_l = self._bary_of(res.new_x, res.new_elem)  # 電子・イオン共通
                     el.x = np.concatenate([el.x, res.new_x])
                     el.v = np.concatenate([el.v, res.new_v_e])
                     el.w = np.concatenate([el.w, res.new_w])
                     el.elem = np.concatenate([el.elem, res.new_elem])
+                    self._bary_append(el, new_l)
                     io.x = np.concatenate([io.x, res.new_x.copy()])
                     io.v = np.concatenate([io.v, res.new_v_i])
                     io.w = np.concatenate([io.w, res.new_w.copy()])
                     io.elem = np.concatenate([io.elem, res.new_elem.copy()])
+                    self._bary_append(io, new_l)
                     # 不動イオンに追加した場合は堆積キャッシュを無効化
                     self._f_immobile.pop("ion", None)
             if io.mobile and len(io.x):
@@ -480,6 +716,10 @@ class PicSimulation:
 
         self.t = t + dt
         self.step_count += 1
+
+        # 節点密度アキュムレータ (enable_density_accum 以後、毎ステップ積算)
+        if self._accum_start is not None and self.step_count >= self._accum_start:
+            self._accumulate_density()
 
         # 診断記録 (毎ステップ)
         el, io = self.species["electron"], self.species["ion"]
@@ -498,6 +738,46 @@ class PicSimulation:
         h["ion_events"].append(self.ion_events)
         h["see_events"].append(self.see_events)
         return phi
+
+    # ---- 節点密度の時間平均 ---------------------------------------------------
+
+    def enable_density_accum(self, start_step: int) -> None:
+        """節点密度の時間平均を有効化する。
+
+        step_count (完了ステップ数、1始まり) が start_step 以上のステップから、
+        毎ステップ種ごとに P1 重みで節点へマクロ重みを散布して積算する。
+        """
+        self._accum_start = int(start_step)
+        self._accum_count = 0
+        self._accum = {name: np.zeros(self.n_nodes) for name in self.species}
+
+    def _accumulate_density(self) -> None:
+        """1ステップ分の節点重み (Σ w_p L_i) を種ごとに積算する。
+
+        重心座標は walk のキャッシュを再利用する (このステップ終端の位置と一致)。
+        """
+        for name, sp in self.species.items():
+            if len(sp.x) == 0:
+                continue
+            l = self._bary_cached(sp)
+            contrib = sp.w[:, None] * l
+            self._accum[name] += np.bincount(
+                self._nidx_cached(sp).ravel(), weights=contrib.ravel(), minlength=self.n_nodes
+            )
+        self._accum_count += 1
+
+    def averaged_density(self) -> dict[str, np.ndarray]:
+        """種ごとの時間平均節点密度 [m^-3] を返す。
+
+        節点集中面積 (= Σ隣接要素面積/3) で割って数密度に換算する
+        (奥行き 1 m 換算)。
+        """
+        if self._accum_start is None or self._accum_count == 0:
+            raise ValueError("enable_density_accum が呼ばれていないか、まだ積算されていません")
+        return {
+            name: acc / (self._accum_count * self._node_area)
+            for name, acc in self._accum.items()
+        }
 
     # ---- フレーム・実行 -------------------------------------------------------
 

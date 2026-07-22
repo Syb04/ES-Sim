@@ -120,7 +120,20 @@ def _locate_initial(coeffs, points: np.ndarray) -> np.ndarray:
     return elem.astype(np.int64)
 
 
-def _walk_step(coeffs, adjacency: np.ndarray, elem0: np.ndarray, x_new: np.ndarray):
+def _pack_coeffs(coeffs) -> np.ndarray:
+    """重心座標係数を (M, 10) = [a|b|c|det] に詰める (walk の gather を1回にする)。"""
+    a, b, c, det = coeffs
+    return np.concatenate([a, b, c, det[:, None]], axis=1)
+
+
+def _walk_step(
+    coeffs,
+    adjacency: np.ndarray,
+    elem0: np.ndarray,
+    x_new: np.ndarray,
+    l_out: np.ndarray | None = None,
+    packed: np.ndarray | None = None,
+):
     """現在の要素から x_new へ向けて重心座標 walk を行う。
 
     戻り値:
@@ -128,34 +141,62 @@ def _walk_step(coeffs, adjacency: np.ndarray, elem0: np.ndarray, x_new: np.ndarr
         absorbed: 境界 (adjacency == -1) を越えて出たかどうか
         b_elem, b_loc: absorbed 時に境界を検出した要素・ローカルエッジ番号
                        (tof 補間に使う。absorbed=False の要素では無意味)
+
+    l_out に (n, 3) 配列を渡すと、最終所属要素での重心座標を書き込む
+    (電荷堆積での再計算を省くキャッシュ用。absorbed 粒子の行は未定義)。
+    packed には _pack_coeffs(coeffs) の前計算を渡せる (ループ呼び出しの高速化)。
     """
-    a, b, c, det = coeffs
+    if packed is None:
+        packed = _pack_coeffs(coeffs)
     n = len(x_new)
     elem = elem0.copy()
     absorbed = np.zeros(n, dtype=bool)
     b_elem = np.zeros(n, dtype=np.int64)
     b_loc = np.zeros(n, dtype=np.int64)
-    active = np.ones(n, dtype=bool)
 
+    # アクティブ集合はインデックス配列で直接引き継ぐ (毎反復の全粒子 nonzero を回避)。
+    # 反復0 は全粒子が対象なので idx=None として fancy index のコピーを省く
+    idx: np.ndarray | None = None
     for _ in range(_MAX_WALK_ITERS):
-        idx = np.nonzero(active)[0]
-        if idx.size == 0:
-            break
-        e = elem[idx]
-        xp, yp = x_new[idx, 0], x_new[idx, 1]
-        l_loc = (a[e] + b[e] * xp[:, None] + c[e] * yp[:, None]) / det[e][:, None]  # (K,3)
-        min_loc = np.argmin(l_loc, axis=1)
-        min_val = l_loc[np.arange(len(idx)), min_loc]
-        outside = min_val < -_TOL
+        if idx is None:
+            xp, yp = x_new[:, 0], x_new[:, 1]
+            e_cur = elem
+        else:
+            if idx.size == 0:
+                break
+            xp, yp = x_new[idx, 0], x_new[idx, 1]
+            e_cur = elem[idx]
+        # 係数は (M,10) 詰め込み配列から1回の gather で取得する (a[e] 等の4回より高速)
+        g = packed[e_cur]
+        # 加算順は (a + b·x) + c·y のまま in-place で温存する (ビット一致のため)
+        l_loc = g[:, 0:3] + g[:, 3:6] * xp[:, None]
+        l_loc += g[:, 6:9] * yp[:, None]
+        l_loc /= g[:, 9:10]  # (K,3)
+        # 内外判定は列ごとの比較で行い (axis 縮約より高速)、
+        # argmin は外に出た少数の粒子に限定する
+        outside = (
+            (l_loc[:, 0] < -_TOL) | (l_loc[:, 1] < -_TOL) | (l_loc[:, 2] < -_TOL)
+        )
 
-        done = idx[~outside]
-        active[done] = False
         if not np.any(outside):
-            continue
+            # 全員が現要素内 (イオン等で頻出の高速パス): マスクコピーなしで書き出す
+            if l_out is not None:
+                if idx is None:
+                    np.copyto(l_out, l_loc)
+                else:
+                    l_out[idx] = l_loc
+            idx = np.zeros(0, dtype=np.int64)
+            break
 
-        o_idx = idx[outside]
+        inside = ~outside
+        if l_out is not None:
+            done = np.nonzero(inside)[0] if idx is None else idx[inside]
+            if done.size:
+                l_out[done] = l_loc[inside]
+
+        o_idx = np.nonzero(outside)[0] if idx is None else idx[outside]
         o_elem = elem[o_idx]
-        o_loc = min_loc[outside]
+        o_loc = np.argmin(l_loc[outside], axis=1)
         neighbor = adjacency[o_elem, o_loc]
         left = neighbor == -1
 
@@ -164,12 +205,22 @@ def _walk_step(coeffs, adjacency: np.ndarray, elem0: np.ndarray, x_new: np.ndarr
             absorbed[abs_idx] = True
             b_elem[abs_idx] = o_elem[left]
             b_loc[abs_idx] = o_loc[left]
-            active[abs_idx] = False
 
-        cont_idx = o_idx[~left]
-        if cont_idx.size:
-            elem[cont_idx] = neighbor[~left]
-            # active のまま次の反復で再チェック
+        idx = o_idx[~left]
+        if idx.size:
+            elem[idx] = neighbor[~left]
+            # 次の反復で新しい要素を再チェック
+    else:
+        idx = np.zeros(0, dtype=np.int64) if idx is None else idx
+
+    if l_out is not None and idx.size:
+        # 反復上限に達して残った粒子 (稀): 最終要素で重心座標を計算
+        g = packed[elem[idx]]
+        l_out[idx] = (
+            g[:, 0:3]
+            + g[:, 3:6] * x_new[idx, 0][:, None]
+            + g[:, 6:9] * x_new[idx, 1][:, None]
+        ) / g[:, 9:10]
 
     return elem, absorbed, b_elem, b_loc
 
@@ -286,6 +337,7 @@ def trace(project: Project, mesh: Mesh, sol: Solution) -> TraceOutput:
     qm = q / m
 
     a_coef, b_coef, c_coef, det_coef = coeffs
+    packed = _pack_coeffs(coeffs)  # walk 用の詰め込み係数 (ループ外で1回)
 
     for step in range(1, n_steps + 1):
         idx_active = np.nonzero(alive)[0]
@@ -297,7 +349,7 @@ def trace(project: Project, mesh: Mesh, sol: Solution) -> TraceOutput:
             x_new = x_prev + dt * v_half
 
             new_elem, absorbed_mask, b_elem, b_loc = _walk_step(
-                coeffs, adjacency, elem[idx_active], x_new
+                coeffs, adjacency, elem[idx_active], x_new, packed=packed
             )
 
             cont = ~absorbed_mask

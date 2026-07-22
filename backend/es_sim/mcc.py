@@ -66,6 +66,10 @@ class MccModel:
         # ガス原子の Maxwell 速度分布の成分ごとの標準偏差 (ガス原子質量 = イオン質量とみなす)
         self.vth_gas = math.sqrt(KB * gas.temperature_k / m_ion)
         self.rng = np.random.default_rng(settings.seed)
+        self.ionization_split = settings.ionization_split
+        self.ion_energy_frame = settings.ion_energy_frame
+        # 換算質量 μ = m_i·m_g/(m_i+m_g) (ガス原子質量 = イオン質量なので μ = m_i/2)
+        self.mu = m_ion * m_ion / (m_ion + m_ion)
 
         self.e_procs = [
             self._conv(p, ("elastic", "excitation", "ionization"))
@@ -75,7 +79,9 @@ class MccModel:
             self._conv(p, ("isotropic", "backscat")) for p in settings.ion_processes
         ]
         self.numax_e = self._nu_max(self.e_procs, ME)
-        self.numax_i = self._nu_max(self.i_procs, m_ion)
+        # com 系ではテーブルの E は重心系エネルギーなので、相対速度 g = √(2E/μ) で ν を評価
+        m_ref = self.mu if self.ion_energy_frame == "com" else m_ion
+        self.numax_i = self._nu_max(self.i_procs, m_ref)
 
     # ---- 前処理 --------------------------------------------------------------
 
@@ -103,33 +109,48 @@ class MccModel:
 
     # ---- 共通: 候補抽選とプロセス選択 -----------------------------------------
 
+    def _candidates(self, n: int, numax: float, dt: float) -> np.ndarray:
+        """null-collision の衝突候補インデックスを抽選する。"""
+        p_coll = 1.0 - math.exp(-numax * dt)
+        return np.nonzero(self.rng.random(n) < p_coll)[0]
+
+    def _choose_process(
+        self,
+        e_ev: np.ndarray,
+        speed: np.ndarray,
+        numax: float,
+        procs: list[_Proc],
+    ) -> np.ndarray:
+        """候補ごとの参照エネルギー・速さから実プロセスを選択する (-1 = null 衝突)。"""
+        nu = np.empty((len(e_ev), len(procs)))
+        for j, p in enumerate(procs):
+            nu[:, j] = self.n_gas * np.interp(e_ev, p.e, p.s) * speed
+        cum = np.cumsum(nu, axis=1)
+        u = self.rng.random(len(e_ev)) * numax
+        hit = u < cum[:, -1]
+        return np.where(hit, np.argmax(u[:, None] < cum, axis=1), -1)
+
     def _select(self, v: np.ndarray, m: float, numax: float, procs: list[_Proc], dt: float):
-        """衝突候補の抽選と実プロセスの選択。
+        """衝突候補の抽選と実プロセスの選択 (実験室系エネルギー参照)。
 
         戻り値: (cand, proc_idx, e_ev, speed)。cand は候補粒子のインデックス、
         proc_idx は選ばれたプロセス番号 (-1 = null 衝突)。
         """
-        n = len(v)
-        p_coll = 1.0 - math.exp(-numax * dt)
-        cand = np.nonzero(self.rng.random(n) < p_coll)[0]
+        cand = self._candidates(len(v), numax, dt)
         if cand.size == 0:
             return cand, None, None, None
         vv = v[cand]
         speed = np.sqrt(np.sum(vv * vv, axis=1))
         e_ev = 0.5 * m * speed * speed / QE
-        nu = np.empty((cand.size, len(procs)))
-        for j, p in enumerate(procs):
-            nu[:, j] = self.n_gas * np.interp(e_ev, p.e, p.s) * speed
-        cum = np.cumsum(nu, axis=1)
-        u = self.rng.random(cand.size) * numax
-        hit = u < cum[:, -1]
-        proc_idx = np.where(hit, np.argmax(u[:, None] < cum, axis=1), -1)
+        proc_idx = self._choose_process(e_ev, speed, numax, procs)
         return cand, proc_idx, e_ev, speed
 
     def _iso_dir(self, k: int) -> np.ndarray:
-        """2D 等方な単位方向ベクトルを k 個サンプルする。"""
-        th = self.rng.random(k) * (2.0 * np.pi)
-        return np.stack([np.cos(th), np.sin(th)], axis=1)
+        """3D 等方な単位方向ベクトルを k 個サンプルする (cosχ 一様・方位角一様)。"""
+        cos_t = 1.0 - 2.0 * self.rng.random(k)
+        sin_t = np.sqrt(np.maximum(1.0 - cos_t * cos_t, 0.0))
+        phi = self.rng.random(k) * (2.0 * np.pi)
+        return np.stack([sin_t * np.cos(phi), sin_t * np.sin(phi), cos_t], axis=1)
 
     # ---- 電子衝突 -------------------------------------------------------------
 
@@ -163,7 +184,7 @@ class MccModel:
             if k == 0:
                 continue
             sub = cand[mask]
-            d_new = self._iso_dir(k)  # 2D 等方散乱: 速度方向を一様乱数で回し直す
+            d_new = self._iso_dir(k)  # 3D 等方散乱: cosχ 一様・方位角一様
             if p.kind == "elastic":
                 # 散乱角 χ = 旧方向と新方向のなす角。ΔE = 2(m/M)(1−cosχ)E
                 d_old = v[sub] / speed[mask][:, None]
@@ -177,15 +198,18 @@ class MccModel:
                 e_new = e_ev[mask] - p.threshold_ev
                 v[sub] = np.sqrt(2.0 * e_new * QE / ME)[:, None] * d_new
             else:  # ionization
-                # 余剰 E − 閾値 を一様乱数比で散乱電子/放出電子に分配 (両者等方)
+                # 余剰 E − 閾値 を散乱電子/放出電子に分配 (両者 3D 等方)。
+                # "half": 等分 (Turner ベンチマーク互換、既定) / "random": 一様乱数比
                 excess = e_ev[mask] - p.threshold_ev
-                r = self.rng.random(k)
-                e_scat = r * excess
+                if self.ionization_split == "half":
+                    e_scat = 0.5 * excess
+                else:
+                    e_scat = self.rng.random(k) * excess
                 e_eject = excess - e_scat
                 v[sub] = np.sqrt(2.0 * e_scat * QE / ME)[:, None] * d_new
                 new_ve.append(np.sqrt(2.0 * e_eject * QE / ME)[:, None] * self._iso_dir(k))
-                # 新イオンはガス温度の Maxwell 速度
-                new_vi.append(self.rng.normal(0.0, self.vth_gas, size=(k, 2)))
+                # 新イオンはガス温度の Maxwell 速度 (3成分)
+                new_vi.append(self.rng.normal(0.0, self.vth_gas, size=(k, 3)))
                 new_x.append(x[sub].copy())
                 new_elem.append(elem[sub].copy())
                 new_w.append(w[sub].copy())  # マクロ重みは入射電子と同じ
@@ -205,13 +229,28 @@ class MccModel:
     def collide_ions(self, v: np.ndarray, dt: float) -> int:
         """イオンの MCC。v を in-place 更新し、実衝突数を返す。
 
-        断面積テーブルの energy_ev は実験室系イオンエネルギーとして解釈する。
+        断面積テーブルの energy_ev の解釈は ion_energy_frame で切り替える:
+        - "lab": 実験室系イオンエネルギー ½ m_i v² (従来動作、ν は実験室速さで評価)
+        - "com": 重心系エネルギー E = ½μg² (g = 相対速度、ν = n_g σ(E) g)。
+          Turner の He+/He (Phelps) データはこちら
         """
         if len(v) == 0 or self.numax_i <= 0.0:
             return 0
-        cand, proc_idx, _, _ = self._select(v, self.m_ion, self.numax_i, self.i_procs, dt)
+        cand = self._candidates(len(v), self.numax_i, dt)
         if cand.size == 0:
             return 0
+        vi = v[cand]
+        # 候補ごとにガス原子の Maxwell 速度を先に抽選し、参照エネルギーと衝突の両方に使う
+        vg = self.rng.normal(0.0, self.vth_gas, size=(cand.size, 3))
+        g = vi - vg
+        g_mag = np.sqrt(np.sum(g * g, axis=1))
+        if self.ion_energy_frame == "com":
+            e_ref = 0.5 * self.mu * g_mag * g_mag / QE
+            s_ref = g_mag
+        else:
+            s_ref = np.sqrt(np.sum(vi * vi, axis=1))
+            e_ref = 0.5 * self.m_ion * s_ref * s_ref / QE
+        proc_idx = self._choose_process(e_ref, s_ref, self.numax_i, self.i_procs)
         n_coll = 0
         for j, p in enumerate(self.i_procs):
             mask = proc_idx == j
@@ -219,14 +258,11 @@ class MccModel:
             if k == 0:
                 continue
             sub = cand[mask]
-            vg = self.rng.normal(0.0, self.vth_gas, size=(k, 2))  # ガス原子の Maxwell 速度
             if p.kind == "backscat":
                 # 電荷交換: イオン速度をガス原子の速度で置き換える
-                v[sub] = vg
-            else:  # isotropic: 等質量弾性衝突、COM 等方散乱 (|g| 保存)
-                g = v[sub] - vg
-                g_mag = np.sqrt(np.sum(g * g, axis=1))
-                v_com = 0.5 * (v[sub] + vg)
-                v[sub] = v_com + 0.5 * g_mag[:, None] * self._iso_dir(k)
+                v[sub] = vg[mask]
+            else:  # isotropic: 等質量弾性衝突、COM 系 3D 等方散乱 (|g| 保存)
+                v_com = 0.5 * (vi[mask] + vg[mask])
+                v[sub] = v_com + 0.5 * g_mag[mask][:, None] * self._iso_dir(k)
             n_coll += k
         return n_coll

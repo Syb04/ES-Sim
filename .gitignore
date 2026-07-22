@@ -21,3 +21,7 @@ Thumbs.db
 
 # LXCat実データ (再配布条件のためgit管理外。合成フィクスチャは管理対象)
 backend/tests/data/Ar*.txt
+
+# Turnerベンチマーク断面積・基準データ (LXCat由来のためgit管理外。入手元: https://github.com/lase-unb/ccp-benchmark)
+backend/verification/data/turner/*.csv
+backend/verification/data/turner/LICENSE.txt

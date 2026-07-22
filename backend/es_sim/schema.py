@@ -198,6 +198,12 @@ class MccSettings(BaseModel):
     electron_processes: list[XsProcess] = []  # elastic/excitation/ionization
     ion_processes: list[XsProcess] = []       # isotropic/backscat
     seed: int = 0
+    # 電離の余剰エネルギー分配: "half" = 散乱電子と生成電子で等分 (Turner ベンチマーク互換)、
+    # "random" = 一様乱数比で分配 (従来動作)
+    ionization_split: Literal["half", "random"] = "half"
+    # イオン断面積テーブルの参照エネルギー系: "lab" = 実験室系イオンエネルギー (従来動作)、
+    # "com" = 重心系エネルギー E = ½μg² (μ = m_i·m_g/(m_i+m_g)、Turner の He+/He データ用)
+    ion_energy_frame: Literal["com", "lab"] = "lab"
 
 
 class PicSettings(BaseModel):
@@ -209,6 +215,10 @@ class PicSettings(BaseModel):
     frame_every: int = Field(20, gt=0, description="フレーム送出間隔 (ステップ)")
     mcc: MccSettings | None = None  # null なら MCC 無効
     see_energy_ev: float = Field(2.0, ge=0, description="SEE 電子の初期エネルギー [eV]")
+    # 鏡面反射する domain 外周エッジ番号のリスト (エッジ i は頂点 i → i+1)。
+    # 到達粒子は吸収せず法線速度成分を反転して境界内へ折り返す (壁カウンタに含めない)。
+    # 当該エッジは境界条件なし (Neumann) を想定。2D ストリップで 1D 問題を模擬する用途
+    reflect_edges: list[int] = Field(default_factory=list)
 
 
 class Project(BaseModel):

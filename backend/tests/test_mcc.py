@@ -153,7 +153,8 @@ def test_collision_frequency_constant_sigma():
     n = 50000
     rng = np.random.default_rng(3)
     th = rng.random(n) * 2.0 * np.pi
-    v = v0 * np.stack([np.cos(th), np.sin(th)], axis=1)
+    # 2d3v: 速度は3成分 (vz = 0 の単色電子)
+    v = v0 * np.stack([np.cos(th), np.sin(th), np.zeros(n)], axis=1)
     x = np.zeros((n, 2))
     w = np.ones(n)
     elem = np.zeros(n, dtype=np.int64)
@@ -240,7 +241,7 @@ def test_no_ionization_below_threshold():
 
     n = 10000
     v0 = math.sqrt(2.0 * 5.0 * QE / ME)
-    v = np.tile(np.array([v0, 0.0]), (n, 1))
+    v = np.tile(np.array([v0, 0.0, 0.0]), (n, 1))
     x = np.zeros((n, 2))
     w = np.ones(n)
     elem = np.zeros(n, dtype=np.int64)
@@ -250,7 +251,7 @@ def test_no_ionization_below_threshold():
         res = model.collide_electrons(x, v, w, elem, dt)
         assert res.n_coll == 0
         assert res.n_ionization == 0
-    assert np.array_equal(v, np.tile(np.array([v0, 0.0]), (n, 1)))  # 速度不変
+    assert np.array_equal(v, np.tile(np.array([v0, 0.0, 0.0]), (n, 1)))  # 速度不変
 
 
 # ---- 5. SEE --------------------------------------------------------------------
@@ -284,7 +285,7 @@ def test_see_gamma_one_absorption_equals_emission():
     x = np.stack([np.linspace(0.0015, 0.0085, n), np.full(n, 0.005)], axis=1)
     io = sim.species["ion"]
     io.x = x
-    io.v = np.tile(np.array([0.0, -1.0e5]), (n, 1))
+    io.v = np.tile(np.array([0.0, -1.0e5, 0.0]), (n, 1))
     io.w = np.ones(n)
     io.elem = _locate_initial(sim.coeffs, x)
 
