@@ -46,7 +46,11 @@ export async function setPort(n: number): Promise<void> {
   currentPort = n;
   localStorage.setItem(LS_KEY, String(n));
   if (isTauri()) {
-    const { writeTextFile, BaseDirectory } = await import("@tauri-apps/plugin-fs");
+    const { mkdir, writeTextFile, BaseDirectory } = await import("@tauri-apps/plugin-fs");
+    const { appConfigDir } = await import("@tauri-apps/api/path");
+    // 初回起動時は AppConfig ディレクトリ自体が存在せず、writeTextFile は親ディレクトリを
+    // 作らないため "指定されたパスが見つかりません (os error 3)" になる。先に必ず作成する。
+    await mkdir(await appConfigDir(), { recursive: true });
     await writeTextFile(CONFIG_FILE_NAME, String(n), { baseDir: BaseDirectory.AppConfig });
   }
 }
