@@ -199,6 +199,10 @@ export default function App() {
   const [cycleBinIndex, setCycleBinIndex] = useState(0);
   const [cycleFps, setCycleFps] = useState(10);
   const [cycleShowParticles, setCycleShowParticles] = useState(true);
+  // 周期アニメーションが「結果表示より優先して描画される」のは、ユーザーがアニメを
+  // 操作している間だけにする (不具合修正: cycle データが存在するだけで常時優先されると、
+  // 結果表示セレクトを切り替えてもキャンバスが切り替わらない)
+  const [cycleViewActive, setCycleViewActive] = useState(false);
 
   // 周期アニメーション再生ループ: playing 中は fps に応じた間隔でビンを1つずつ順送りし、
   // 最後まで行ったら先頭へループする (setInterval + 関数更新で古いクロージャの影響を避ける)
@@ -383,6 +387,7 @@ export default function App() {
     setCyclePlaying(false);
     setCycleBinIndex(0);
     setCycleShowParticles(true);
+    setCycleViewActive(false);
     // IEDF/IADF コレクタ結果も新規実行開始時にリセットする (前回 done の残骸を消す)
     setPicCollectors([]);
     const client = new PicClient(makePicCallbacks(false));
@@ -411,6 +416,7 @@ export default function App() {
     setPicCycle(null);
     setCyclePlaying(false);
     setCycleBinIndex(0);
+    setCycleViewActive(false);
     setPicCollectors([]);
     picClientRef.current.setCallbacks(makePicCallbacks(true));
     picClientRef.current.continueRun({
@@ -798,7 +804,7 @@ export default function App() {
   // 周期アニメーション表示用ビュー (done で cycle を受信している間のみ非null)。
   // 現在の位相ビンの値+固定min/max+粒子スナップショットを picFieldView と同形にまとめて渡す
   const picCycleView: PicFieldView | null =
-    picCycle && picStarted && cycleFixedRange
+    cycleViewActive && picCycle && picStarted && cycleFixedRange
       ? (() => {
           const bin = Math.min(cycleBinIndex, picCycle.bins - 1);
           const meta = PIC_FIELD_META[cycleField];
@@ -1113,22 +1119,27 @@ export default function App() {
                 error={picError}
                 fields={picFields}
                 resultField={picResultField}
-                onResultFieldChange={setPicResultField}
+                onResultFieldChange={(v) => {
+                  // 結果表示の切替時はアニメ優先を解除し、選択したフィールドを表示する
+                  setPicResultField(v);
+                  setCycleViewActive(false);
+                  setCyclePlaying(false);
+                }}
                 logScale={picLogScale}
                 onLogScaleChange={setPicLogScale}
                 cycle={picCycle}
                 cycleField={cycleField}
-                onCycleFieldChange={setCycleField}
+                onCycleFieldChange={(v) => { setCycleField(v); setCycleViewActive(true); }}
                 cycleLogScale={cycleLogScale}
-                onCycleLogScaleChange={setCycleLogScale}
+                onCycleLogScaleChange={(v) => { setCycleLogScale(v); setCycleViewActive(true); }}
                 cyclePlaying={cyclePlaying}
-                onCyclePlayingChange={setCyclePlaying}
+                onCyclePlayingChange={(v) => { setCyclePlaying(v); if (v) setCycleViewActive(true); }}
                 cycleBinIndex={cycleBinIndex}
-                onCycleBinIndexChange={setCycleBinIndex}
+                onCycleBinIndexChange={(v) => { setCycleBinIndex(v); setCycleViewActive(true); }}
                 cycleFps={cycleFps}
                 onCycleFpsChange={setCycleFps}
                 cycleShowParticles={cycleShowParticles}
-                onCycleShowParticlesChange={setCycleShowParticles}
+                onCycleShowParticlesChange={(v) => { setCycleShowParticles(v); setCycleViewActive(true); }}
                 collectorResults={picCollectors}
                 selectedCollectorIndex={selectedCollectorIndex}
                 onSelectCollector={setSelectedCollectorIndexRaw}
