@@ -115,6 +115,19 @@ class PicSimulation:
         # 場の計算は変更しない (εr 付き要素としてメッシュに残る)。無ければ None
         self._solid_elem = _solid_elements(project, mesh)
 
+        # 誘電体 SEE (prompts/38): 固体要素ごとの γ (see_gamma > 0 の dielectric)。
+        # 該当領域が無ければ None (従来経路と完全一致)
+        self._solid_gamma: np.ndarray | None = None
+        if self._solid_elem is not None:
+            gam_elem = np.zeros(len(self.tris))
+            has_gamma = False
+            for i, region in enumerate(project.geometry.regions):
+                if region.type == "dielectric" and region.see_gamma > 0.0:
+                    gam_elem[mesh.tri_region == i] = region.see_gamma
+                    has_gamma = True
+            if has_gamma:
+                self._solid_gamma = gam_elem
+
         # 誘電体の表面電荷 (prompts/25): 吸収された粒子の電荷 w·q [C/m] を節点へ
         # P1 射影で蓄積し、毎ステップのポアソン右辺へ恒常的に加える。
         # 実行開始時は 0 で、停止までラン内で持続する
@@ -545,6 +558,65 @@ class PicSimulation:
             minlength=self.n_nodes,
         )
 
+    def _emit_see_dielectric(
+        self,
+        sp: PicSpecies,
+        v_new: np.ndarray,
+        elem_new: np.ndarray,
+        l_new: np.ndarray,
+        hit: np.ndarray,
+    ) -> None:
+        """γ>0 の誘電体へ進入して吸収されたイオンから確率 γ で二次電子を放出する。
+
+        固体吸収経路には境界エッジ (法線) が無いため、放出速度は入射イオン速度の
+        単位ベクトルの逆向きに see_energy_ev を与える近似とする (面内2成分 + vz)。
+        位置はプッシュ前のイオン位置 (直前までいたプラズマ側の要素内)、所属要素も
+        プッシュ前のものを流用する (locate 不要)。重みは吸収イオンと同じ。
+
+        表面電荷の収支整合: 電子が表面から放出される分だけ表面は正に帯電するため、
+        +e·w をイオン吸収と同じ P1 射影 (進入要素の重心座標) で Q_surf へ加算する。
+        電極 γ 由来の既存 SEE (_emit_see) は表面電荷管理外なので変更しない。
+        sp.x / sp.elem は更新前 (プッシュ前) の状態であることを前提とする。
+        """
+        idx = np.nonzero(hit)[0]
+        gam = self._solid_gamma[elem_new[idx]]
+        cand = gam > 0.0
+        if not np.any(cand):
+            return
+        c_idx = idx[cand]
+        accept = self._see_rng.random(len(c_idx)) < gam[cand]
+        if not np.any(accept):
+            return
+        c_idx = c_idx[accept]
+
+        # 放出速度 = 入射イオン速度 (3成分) の逆向き単位ベクトル × SEE 速さ。
+        # 速度ゼロの入射 (通常あり得ない) は方向が定義できないためスキップする
+        v_in = v_new[c_idx]
+        speed = np.sqrt(v_in[:, 0] ** 2 + v_in[:, 1] ** 2 + v_in[:, 2] ** 2)
+        ok = speed > 0.0
+        c_idx, v_in, speed = c_idx[ok], v_in[ok], speed[ok]
+        if c_idx.size == 0:
+            return
+        v_see = -self._see_speed * v_in / speed[:, None]
+
+        pos = sp.x[c_idx]        # プッシュ前の位置 (プラズマ側)
+        elems = sp.elem[c_idx]   # プッシュ前の所属要素
+        el = self.species["electron"]
+        el.x = np.concatenate([el.x, pos])
+        el.v = np.concatenate([el.v, v_see])
+        el.w = np.concatenate([el.w, sp.w[c_idx]])
+        el.elem = np.concatenate([el.elem, elems])
+        self._bary_append(el, self._bary_of(pos, elems))
+        self.see_events += len(c_idx)
+
+        # 表面電荷の収支: 放出電子分 +e·w を吸収位置と同じ P1 射影で加算する
+        contrib = (QE * sp.w[c_idx])[:, None] * l_new[c_idx]
+        self.q_surf += np.bincount(
+            self.tris_dep[elem_new[c_idx]].ravel(),
+            weights=contrib.ravel(),
+            minlength=self.n_nodes,
+        )
+
     def _collect_ions(
         self,
         sp: PicSpecies,
@@ -934,6 +1006,10 @@ class PicSimulation:
                 solid_hit = ~absorbed & self._solid_elem[elem_new]
                 if np.any(solid_hit):
                     self._accumulate_surface_charge(sp, elem_new, l_new, solid_hit)
+                    # 誘電体 SEE (prompts/38): γ>0 の誘電体へのイオン吸収のみ
+                    # (電子の誘電体吸収では発生させない)
+                    if sp.name == "ion" and self._solid_gamma is not None:
+                        self._emit_see_dielectric(sp, v_new, elem_new, l_new, solid_hit)
                 removed = absorbed | solid_hit
             else:
                 removed = absorbed

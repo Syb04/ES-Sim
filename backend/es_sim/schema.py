@@ -45,7 +45,10 @@ class Region(BaseModel):
     voltage_rf: VoltageRF | None = None  # conductor: RF 成分 (PIC のみ使用)
     eps_r: float = 1.0            # dielectric: 比誘電率
     rho: float = 0.0              # charge: 電荷密度 [C/m^3]
-    see_gamma: float = Field(0.0, ge=0, description="conductor: 二次電子放出係数 γ (0 = 無効、PIC のみ使用)")
+    see_gamma: float = Field(
+        0.0, ge=0,
+        description="conductor / dielectric: 二次電子放出係数 γ (0 = 無効、PIC のみ使用)",
+    )
 
     @model_validator(mode="after")
     def _check_polygon_xor_shape(self) -> "Region":

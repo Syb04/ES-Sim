@@ -324,13 +324,22 @@ export default function FieldPanel({
             </>
           )}
           {selected.type === "dielectric" && (
-            <label>
-              比誘電率 εr
-              <CommitNumberInput
-                value={selected.eps_r ?? 1}
-                onCommit={(v) => updateRegion(selected.id, { eps_r: v })}
-              />
-            </label>
+            <>
+              <label>
+                比誘電率 εr
+                <CommitNumberInput
+                  value={selected.eps_r ?? 1}
+                  onCommit={(v) => updateRegion(selected.id, { eps_r: v })}
+                />
+              </label>
+              <label title="イオン衝突時に確率γで二次電子を放出 (PICのみ。0=無効)">
+                二次電子放出係数 γ
+                <CommitNumberInput
+                  value={selected.see_gamma ?? 0}
+                  onCommit={(v) => updateRegion(selected.id, { see_gamma: v })}
+                />
+              </label>
+            </>
           )}
           {selected.type === "charge" && (
             <label>
