@@ -65,6 +65,13 @@ interface Props {
   running: boolean;
   onStart: () => void;
   onStop: () => void;
+  // 「続きから実行」ボタン: 直前の実行が done/stop 済みで現在実行中でなく、かつ前回実行以降に
+  // ジオメトリが編集されていない場合のみ true (App 側で判定する)
+  canContinue: boolean;
+  onContinue: () => void;
+  // true の場合、canContinue=false の理由が「ジオメトリ編集による食い違い」であることを示す
+  // (ヒント文言の出し分けに使う)
+  continueDisabledByProjectChange: boolean;
   started: PicStartedMsg | null;
   frame: PicFrameMsg | null;
   history: PicDiag[];
@@ -150,6 +157,9 @@ export default function PicPanel({
   running,
   onStart,
   onStop,
+  canContinue,
+  onContinue,
+  continueDisabledByProjectChange,
   started,
   frame,
   history,
@@ -620,7 +630,26 @@ export default function PicPanel({
         <button className="secondary" onClick={onStop} disabled={!running}>
           停止
         </button>
+        <button
+          className="secondary"
+          onClick={onContinue}
+          disabled={!canContinue}
+          title={
+            continueDisabledByProjectChange
+              ? "ジオメトリ・プラズマ設定が変更されたため続き実行できません (再度 PIC開始 してください)"
+              : undefined
+          }
+        >
+          続きから実行
+        </button>
       </div>
+      <p className="hint">
+        「続きから実行」は現在のステップ数・フレーム間隔・平均ステップ数・位相ビン数で追加実行します。
+        ジオメトリ・プラズマ設定の変更は続き実行には反映されません
+        (粒子状態・表面電荷・時刻は前回から継続)。
+        {continueDisabledByProjectChange &&
+          " ジオメトリ・プラズマ設定を編集したため、続き実行するには再度「PIC開始」が必要です。"}
+      </p>
 
       {started && (
         <>

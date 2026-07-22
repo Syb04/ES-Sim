@@ -1222,6 +1222,63 @@ class PicSimulation:
 
     # ---- フレーム・実行 -------------------------------------------------------
 
+    def prepare_continue(
+        self,
+        n_steps: int,
+        frame_every: int | None = None,
+        avg_steps: int | None = None,
+        phase_bins: int | None = None,
+    ) -> None:
+        """完了/停止後の状態から追加実行の準備をする (prompts/32)。
+
+        維持するもの: 粒子状態 (x, v, w, elem)・表面電荷 q_surf・時刻 t・
+        step_count・乱数 Generator (SEE/注入/MCC)・注入状態・累計カウンタ。
+        乱数と粒子状態を保持するため「N+M ステップ連続実行」と
+        「N ステップ → continue で M ステップ」の粒子状態はビット単位で一致する
+        (平均系アキュムレータは読み取り専用で物理状態に影響しない)。
+
+        リセットするもの: 診断 history (追加区間分のみ返す。t は通算時刻のまま
+        単調増加)・平均/位相/コレクタのアキュムレータ (次の run_batch が追加区間の
+        設定で再有効化する)。avg_steps / phase_bins が None なら前回設定を踏襲する。
+        警告 (ωpe·dt 等) は再評価せず前回のものを流用する。
+        """
+        self.pic.n_steps = int(n_steps)
+        if frame_every is not None:
+            self.pic.frame_every = int(frame_every)
+        if avg_steps is not None:
+            self.pic.avg_steps = int(avg_steps)
+        if phase_bins is not None:
+            self.pic.phase_bins = int(phase_bins)
+            self._cycle_bins = int(phase_bins)
+            self._cycle_enabled = self._cycle_freq is not None and self._cycle_bins > 0
+            self._cycle_period = 1.0 / self._cycle_freq if self._cycle_enabled else 0.0
+
+        # 診断 history は追加区間分のみ (キー構成は不変)
+        self.history = {k: [] for k in self.history}
+        # 平均・位相・コレクタ系のアキュムレータをリセット
+        self._accum_start = None
+        self._accum_count = 0
+        self._accum = {}
+        self._accum_phi = None
+        self._accum_e = None
+        self._accum_ke_e = None
+        self._accum_ion = None
+        self._cycle_phi = None
+        self._cycle_ne = None
+        self._cycle_ni = None
+        self._cycle_count = None
+        self._cycle_particles = None
+        self._snap_t_start = math.inf
+        self.fields = None
+        self.cycle = None
+        self.collector_result = None
+        if self._collector is not None:
+            self._col_e, self._col_a, self._col_w = [], [], []
+            self._col_count = 0
+            self._col_weight = 0.0
+            self._col_samples = 0
+        # 不動種の堆積キャッシュは維持して良い (粒子状態が変わらない限り有効)
+
     def _make_frame(self, phi: np.ndarray) -> dict:
         """WS 送出用フレーム (JSON 化可能な dict)。粒子は種ごと最大2000点に間引く。"""
         particles = {}

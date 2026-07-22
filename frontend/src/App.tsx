@@ -8,6 +8,7 @@ import ParticlePanel from "./panels/ParticlePanel";
 import PicPanel, { PIC_FIELD_META } from "./panels/PicPanel";
 import type { CyclePicField, PicResultField } from "./panels/PicPanel";
 import { PicClient } from "./picClient";
+import type { PicClientCallbacks } from "./picClient";
 import { useHistory } from "./useHistory";
 import { toDiagArray } from "./types";
 import { mToMm, mmToM } from "./units";
@@ -149,6 +150,13 @@ export default function App() {
   const [picResultField, setPicResultField] = useState<PicResultField>("live");
   const [picLogScale, setPicLogScale] = useState(false);
   const picClientRef = useRef<PicClient | null>(null);
+  // 「続きから実行」ボタンの有効条件その1: 直前の実行が done (または stop) 済みで、
+  // 現在実行中でないこと。start/continue 開始時に false、done 受信時に true にする
+  const [picContinueReady, setPicContinueReady] = useState(false);
+  // 「続きから実行」ボタンの有効条件その2: 前回の PIC 実行以降にジオメトリが編集 (commitProject /
+  // Undo / Redo) されていないこと。サーバー側が保持する状態 (メッシュ・境界条件等) と食い違うため、
+  // 編集されたら続き実行を無効化する。新しい start を送るとサーバー状態も同期し直されるので false に戻す
+  const [picProjectChangedSinceRun, setPicProjectChangedSinceRun] = useState(false);
 
   // done メッセージで受け取った IEDF/IADF コレクタの記録結果。新規実行開始時にリセットする
   const [picCollector, setPicCollector] = useState<PicCollectorResult | null>(null);
@@ -202,6 +210,7 @@ export default function App() {
     setMeshResult(null);
     setProfileLine(null);
     setTraceResult(null); // ジオメトリ変更で解析結果とともに trace 結果も破棄する
+    setPicProjectChangedSinceRun(true); // PIC続き実行はサーバー状態と食い違うため無効化する
   }, [history]);
 
   // --- Undo/Redo ---
@@ -215,6 +224,7 @@ export default function App() {
     setProfileLine(null);
     setTraceResult(null);
     setSelectedRegionId((sel) => ensureSelection(prev, sel));
+    setPicProjectChangedSinceRun(true); // PIC続き実行はサーバー状態と食い違うため無効化する
   }, [history, ensureSelection]);
 
   const doRedo = useCallback(() => {
@@ -227,6 +237,7 @@ export default function App() {
     setProfileLine(null);
     setTraceResult(null);
     setSelectedRegionId((sel) => ensureSelection(next, sel));
+    setPicProjectChangedSinceRun(true); // PIC続き実行はサーバー状態と食い違うため無効化する
   }, [history, ensureSelection]);
 
   // キーボードショートカット: Ctrl+Z (Undo) / Ctrl+Y, Ctrl+Shift+Z (Redo)
@@ -290,6 +301,38 @@ export default function App() {
     }
   };
 
+  // PIC実行中のコールバック生成 (start/continue で共通化)。isContinue が true のときは
+  // done 受信時に history を「置き換え」ではなく既存へ「連結」する (それ以外の挙動は同じ:
+  // 新しい実行区間の started/frame でライブ表示は自然に切り替わり、fields/cycle/collector は
+  // 新しい done の内容で置き換わる)
+  const makePicCallbacks = (isContinue: boolean): PicClientCallbacks => ({
+    onStarted: (msg) => {
+      setPicStarted(msg);
+      setPicFrame(null); // ライブ表示を新しい実行区間の内容に自然に切り替える
+    },
+    onFrame: (msg) => {
+      setPicFrame(msg);
+      setPicHistory((h) => [...h, msg.diag]);
+    },
+    onDone: (msg) => {
+      // バックエンドの history は列ごとの辞書形式なので行ごとの PicDiag[] に変換する
+      // (形式不一致のまま描画するとチャートが例外を投げて画面全体が落ちるため必ず変換を通す)
+      const added = toDiagArray(msg.history);
+      setPicHistory((h) => (isContinue ? [...h, ...added] : added));
+      setPicFields(msg.fields ?? null);
+      setPicCycle(msg.cycle ?? null);
+      setPicCollector(msg.collector ?? null);
+      setPicRunning(false);
+      setPicContinueReady(true); // done (stop 済みも含む) したので続き実行が可能になる
+    },
+    onError: (detail) => {
+      setPicError(detail);
+      setPicRunning(false);
+      setPicContinueReady(false); // エラー後の状態は不定なので続き実行は無効のままにする
+    },
+    onClose: () => setPicRunning(false),
+  });
+
   // PIC開始: WebSocket接続を張り、project.pic (エミッタはフェーズ2の設定と同期) を送信する
   const runPicStart = () => {
     setPicError(null);
@@ -297,6 +340,7 @@ export default function App() {
     setPicFrame(null);
     setPicHistory([]);
     setPicRunning(true);
+    setPicContinueReady(false);
     // 新しい実行を開始したら結果フィールド表示 (前回 done の残骸) をリセットする
     setPicFields(null);
     setPicResultField("live");
@@ -310,29 +354,29 @@ export default function App() {
     setCycleShowParticles(true);
     // IEDF/IADF コレクタ結果も新規実行開始時にリセットする (前回 done の残骸を消す)
     setPicCollector(null);
-    const client = new PicClient({
-      onStarted: (msg) => setPicStarted(msg),
-      onFrame: (msg) => {
-        setPicFrame(msg);
-        setPicHistory((h) => [...h, msg.diag]);
-      },
-      onDone: (msg) => {
-        // バックエンドの history は列ごとの辞書形式なので行ごとの PicDiag[] に変換する
-        // (形式不一致のまま描画するとチャートが例外を投げて画面全体が落ちるため必ず変換を通す)
-        setPicHistory(toDiagArray(msg.history));
-        setPicFields(msg.fields ?? null);
-        setPicCycle(msg.cycle ?? null);
-        setPicCollector(msg.collector ?? null);
-        setPicRunning(false);
-      },
-      onError: (detail) => {
-        setPicError(detail);
-        setPicRunning(false);
-      },
-      onClose: () => setPicRunning(false),
-    });
+    const client = new PicClient(makePicCallbacks(false));
     picClientRef.current = client;
+    // 現在のプロジェクト状態をサーバーへ送るので、続き実行の食い違いフラグをここで解消する
+    setPicProjectChangedSinceRun(false);
     client.start({ ...project, pic: withInjectionEmitter(pic, particles.emitter) });
+  };
+
+  // PIC続きから実行: 保持中のシミュレーション状態 (粒子・表面電荷・時刻・乱数) を維持したまま
+  // 現在の計算設定 (n_steps/frame_every/avg_steps/phase_bins) で追加実行する。
+  // ジオメトリ・プラズマ設定などプロジェクト側の変更はサーバーへは送らないため反映されない。
+  // picHistory はクリアせず、既存の履歴 (フル実行分) の末尾へ追加区間分を連結する
+  const runPicContinue = () => {
+    if (!picClientRef.current || picRunning || !picContinueReady || picProjectChangedSinceRun) return;
+    setPicError(null);
+    setPicRunning(true);
+    setPicContinueReady(false);
+    picClientRef.current.setCallbacks(makePicCallbacks(true));
+    picClientRef.current.continueRun({
+      n_steps: pic.n_steps,
+      frame_every: pic.frame_every,
+      avg_steps: pic.avg_steps ?? null,
+      phase_bins: pic.phase_bins ?? null,
+    });
   };
 
   const runPicStop = () => {
@@ -622,6 +666,10 @@ export default function App() {
   };
 
   const selected = project.geometry.regions.find((r) => r.id === selectedRegionId) ?? null;
+
+  // 「続きから実行」ボタンの有効条件: 直前の実行が done/stop 済みで現在実行中でなく、
+  // かつ前回実行以降にジオメトリが編集されていないこと (health 未接続時も不可)
+  const picCanContinue = !!health && picContinueReady && !picRunning && !picProjectChangedSinceRun;
 
   // 配置済み IEDF/IADF コレクタ線分 (CadCanvas への常時オーバーレイ表示用)
   const collectorLine: [Point, Point] | null = pic.collector
@@ -960,6 +1008,9 @@ export default function App() {
                 running={picRunning}
                 onStart={runPicStart}
                 onStop={runPicStop}
+                canContinue={picCanContinue}
+                onContinue={runPicContinue}
+                continueDisabledByProjectChange={picProjectChangedSinceRun}
                 started={picStarted}
                 frame={picFrame}
                 history={picHistory}

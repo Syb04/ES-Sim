@@ -137,13 +137,16 @@ def lxcat_parse_endpoint(req: LxcatParseRequest) -> LxcatParseResult:
 
 # ---- PIC WebSocket ストリーミング (フェーズ3、仕様書 §9) ----------------------
 
+# 完了/停止後もシミュレーション状態を保持するスロット (プロセス内に1つ、prompts/32)。
+# 新しい start で置き換え、continue で追加実行する
+_last_sim: PicSimulation | None = None
+# start / continue の同時実行を防ぐロック (実行中の要求は拒否する)
+_pic_lock = asyncio.Lock()
+
 
 async def _run_pic_session(ws: WebSocket, project_dict: dict) -> None:
-    """1回の PIC 実行。計算はワーカースレッドで行い、フレームをキュー経由で送出する。"""
-    loop = asyncio.get_running_loop()
-    stop = threading.Event()
-    queue: asyncio.Queue = asyncio.Queue()
-
+    """1回の PIC 実行 (start)。完了/停止後も状態を保持スロットに残す。"""
+    global _last_sim
     try:
         project = Project.model_validate(project_dict)
         # メッシュ生成・行列組み立ても重いのでスレッドで実行
@@ -151,6 +154,38 @@ async def _run_pic_session(ws: WebSocket, project_dict: dict) -> None:
     except Exception as exc:
         await ws.send_json({"type": "error", "detail": str(exc)})
         return
+
+    _last_sim = sim  # 新しい start で保持状態を置き換える
+    await _stream_run(ws, sim)
+
+
+async def _continue_pic_session(ws: WebSocket, msg: dict) -> None:
+    """保持中の状態から追加実行 (continue)。応答は start と同形。"""
+    sim = _last_sim
+    if sim is None:
+        await ws.send_json(
+            {"type": "error", "detail": "保持中の実行状態がありません (先に start してください)"}
+        )
+        return
+    try:
+        n_steps = int(msg.get("n_steps", sim.pic.n_steps))
+        if n_steps <= 0:
+            raise ValueError("n_steps は正の整数を指定してください")
+        frame_every = msg.get("frame_every")
+        avg_steps = msg.get("avg_steps")       # null なら前回設定を踏襲
+        phase_bins = msg.get("phase_bins")     # null なら前回設定を踏襲
+        sim.prepare_continue(n_steps, frame_every, avg_steps, phase_bins)
+    except Exception as exc:
+        await ws.send_json({"type": "error", "detail": str(exc)})
+        return
+    await _stream_run(ws, sim)
+
+
+async def _stream_run(ws: WebSocket, sim: PicSimulation) -> None:
+    """run_batch をワーカースレッドで実行し、started → frame → done を送出する。"""
+    loop = asyncio.get_running_loop()
+    stop = threading.Event()
+    queue: asyncio.Queue = asyncio.Queue()
 
     await ws.send_json(
         {
@@ -246,14 +281,28 @@ async def _run_pic_session(ws: WebSocket, project_dict: dict) -> None:
 
 @app.websocket("/ws/pic")
 async def ws_pic(ws: WebSocket) -> None:
-    """PIC 実行の WebSocket。start コマンドで開始、stop で中断できる。"""
+    """PIC 実行の WebSocket。
+
+    start で新規実行、stop で中断、continue で保持中の状態から追加実行する
+    (完了/停止後も状態はサーバー側に保持され、新しい start で置き換わる)。
+    """
     await ws.accept()
     try:
         while True:
             msg = json.loads(await ws.receive_text())
             cmd = msg.get("cmd")
-            if cmd == "start":
-                await _run_pic_session(ws, msg.get("project", {}))
+            if cmd in ("start", "continue"):
+                if _pic_lock.locked():
+                    # 別接続で実行中の start / continue は拒否する
+                    await ws.send_json(
+                        {"type": "error", "detail": "別の PIC 実行が進行中です"}
+                    )
+                    continue
+                async with _pic_lock:
+                    if cmd == "start":
+                        await _run_pic_session(ws, msg.get("project", {}))
+                    else:
+                        await _continue_pic_session(ws, msg)
             elif cmd == "stop":
                 continue  # 実行中でなければ無視
             else:

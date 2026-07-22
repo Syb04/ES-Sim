@@ -297,7 +297,17 @@ export interface PicErrorMsg {
 export type PicServerMessage = PicStartedMsg | PicFrameMsg | PicDoneMsg | PicErrorMsg;
 
 // client→server コマンド
-export type PicClientCommand = { cmd: "start"; project: Project } | { cmd: "stop" };
+export type PicClientCommand =
+  | { cmd: "start"; project: Project }
+  | { cmd: "stop" }
+  // 保持中の状態から追加実行 (prompts/32)。avg_steps/phase_bins は null なら前回設定を踏襲
+  | {
+      cmd: "continue";
+      n_steps: number;
+      frame_every?: number | null;
+      avg_steps?: number | null;
+      phase_bins?: number | null;
+    };
 
 // CadCanvas でのライブ描画用にまとめたビュー (started の mesh + 最新 frame)
 export interface PicLiveFrame {

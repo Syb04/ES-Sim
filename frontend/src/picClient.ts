@@ -26,14 +26,21 @@ export interface PicClientCallbacks {
 
 export class PicClient {
   private ws: WebSocket | null = null;
-  private readonly cb: PicClientCallbacks;
+  private cb: PicClientCallbacks;
 
   constructor(cb: PicClientCallbacks) {
     this.cb = cb;
   }
 
-  // 接続して start コマンドを送る (project は pic 設定込みで渡すこと)
-  start(project: Project): void {
+  // コールバックを差し替える (continue で同じ接続・インスタンスを使い回しつつ、
+  // 呼び出し側の状態管理を start 時と切り替えたい場合に使う)
+  setCallbacks(cb: PicClientCallbacks): void {
+    this.cb = cb;
+  }
+
+  // WebSocket を新規に張り、接続確立後に onOpenSend で渡されたコマンドを送信する。
+  // メッセージの振り分け (started/frame/done/error → コールバック) は start/continueRun で共通なのでここにまとめる
+  private connect(onOpenSend: (ws: WebSocket) => void): void {
     this.close();
     let ws: WebSocket;
     try {
@@ -44,10 +51,7 @@ export class PicClient {
     }
     this.ws = ws;
 
-    ws.onopen = () => {
-      const cmd: PicClientCommand = { cmd: "start", project };
-      ws.send(JSON.stringify(cmd));
-    };
+    ws.onopen = () => onOpenSend(ws);
 
     ws.onmessage = (ev: MessageEvent<string>) => {
       let msg: PicServerMessage;
@@ -81,6 +85,32 @@ export class PicClient {
       this.ws = null;
       this.cb.onClose?.();
     };
+  }
+
+  // 接続して start コマンドを送る (project は pic 設定込みで渡すこと)
+  start(project: Project): void {
+    this.connect((ws) => {
+      const cmd: PicClientCommand = { cmd: "start", project };
+      ws.send(JSON.stringify(cmd));
+    });
+  }
+
+  // 保持中のシミュレーション状態から追加実行する continue コマンドを送る。
+  // 直前の start/continue と同じ接続が開いたままならそれをそのまま使い (サーバー側は1つの
+  // WebSocketセッション内で start→done→continue のループを回す)、接続が閉じていれば
+  // (ページ再読込やタイムアウト等で切断された場合) 新規接続してから送信する
+  continueRun(opts: {
+    n_steps: number;
+    frame_every?: number;
+    avg_steps?: number | null;
+    phase_bins?: number | null;
+  }): void {
+    const cmd: PicClientCommand = { cmd: "continue", ...opts };
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      this.ws.send(JSON.stringify(cmd));
+      return;
+    }
+    this.connect((ws) => ws.send(JSON.stringify(cmd)));
   }
 
   // stop コマンドを送る (接続していなければ何もしない)
