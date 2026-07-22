@@ -158,6 +158,19 @@ button.danger:hover { background: #b34747; }
 .edge-row .edge-rf-row { display: flex; gap: 4px; margin-top: 3px; }
 .edge-row .edge-rf-row input.rf-compact { width: 56px; }
 
+/* PICパネル: MCC(衝突)プロセス一覧 */
+.mcc-process-list {
+  display: flex; flex-direction: column; gap: 2px; max-height: 110px; overflow-y: auto;
+  margin: 4px 0 6px; font-size: 11px;
+}
+.mcc-process-row {
+  display: flex; gap: 6px; align-items: center; padding: 3px 6px;
+  border: 1px solid var(--border); border-radius: 3px;
+}
+.mcc-process-row .mcc-process-label {
+  flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted);
+}
+
 /* PICパネル: 進捗バー・警告・履歴チャート */
 .pic-progress { height: 8px; background: var(--bg); border: 1px solid var(--border); border-radius: 4px; overflow: hidden; margin: 6px 0; }
 .pic-progress-bar { height: 100%; background: var(--accent); }

@@ -45,6 +45,7 @@ class Region(BaseModel):
     voltage_rf: VoltageRF | None = None  # conductor: RF 成分 (PIC のみ使用)
     eps_r: float = 1.0            # dielectric: 比誘電率
     rho: float = 0.0              # charge: 電荷密度 [C/m^3]
+    see_gamma: float = Field(0.0, ge=0, description="conductor: 二次電子放出係数 γ (0 = 無効、PIC のみ使用)")
 
     @model_validator(mode="after")
     def _check_polygon_xor_shape(self) -> "Region":
@@ -64,6 +65,7 @@ class BoundaryCondition(BaseModel):
     type: Literal["dirichlet"] = "dirichlet"
     voltage: float = 0.0
     voltage_rf: VoltageRF | None = None  # RF 成分 (PIC のみ使用)
+    see_gamma: float = Field(0.0, ge=0, description="二次電子放出係数 γ (0 = 無効、PIC のみ使用)")
 
 
 class Geometry(BaseModel):
@@ -159,6 +161,45 @@ class PicInjection(BaseModel):
     current_a_per_m: float = Field(..., gt=0)
 
 
+# ---- MCC 衝突 (prompts/19、フロントと共通のスキーマ契約) ------------------------
+
+
+class XsProcess(BaseModel):
+    """LXCat 由来の衝突断面積プロセス (パース済み、プロジェクト JSON に埋め込む)。"""
+
+    kind: Literal["elastic", "excitation", "ionization", "isotropic", "backscat"]
+    label: str = ""                # PROCESS 行等から
+    threshold_ev: float = 0.0      # excitation/ionization のみ >0
+    mass_ratio: float = 0.0        # elastic のみ (m/M)。無ければ 0
+    energy_ev: list[float]         # 断面積テーブルのエネルギー [eV] (昇順)
+    sigma_m2: list[float]          # 断面積 [m^2] (energy_ev と同長)
+
+    @model_validator(mode="after")
+    def _check_table(self) -> "XsProcess":
+        if len(self.energy_ev) != len(self.sigma_m2):
+            raise ValueError("energy_ev と sigma_m2 は同じ長さが必要です")
+        if len(self.energy_ev) == 0:
+            raise ValueError("断面積テーブルが空です")
+        return self
+
+
+class MccGas(BaseModel):
+    """背景中性ガスの状態。数密度は n_g = p/(kB·T) で決まる。"""
+
+    name: str = "Ar"
+    pressure_pa: float = Field(..., gt=0, description="ガス圧 [Pa]")
+    temperature_k: float = Field(300.0, gt=0, description="ガス温度 [K]")
+
+
+class MccSettings(BaseModel):
+    """MCC 設定。null なら MCC 無効 (従来の無衝突動作)。"""
+
+    gas: MccGas
+    electron_processes: list[XsProcess] = []  # elastic/excitation/ionization
+    ion_processes: list[XsProcess] = []       # isotropic/backscat
+    seed: int = 0
+
+
 class PicSettings(BaseModel):
     initial_plasma: InitialPlasma | None = None
     injection: PicInjection | None = None
@@ -166,6 +207,8 @@ class PicSettings(BaseModel):
     dt: float | None = Field(None, description="秒。None なら 0.1/ωpe (初期密度から)")
     n_steps: int = Field(2000, gt=0)
     frame_every: int = Field(20, gt=0, description="フレーム送出間隔 (ステップ)")
+    mcc: MccSettings | None = None  # null なら MCC 無効
+    see_energy_ev: float = Field(2.0, ge=0, description="SEE 電子の初期エネルギー [eV]")
 
 
 class Project(BaseModel):
@@ -208,6 +251,18 @@ class ProfileResult(BaseModel):
     s: list[float]                # 弧長 (p1 からの距離) [m]
     v: list[float | None]         # 電位 [V] (領域外は None)
     e_abs: list[float | None]     # |E| [V/m] (領域外は None)
+
+
+class LxcatParseRequest(BaseModel):
+    """POST /lxcat/parse のリクエスト。"""
+
+    text: str
+    species: Literal["electron", "ion"]
+
+
+class LxcatParseResult(BaseModel):
+    processes: list[XsProcess]
+    warnings: list[str]
 
 
 class TraceResult(BaseModel):

@@ -1,4 +1,4 @@
-import type { Health, MeshResult, Point, Project, ProfileResult, SolveResult, TraceResult } from "./types";
+import type { Health, MeshResult, Point, Project, ProfileResult, SolveResult, TraceResult, XsProcess } from "./types";
 
 const BASE = "http://127.0.0.1:8317";
 
@@ -23,4 +23,7 @@ export const api = {
   profile: (project: Project, p1: Point, p2: Point, n = 200): Promise<ProfileResult> =>
     post("/profile", { project, p1, p2, n }),
   trace: (project: Project): Promise<TraceResult> => post("/trace", project),
+  // LXCat形式テキストを断面積プロセス列にパースする (MCC設定のインポート用)
+  lxcatParse: (text: string, species: "electron" | "ion"): Promise<{ processes: XsProcess[]; warnings: string[] }> =>
+    post("/lxcat/parse", { text, species }),
 };

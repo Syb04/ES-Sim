@@ -1,6 +1,17 @@
-import { useEffect, useRef } from "react";
-import { CommitNumberInput } from "../CommitInput";
-import type { Emitter, InitialPlasma, PicDiag, PicFrameMsg, PicInjection, PicSettings, PicStartedMsg } from "../types";
+import { useEffect, useRef, useState } from "react";
+import { api } from "../api";
+import { CommitNumberInput, CommitTextInput } from "../CommitInput";
+import type {
+  Emitter,
+  InitialPlasma,
+  McSettings,
+  PicDiag,
+  PicFrameMsg,
+  PicInjection,
+  PicSettings,
+  PicStartedMsg,
+  XsProcess,
+} from "../types";
 
 /**
  * PICパネル
@@ -32,6 +43,36 @@ const DEFAULT_INITIAL_PLASMA: InitialPlasma = {
   immobile_ions: false,
   seed: 0,
 };
+
+// MCC(背景ガス衝突)設定の既定値。有効チェックを一度オフにしても直前の値を復元できるよう保持する
+const DEFAULT_MCC: McSettings = {
+  gas: { name: "Ar", pressure_pa: 10.0, temperature_k: 300.0 },
+  electron_processes: [],
+  ion_processes: [],
+  seed: 0,
+};
+
+// プロセスラベルは長いことがあるので一覧表示では短縮する (title 属性でフルテキストを見せる)
+function shortLabel(label: string, max = 34): string {
+  return label.length > max ? `${label.slice(0, max - 1)}…` : label;
+}
+
+// LXCatインポート済みの断面積プロセス一覧 (種別・ラベル(短縮)・閾値・点数)
+function ProcessList({ processes }: { processes: XsProcess[] }) {
+  if (processes.length === 0) return <div className="muted">(未読込)</div>;
+  return (
+    <div className="mcc-process-list">
+      {processes.map((p, i) => (
+        <div className="mcc-process-row" key={i} title={p.label}>
+          <span className="tag">{p.kind}</span>
+          <span className="mcc-process-label">{shortLabel(p.label)}</span>
+          <span>{p.threshold_ev.toFixed(2)} eV</span>
+          <span>{p.energy_ev.length} pts</span>
+        </div>
+      ))}
+    </div>
+  );
+}
 
 function emitterSummary(e: Emitter): string {
   if (e.kind === "point") return `点 (${(e.p1[0] * 1000).toFixed(1)}, ${(e.p1[1] * 1000).toFixed(1)} mm), n=${e.n}`;
@@ -78,6 +119,45 @@ export default function PicPanel({
   const updateInjection = (patch: Partial<PicInjection>) => {
     if (!pic.injection) return;
     onChange({ ...pic, injection: { ...pic.injection, ...patch } });
+  };
+
+  // MCC設定。有効チェックを一度オフにしても、再度オンにしたときに直前の値を復元できるよう保持する
+  const mccDefaultsRef = useRef<McSettings>(pic.mcc ?? DEFAULT_MCC);
+  useEffect(() => {
+    if (pic.mcc) mccDefaultsRef.current = pic.mcc;
+  }, [pic.mcc]);
+
+  const updateMcc = (patch: Partial<McSettings>) => {
+    if (!pic.mcc) return;
+    onChange({ ...pic, mcc: { ...pic.mcc, ...patch } });
+  };
+  const updateGas = (patch: Partial<McSettings["gas"]>) => {
+    if (!pic.mcc) return;
+    onChange({ ...pic, mcc: { ...pic.mcc, gas: { ...pic.mcc.gas, ...patch } } });
+  };
+
+  // LXCatインポート (電子/イオン共通)。ファイルテキストを api.lxcatParse に送り、
+  // 成功したら該当プロセス列を置換する。失敗時はエラー文言を表示する
+  const [lxcatWarnings, setLxcatWarnings] = useState<string[]>([]);
+  const [lxcatError, setLxcatError] = useState<string | null>(null);
+  const electronFileRef = useRef<HTMLInputElement>(null);
+  const ionFileRef = useRef<HTMLInputElement>(null);
+
+  const importLxcat = (species: "electron" | "ion", file: File) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const text = String(reader.result ?? "");
+      api
+        .lxcatParse(text, species)
+        .then((res) => {
+          setLxcatError(null);
+          setLxcatWarnings(res.warnings);
+          if (species === "electron") updateMcc({ electron_processes: res.processes });
+          else updateMcc({ ion_processes: res.processes });
+        })
+        .catch((e) => setLxcatError(String(e)));
+    };
+    reader.readAsText(file);
   };
 
   const progressPct = started && started.n_steps > 0 ? Math.min(100, ((frame?.step ?? 0) / started.n_steps) * 100) : 0;
@@ -179,6 +259,103 @@ export default function PicPanel({
         </>
       )}
 
+      <h2>PIC: MCC(衝突)</h2>
+      <div className="field">
+        <span className="label">有効</span>
+        <input
+          type="checkbox"
+          checked={pic.mcc !== null}
+          onChange={(e) => onChange({ ...pic, mcc: e.target.checked ? mccDefaultsRef.current : null })}
+        />
+      </div>
+      {pic.mcc && (
+        <>
+          <div className="field">
+            <span className="label">ガス名</span>
+            <CommitTextInput value={pic.mcc.gas.name} onCommit={(v) => updateGas({ name: v })} />
+          </div>
+          <div className="field">
+            <span className="label">圧力 [Pa]</span>
+            <CommitNumberInput value={pic.mcc.gas.pressure_pa} onCommit={(v) => updateGas({ pressure_pa: v })} />
+          </div>
+          <div className="field">
+            <span className="label">ガス温度 [K]</span>
+            <CommitNumberInput
+              value={pic.mcc.gas.temperature_k}
+              onCommit={(v) => updateGas({ temperature_k: v })}
+            />
+          </div>
+
+          <div className="actions">
+            <button className="secondary" onClick={() => electronFileRef.current?.click()}>
+              電子断面積を読込
+            </button>
+            <button className="secondary" onClick={() => ionFileRef.current?.click()}>
+              イオン断面積を読込
+            </button>
+            <input
+              ref={electronFileRef}
+              type="file"
+              accept=".txt,text/plain"
+              className="file-input"
+              onChange={(e) => {
+                const f = e.target.files?.[0];
+                if (f) importLxcat("electron", f);
+                e.target.value = "";
+              }}
+            />
+            <input
+              ref={ionFileRef}
+              type="file"
+              accept=".txt,text/plain"
+              className="file-input"
+              onChange={(e) => {
+                const f = e.target.files?.[0];
+                if (f) importLxcat("ion", f);
+                e.target.value = "";
+              }}
+            />
+          </div>
+
+          {lxcatError && <div className="error">{lxcatError}</div>}
+          {lxcatWarnings.length > 0 && (
+            <div className="pic-warnings">
+              {lxcatWarnings.map((w, i) => (
+                <div key={i}>警告: {w}</div>
+              ))}
+            </div>
+          )}
+
+          <p className="hint">電子プロセス ({pic.mcc.electron_processes.length})</p>
+          <ProcessList processes={pic.mcc.electron_processes} />
+          <div className="actions">
+            <button className="secondary" onClick={() => updateMcc({ electron_processes: [] })}>
+              電子プロセスをクリア
+            </button>
+          </div>
+
+          <p className="hint">イオンプロセス ({pic.mcc.ion_processes.length})</p>
+          <ProcessList processes={pic.mcc.ion_processes} />
+          <div className="actions">
+            <button className="secondary" onClick={() => updateMcc({ ion_processes: [] })}>
+              イオンプロセスをクリア
+            </button>
+          </div>
+
+          <div className="field">
+            <span className="label">乱数シード</span>
+            <CommitNumberInput value={pic.mcc.seed} onCommit={(v) => updateMcc({ seed: Math.round(v) })} />
+          </div>
+        </>
+      )}
+      <div className="field">
+        <span className="label">SEE初期エネルギー [eV]</span>
+        <CommitNumberInput
+          value={pic.see_energy_ev}
+          onCommit={(v) => onChange({ ...pic, see_energy_ev: v })}
+        />
+      </div>
+
       <h2>PIC: 計算設定</h2>
       <div className="field">
         <span className="label">マクロ粒子数</span>
@@ -261,6 +438,12 @@ export default function PicPanel({
           <div className="kv">
             <span>壁吸収 (電子/イオン)</span>
             <span>{frame.diag.wall_e} / {frame.diag.wall_i}</span>
+          </div>
+          <div className="kv">
+            <span>衝突/電離/SEE (累計)</span>
+            <span>
+              {frame.diag.coll_e ?? "-"} / {frame.diag.ion_events ?? "-"} / {frame.diag.see_events ?? "-"}
+            </span>
           </div>
           <PicHistoryChart history={history} />
         </>

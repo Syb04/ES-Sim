@@ -21,10 +21,11 @@ interface Props {
   domainW: number;
   domainH: number;
   setDomainSize: (w: number, h: number) => void;
-  edgeState: (edgeIndex: number) => { dirichlet: boolean; voltage: number; voltageRf?: VoltageRf };
+  edgeState: (edgeIndex: number) => { dirichlet: boolean; voltage: number; voltageRf?: VoltageRf; seeGamma: number };
   setEdgeNeumann: (edgeIndex: number) => void;
   setEdgeDirichlet: (edgeIndex: number, voltage: number) => void;
   setEdgeVoltageRf: (edgeIndex: number, voltage_rf: VoltageRf | undefined) => void;
+  setEdgeSeeGamma: (edgeIndex: number, see_gamma: number) => void;
   setMeshSize: (size: number) => void;
   meshResult: MeshResult | null;
   selectedRegionId: string | null;
@@ -47,6 +48,7 @@ export default function FieldPanel({
   setEdgeNeumann,
   setEdgeDirichlet,
   setEdgeVoltageRf,
+  setEdgeSeeGamma,
   setMeshSize,
   meshResult,
   selectedRegionId,
@@ -107,6 +109,14 @@ export default function FieldPanel({
                       }
                     />
                     RF
+                  </label>
+                  <label className="rf-check-inline" title="二次電子放出係数 γ">
+                    γ
+                    <CommitNumberInput
+                      className="rf-compact"
+                      value={st.seeGamma}
+                      onCommit={(v) => setEdgeSeeGamma(i, v)}
+                    />
                   </label>
                 </>
               )}
@@ -277,6 +287,13 @@ export default function FieldPanel({
                   </label>
                 </>
               )}
+              <label>
+                二次電子放出係数 γ
+                <CommitNumberInput
+                  value={selected.see_gamma ?? 0}
+                  onCommit={(v) => updateRegion(selected.id, { see_gamma: v })}
+                />
+              </label>
             </>
           )}
           {selected.type === "dielectric" && (

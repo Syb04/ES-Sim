@@ -28,6 +28,7 @@ export interface Region {
   eps_r?: number;   // dielectric
   rho?: number;     // charge
   voltage_rf?: VoltageRf; // conductor: RF重畳 (未指定なら直流のみ)
+  see_gamma?: number; // conductor: 二次電子放出係数 γ (未指定/0 で無効)
 }
 
 // 表示/ヒットテスト用の輪郭ポリゴンを返す。
@@ -51,6 +52,7 @@ export interface BoundaryCondition {
   type: "dirichlet";
   voltage: number;
   voltage_rf?: VoltageRf; // RF重畳 (未指定なら直流のみ)
+  see_gamma?: number; // 二次電子放出係数 γ (未指定/0 で無効)
 }
 
 export interface Geometry {
@@ -107,6 +109,34 @@ export interface PicInjection {
   current_a_per_m: number; // 電流 [A/m] → 毎ステップの実電荷を等分注入
 }
 
+// 断面積プロセスの種別。elastic/excitation/ionization は電子用、isotropic/backscat はイオン用
+export type XsKind = "elastic" | "excitation" | "ionization" | "isotropic" | "backscat";
+
+// LXCat形式からパース済みの断面積プロセス (プロジェクトJSONにそのまま埋め込む)
+export interface XsProcess {
+  kind: XsKind;
+  label: string;         // PROCESS行等から取得した表示用ラベル
+  threshold_ev: number;  // excitation/ionization のみ >0 (elastic/isotropic/backscat は 0)
+  mass_ratio: number;    // elastic のみ m/M。無ければ 0
+  energy_ev: number[];   // 断面積テーブルのエネルギー軸 [eV] (昇順)
+  sigma_m2: number[];    // 断面積テーブル [m^2] (energy_ev と同長)
+}
+
+// MCC(モンテカルロ衝突)用の背景ガス設定
+export interface McGas {
+  name: string;          // 表示用ガス名 (例: "Ar")
+  pressure_pa: number;   // 圧力 [Pa]
+  temperature_k: number; // ガス温度 [K]
+}
+
+// MCC設定。PicSettings.mcc が null なら MCC 無効
+export interface McSettings {
+  gas: McGas;
+  electron_processes: XsProcess[]; // elastic/excitation/ionization
+  ion_processes: XsProcess[];      // isotropic/backscat
+  seed: number;                    // 乱数シード
+}
+
 export interface PicSettings {
   initial_plasma: InitialPlasma | null;
   injection: PicInjection | null;
@@ -114,6 +144,8 @@ export interface PicSettings {
   dt: number | null;    // 秒。null = 0.1/ωpe (初期密度から自動)
   n_steps: number;
   frame_every: number;  // フレーム送出間隔 (ステップ)
+  mcc: McSettings | null;   // null なら MCC(背景ガス衝突) 無効
+  see_energy_ev: number;    // SEE(二次電子放出)電子の初期エネルギー [eV]
 }
 
 // PIC診断 (1ステップ分)
@@ -128,6 +160,10 @@ export interface PicDiag {
   wall_i: number;
   phi_min: number;
   phi_max: number;
+  // MCC/SEE 累計カウンタ。undefined = 未対応バックエンド (後方互換のため optional)
+  coll_e?: number;      // 電子衝突数 (累計)
+  ion_events?: number;  // 電離数 (累計)
+  see_events?: number;  // SEE発生数 (累計)
 }
 
 // PIC診断履歴 (done メッセージの形式)。バックエンド (pic.py) は列ごとの辞書
@@ -141,12 +177,17 @@ export function toDiagArray(h: PicHistoryDict | PicDiag[] | null | undefined): P
   if (!h || !Array.isArray(h.t)) return [];
   const n = h.t.length;
   const col = (a: number[] | undefined, i: number) => (a && Number.isFinite(a[i]) ? a[i] : 0);
+  // MCC/SEE カウンタは optional (未対応バックエンドでは配列自体が無い) なので、
+  // 値が取れない場合は 0 ではなく undefined のままにして「-」表示に委ねる
+  const colOpt = (a: number[] | undefined, i: number): number | undefined =>
+    a && Number.isFinite(a[i]) ? a[i] : undefined;
   const out: PicDiag[] = new Array(n);
   for (let i = 0; i < n; i++) {
     out[i] = {
       t: col(h.t, i), ke_e: col(h.ke_e, i), ke_i: col(h.ke_i, i), fe: col(h.fe, i),
       n_e: col(h.n_e, i), n_i: col(h.n_i, i), wall_e: col(h.wall_e, i), wall_i: col(h.wall_i, i),
       phi_min: col(h.phi_min, i), phi_max: col(h.phi_max, i),
+      coll_e: colOpt(h.coll_e, i), ion_events: colOpt(h.ion_events, i), see_events: colOpt(h.see_events, i),
     };
   }
   return out;

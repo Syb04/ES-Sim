@@ -26,6 +26,7 @@ import numpy as np
 import scipy.sparse.linalg as spla
 
 from .fem import EPS0, _material_arrays, assemble
+from .mcc import MccModel
 from .meshing import generate_mesh
 from .particles import (
     ME,
@@ -179,14 +180,29 @@ class PicSimulation:
             # 毎ステップの実電荷 I·dt を n 個のマクロ粒子へ等分
             self._inj_w = inj.current_a_per_m * self.dt / (QE * inj.emitter.n)
 
+        # ---- MCC (モンテカルロ衝突、prompts/19) ------------------------------
+        # mcc=null なら無効 (従来の無衝突動作と完全一致)
+        self.mcc = MccModel(self.pic.mcc, self.m_ion) if self.pic.mcc is not None else None
+
+        # ---- SEE (二次電子放出) の境界エッジ属性表 ----------------------------
+        mcc_seed = self.pic.mcc.seed if self.pic.mcc is not None else 0
+        self._see_rng = np.random.default_rng(mcc_seed + 12345)
+        self._see_speed = math.sqrt(2.0 * self.pic.see_energy_ev * QE / ME)
+        self._build_see_edges()
+
         # ---- 診断・時刻 -------------------------------------------------------
         self.t = 0.0
         self.step_count = 0
+        # 累計カウンタ (既存フィールドは変更せず追加のみ: フロントの後方互換)
+        self.coll_e = 0      # 電子衝突の累計
+        self.ion_events = 0  # 電離の累計
+        self.see_events = 0  # SEE 発生の累計
         self.history: dict[str, list[float]] = {
             k: []
             for k in (
                 "t", "ke_e", "ke_i", "fe", "n_e", "n_i",
                 "wall_e", "wall_i", "phi_min", "phi_max",
+                "coll_e", "ion_events", "see_events",
             )
         }
         self._f_immobile: dict[str, np.ndarray] = {}  # 不動種の堆積キャッシュ
@@ -200,6 +216,95 @@ class PicSimulation:
                 sp.v -= 0.5 * self.dt * (sp.q / sp.m) * e_at
 
     # ---- 内部処理 -----------------------------------------------------------
+
+    def _build_see_edges(self) -> None:
+        """境界エッジ (隣接 = -1) ごとの SEE 属性表を構築する。
+
+        エッジ両端の節点がともに γ>0 の電極/Dirichlet 辺に属する場合に、
+        γ (両端の最小値)・内向き単位法線・境界からわずかに内側へ置く
+        オフセット量を (要素, ローカルエッジ) で引ける配列に記録する。
+        """
+        self._edge_gamma: np.ndarray | None = None
+        gm_dict = self.mesh.see_gamma
+        if not gm_dict:
+            return
+        gm = np.zeros(self.n_nodes)
+        gm[np.fromiter(gm_dict.keys(), dtype=np.int64)] = np.fromiter(
+            gm_dict.values(), dtype=np.float64
+        )
+        # 境界エッジ: adjacency[t, i] == -1 (頂点 i の対辺)
+        ts, loc = np.nonzero(self.adjacency == -1)
+        n1 = self.tris[ts, (loc + 1) % 3]
+        n2 = self.tris[ts, (loc + 2) % 3]
+        n_opp = self.tris[ts, loc]
+        g_edge = np.minimum(gm[n1], gm[n2])  # 両端とも γ>0 のときのみ >0
+        if not np.any(g_edge > 0.0):
+            return
+        nodes = self.mesh.nodes
+        p1, p2, po = nodes[n1], nodes[n2], nodes[n_opp]
+        mid = 0.5 * (p1 + p2)
+        t_vec = p2 - p1
+        perp = np.stack([-t_vec[:, 1], t_vec[:, 0]], axis=1)
+        # 内向き = 対頂点の側
+        sgn = np.where(np.sum(perp * (po - mid), axis=1) >= 0.0, 1.0, -1.0)
+        nrm = perp * (sgn / np.linalg.norm(perp, axis=1))[:, None]
+        h = np.abs(np.sum((po - mid) * nrm, axis=1))  # エッジから対頂点までの高さ
+
+        m = len(self.tris)
+        self._edge_gamma = np.zeros((m, 3))
+        self._edge_normal = np.zeros((m, 3, 2))
+        self._edge_delta = np.zeros((m, 3))
+        self._edge_gamma[ts, loc] = g_edge
+        self._edge_normal[ts, loc] = nrm
+        self._edge_delta[ts, loc] = 1e-3 * h  # 境界からわずかに内側
+
+    def _emit_see(
+        self,
+        sp: PicSpecies,
+        x_new: np.ndarray,
+        b_elem: np.ndarray,
+        b_loc: np.ndarray,
+        absorbed: np.ndarray,
+    ) -> None:
+        """γ>0 の電極エッジに吸収されたイオンから確率 γ で二次電子を放出する。
+
+        位置 = 吸収位置 (境界エッジとの交点をわずかに内側へ)、
+        速度 = 内向き法線方向に see_energy_ev、重み = 吸収イオンと同じ。
+        sp.x は更新前 (プッシュ前) の位置であることを前提とする。
+        """
+        idx = np.nonzero(absorbed)[0]
+        ea = b_elem[idx]
+        eloc = b_loc[idx]
+        gam = self._edge_gamma[ea, eloc]
+        cand = gam > 0.0
+        if not np.any(cand):
+            return
+        c_idx = idx[cand]
+        ea, eloc = ea[cand], eloc[cand]
+        accept = self._see_rng.random(len(c_idx)) < gam[cand]
+        if not np.any(accept):
+            return
+        c_idx, ea, eloc = c_idx[accept], ea[accept], eloc[accept]
+
+        # 吸収位置: 越えたエッジの重心座標 L=0 を x_prev → x_new で線形補間
+        a, b, c, det = self.coeffs
+        aa, bb, cc, dd = a[ea, eloc], b[ea, eloc], c[ea, eloc], det[ea]
+        xp, xn = sp.x[c_idx], x_new[c_idx]
+        l0 = (aa + bb * xp[:, 0] + cc * xp[:, 1]) / dd
+        l1 = (aa + bb * xn[:, 0] + cc * xn[:, 1]) / dd
+        denom = l0 - l1
+        denom = np.where(np.abs(denom) < 1e-300, 1e-300, denom)
+        frac = np.clip(l0 / denom, 0.0, 1.0)
+        x_hit = xp + frac[:, None] * (xn - xp)
+
+        nrm = self._edge_normal[ea, eloc]
+        pos = x_hit + self._edge_delta[ea, eloc][:, None] * nrm
+        el = self.species["electron"]
+        el.x = np.concatenate([el.x, pos])
+        el.v = np.concatenate([el.v, self._see_speed * nrm])
+        el.w = np.concatenate([el.w, sp.w[c_idx]])
+        el.elem = np.concatenate([el.elem, ea])
+        self.see_events += len(c_idx)
 
     def _sample_uniform(self, rng: np.random.Generator, n: int):
         """ドメイン内 (メッシュ要素上 = 電極領域を除く) の一様分布サンプリング。
@@ -327,10 +432,15 @@ class PicSimulation:
             # 時刻中心化した運動エネルギー: KE(t_n) ≈ ½ m Σ w v(n-1/2)·v(n+1/2)
             ke[sp.name] = 0.5 * sp.m * float(np.sum(sp.w * np.sum(sp.v * v_new, axis=1)))
             x_new = sp.x + dt * v_new
-            elem_new, absorbed, _, _ = _walk_step(self.coeffs, self.adjacency, sp.elem, x_new)
+            elem_new, absorbed, b_elem, b_loc = _walk_step(
+                self.coeffs, self.adjacency, sp.elem, x_new
+            )
             n_abs = int(absorbed.sum())
             if n_abs:
                 sp.wall_absorbed += n_abs
+                # SEE: γ>0 電極へのイオン吸収で二次電子を生成 (sp.x は更新前の位置)
+                if sp.name == "ion" and self._edge_gamma is not None:
+                    self._emit_see(sp, x_new, b_elem, b_loc, absorbed)
                 keep = ~absorbed
                 sp.x = x_new[keep]
                 sp.v = v_new[keep]
@@ -340,6 +450,29 @@ class PicSimulation:
                 sp.x = x_new
                 sp.v = v_new
                 sp.elem = elem_new
+
+        # 5.5. MCC 衝突 (衝突は位置を変えないので所属要素の更新は不要)
+        if self.mcc is not None:
+            el = self.species["electron"]
+            io = self.species["ion"]
+            if len(el.x):
+                res = self.mcc.collide_electrons(el.x, el.v, el.w, el.elem, dt)
+                self.coll_e += res.n_coll
+                self.ion_events += res.n_ionization
+                if res.new_x is not None:
+                    # 電離: 衝突位置に新電子 + 新イオン (ガス温度 Maxwell) を生成
+                    el.x = np.concatenate([el.x, res.new_x])
+                    el.v = np.concatenate([el.v, res.new_v_e])
+                    el.w = np.concatenate([el.w, res.new_w])
+                    el.elem = np.concatenate([el.elem, res.new_elem])
+                    io.x = np.concatenate([io.x, res.new_x.copy()])
+                    io.v = np.concatenate([io.v, res.new_v_i])
+                    io.w = np.concatenate([io.w, res.new_w.copy()])
+                    io.elem = np.concatenate([io.elem, res.new_elem.copy()])
+                    # 不動イオンに追加した場合は堆積キャッシュを無効化
+                    self._f_immobile.pop("ion", None)
+            if io.mobile and len(io.x):
+                self.mcc.collide_ions(io.v, dt)
 
         # 6. 注入
         if self.pic.injection is not None:
@@ -361,6 +494,9 @@ class PicSimulation:
         h["wall_i"].append(io.wall_absorbed)
         h["phi_min"].append(float(phi.min()))
         h["phi_max"].append(float(phi.max()))
+        h["coll_e"].append(self.coll_e)
+        h["ion_events"].append(self.ion_events)
+        h["see_events"].append(self.see_events)
         return phi
 
     # ---- フレーム・実行 -------------------------------------------------------

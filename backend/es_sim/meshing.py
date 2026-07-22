@@ -29,6 +29,8 @@ class Mesh:
     dirichlet: dict[int, float] = field(default_factory=dict)  # 節点番号 -> 電位 [V] (直流分)
     # 節点番号 -> (振幅 [V], 周波数 [Hz], 位相 [deg])。PIC のみ使用 (フェーズ1/2 は無視)
     dirichlet_rf: dict[int, tuple[float, float, float]] = field(default_factory=dict)
+    # 節点番号 -> 二次電子放出係数 γ (>0 の節点のみ)。PIC のみ使用
+    see_gamma: dict[int, float] = field(default_factory=dict)
 
 
 def _add_polygon(points, lc: float):
@@ -95,7 +97,9 @@ def generate_mesh(project: Project) -> Mesh:
             if region.type == "conductor":
                 if region.voltage is None:
                     raise ValueError(f"conductor '{region.id}' に voltage がありません")
-                conductor_curves.append((region.voltage, region.voltage_rf, curves))
+                conductor_curves.append(
+                    (region.voltage, region.voltage_rf, region.see_gamma, curves)
+                )
             else:
                 surf = gmsh.model.geo.addPlaneSurface([loop])
                 region_surfaces.append((i, surf))
@@ -133,6 +137,7 @@ def generate_mesh(project: Project) -> Mesh:
         # ---- Dirichlet 節点 ------------------------------------------------
         dirichlet: dict[int, float] = {}
         dirichlet_rf: dict[int, tuple[float, float, float]] = {}
+        see_gamma: dict[int, float] = {}
 
         def _curve_nodes(curve_tag: int) -> np.ndarray:
             tags, _, _ = gmsh.model.mesh.getNodes(1, curve_tag, includeBoundary=True)
@@ -146,20 +151,27 @@ def generate_mesh(project: Project) -> Mesh:
             else:
                 dirichlet_rf.pop(n, None)
 
+        def _assign_gamma(n: int, gamma: float) -> None:
+            """節点に SEE 係数 γ を設定する (共有節点は最大値を採用)。"""
+            if gamma > 0.0:
+                see_gamma[n] = max(see_gamma.get(n, 0.0), gamma)
+
         # 外周エッジの境界条件 (エッジ i は outer_curves[i])
         for bc in geo.boundaries:
             for edge in bc.edges:
                 for n in _curve_nodes(outer_curves[edge]):
                     _assign(int(n), bc.voltage, bc.voltage_rf)
+                    _assign_gamma(int(n), bc.see_gamma)
 
         # 電極輪郭 (電極の指定を優先して上書き)
-        for voltage, rf, curves in conductor_curves:
+        for voltage, rf, gamma, curves in conductor_curves:
             for c in curves:
                 for n in _curve_nodes(c):
                     _assign(int(n), voltage, rf)
+                    _assign_gamma(int(n), gamma)
 
         return Mesh(nodes=nodes, triangles=triangles,
                     tri_region=tri_region, dirichlet=dirichlet,
-                    dirichlet_rf=dirichlet_rf)
+                    dirichlet_rf=dirichlet_rf, see_gamma=see_gamma)
     finally:
         gmsh.finalize()

@@ -54,6 +54,8 @@ const DEFAULT_PIC: PicSettings = {
   dt: null,
   n_steps: 2000,
   frame_every: 20,
+  mcc: null,
+  see_energy_ev: 2.0,
 };
 
 // pic.injection.emitter は常にフェーズ2 (粒子) パネルの現在のエミッタ設定で上書きしてから
@@ -312,9 +314,13 @@ export default function App() {
   };
 
   // --- 境界条件 (4辺: 0=下,1=右,2=上,3=左) ---
-  const edgeState = (edgeIndex: number): { dirichlet: boolean; voltage: number; voltageRf?: VoltageRf } => {
+  const edgeState = (
+    edgeIndex: number,
+  ): { dirichlet: boolean; voltage: number; voltageRf?: VoltageRf; seeGamma: number } => {
     const b = project.geometry.boundaries.find((b) => b.edges.includes(edgeIndex));
-    return b ? { dirichlet: true, voltage: b.voltage, voltageRf: b.voltage_rf } : { dirichlet: false, voltage: 0 };
+    return b
+      ? { dirichlet: true, voltage: b.voltage, voltageRf: b.voltage_rf, seeGamma: b.see_gamma ?? 0 }
+      : { dirichlet: false, voltage: 0, seeGamma: 0 };
   };
 
   const setEdgeNeumann = (edgeIndex: number) => {
@@ -348,6 +354,20 @@ export default function App() {
         ...p.geometry,
         boundaries: p.geometry.boundaries.map((b) =>
           b.edges.includes(edgeIndex) ? { ...b, voltage_rf } : b,
+        ),
+      },
+    });
+  };
+
+  // 境界条件の二次電子放出係数 γ (対象エッジが Dirichlet でない場合は何もしない)
+  const setEdgeSeeGamma = (edgeIndex: number, see_gamma: number) => {
+    const p = projectRef.current;
+    commitProject({
+      ...p,
+      geometry: {
+        ...p.geometry,
+        boundaries: p.geometry.boundaries.map((b) =>
+          b.edges.includes(edgeIndex) ? { ...b, see_gamma } : b,
         ),
       },
     });
@@ -509,7 +529,8 @@ export default function App() {
         const loadedParticles = (obj as Project).particles;
         setParticles(loadedParticles ?? DEFAULT_PARTICLES);
         const loadedPic = (obj as Project).pic;
-        setPic(loadedPic ?? DEFAULT_PIC);
+        // mcc/see_energy_ev が無い旧形式のファイルでも安全に読み込めるよう、既定値をベースに合成する
+        setPic(loadedPic ? { ...DEFAULT_PIC, ...loadedPic } : DEFAULT_PIC);
         setSelectedRegionId(null);
         setError(null);
       } catch (err) {
@@ -716,6 +737,7 @@ export default function App() {
                 setEdgeNeumann={setEdgeNeumann}
                 setEdgeDirichlet={setEdgeDirichlet}
                 setEdgeVoltageRf={setEdgeVoltageRf}
+                setEdgeSeeGamma={setEdgeSeeGamma}
                 setMeshSize={setMeshSize}
                 meshResult={meshResult}
                 selectedRegionId={selectedRegionId}

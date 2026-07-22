@@ -1,0 +1,34 @@
+SYNTHETIC LXCAT-LIKE ION DATA (ES-Sim test fixture)
+Typeless SPECIES:/PROCESS: block format (Phelps-like). Not real cross sections.
+
+xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+DATABASE:         Synthetic
+xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+
+************************************************************
+
+********************** Ar **********************
+
+SPECIES: Ar^+ / Ar
+PROCESS: Ar+ + Ar -> , Backscat
+PARAM.:  Mi = 39.948, Mi/M = 1, complete set
+COMMENT: synthetic charge exchange (backward scattering).
+UPDATED: 2026-01-01 00:00:00
+COLUMNS: Energy (eV) | Cross section (m2)
+-----------------------------
+ 0.000000e+0	5.000000e-19
+ 1.000000e+0	5.000000e-19
+ 1.000000e+2	4.000000e-19
+-----------------------------
+
+SPECIES: Ar^+ / Ar
+PROCESS: Ar+ + Ar -> , Isotropic
+PARAM.:  Mi = 39.948, Mi/M = 1, complete set
+COMMENT: synthetic isotropic elastic scattering.
+COLUMNS: Energy (eV) | Cross section (m2)
+-----------------------------
+ 0.000000e+0	3.000000e-19
+ 1.000000e+0	3.000000e-19
+ 1.000000e+2	2.000000e-19
+-----------------------------
+xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx

@@ -17,11 +17,14 @@ from fastapi.middleware.cors import CORSMiddleware
 from . import __version__
 from .backend import gpu_available
 from .fem import solve
+from .lxcat import parse_lxcat
 from .meshing import generate_mesh
 from .particles import trace
 from .pic import PicSimulation
 from .postprocess import sample_line
 from .schema import (
+    LxcatParseRequest,
+    LxcatParseResult,
     MeshResult,
     Project,
     ProfileRequest,
@@ -120,6 +123,16 @@ def trace_endpoint(project: Project) -> TraceResult:
         final_angle_deg=result.final_angle_deg.tolist(),
         dt=result.dt,
     )
+
+
+@app.post("/lxcat/parse", response_model=LxcatParseResult)
+def lxcat_parse_endpoint(req: LxcatParseRequest) -> LxcatParseResult:
+    """LXCat 形式テキストをパースして断面積プロセス一覧を返す (prompts/19)。"""
+    try:
+        processes, warnings = parse_lxcat(req.text, req.species)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return LxcatParseResult(processes=processes, warnings=warnings)
 
 
 # ---- PIC WebSocket ストリーミング (フェーズ3、仕様書 §9) ----------------------
