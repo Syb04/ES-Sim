@@ -256,6 +256,9 @@ class PicSettings(BaseModel):
     # 完了時に返す時間平均フィールドの平均ステップ数 (最終 N ステップ、prompts/26)。
     # None なら全ステップの最後の 25% を平均する
     avg_steps: int | None = Field(None, gt=0)
+    # RF 1周期の位相分解データ (アニメーション用) の位相ビン数 (prompts/28)。
+    # 0 で無効。RF (voltage_rf) が未設定の場合も無効
+    phase_bins: int = Field(40, ge=0)
     # 鏡面反射する domain 外周エッジ番号のリスト (エッジ i は頂点 i → i+1)。
     # 到達粒子は吸収せず法線速度成分を反転して境界内へ折り返す (壁カウンタに含めない)。
     # 当該エッジは境界条件なし (Neumann) を想定。2D ストリップで 1D 問題を模擬する用途

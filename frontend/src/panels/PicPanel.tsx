@@ -5,6 +5,7 @@ import type {
   Emitter,
   InitialPlasma,
   McSettings,
+  PicCycle,
   PicDiag,
   PicFields,
   PicFrameMsg,
@@ -13,6 +14,15 @@ import type {
   PicStartedMsg,
   XsProcess,
 } from "../types";
+
+// 周期アニメーションで表示可能なフィールド (すべて節点値)
+export type CyclePicField = "phi" | "n_e" | "n_i";
+
+export const CYCLE_FIELD_OPTIONS: { value: CyclePicField; label: string }[] = [
+  { value: "phi", label: "電位 [V]" },
+  { value: "n_e", label: "電子密度 [m^-3]" },
+  { value: "n_i", label: "イオン密度 [m^-3]" },
+];
 
 // PIC「結果表示」セレクトの選択肢。"live" はライブ (最終フレーム) 表示、それ以外は
 // done メッセージの fields から時間平均フィールドをカラーマップで描画する対象を表す
@@ -65,6 +75,22 @@ interface Props {
   onResultFieldChange: (v: PicResultField) => void;
   logScale: boolean;
   onLogScaleChange: (v: boolean) => void;
+
+  // done で受信した RF 1周期の位相分解データ (RFなし/phase_bins=0 では null)。
+  // 新しい実行開始時に App 側で null にリセットされる
+  cycle: PicCycle | null;
+  cycleField: CyclePicField;
+  onCycleFieldChange: (v: CyclePicField) => void;
+  cycleLogScale: boolean;
+  onCycleLogScaleChange: (v: boolean) => void;
+  cyclePlaying: boolean;
+  onCyclePlayingChange: (v: boolean) => void;
+  cycleBinIndex: number;
+  onCycleBinIndexChange: (v: number) => void;
+  cycleFps: number;
+  onCycleFpsChange: (v: number) => void;
+  cycleShowParticles: boolean;
+  onCycleShowParticlesChange: (v: boolean) => void;
 }
 
 const DEFAULT_INITIAL_PLASMA: InitialPlasma = {
@@ -128,6 +154,19 @@ export default function PicPanel({
   onResultFieldChange,
   logScale,
   onLogScaleChange,
+  cycle,
+  cycleField,
+  onCycleFieldChange,
+  cycleLogScale,
+  onCycleLogScaleChange,
+  cyclePlaying,
+  onCyclePlayingChange,
+  cycleBinIndex,
+  onCycleBinIndexChange,
+  cycleFps,
+  onCycleFpsChange,
+  cycleShowParticles,
+  onCycleShowParticlesChange,
 }: Props) {
   // 有効チェックを一度オフにしても、再度オンにしたときに直前の値を復元できるよう保持する
   const plasmaDefaultsRef = useRef<InitialPlasma>(pic.initial_plasma ?? DEFAULT_INITIAL_PLASMA);
@@ -449,6 +488,13 @@ export default function PicPanel({
           }}
         />
       </div>
+      <div className="field">
+        <span className="label">位相ビン数 (周期アニメ用、0=無効)</span>
+        <CommitNumberInput
+          value={pic.phase_bins ?? 40}
+          onCommit={(v) => onChange({ ...pic, phase_bins: Math.max(0, Math.round(v)) })}
+        />
+      </div>
 
       <div className="actions">
         <button onClick={onStart} disabled={!canRun || running}>
@@ -535,6 +581,24 @@ export default function PicPanel({
         </>
       )}
 
+      {cycle && (
+        <PicCyclePlayer
+          cycle={cycle}
+          field={cycleField}
+          onFieldChange={onCycleFieldChange}
+          logScale={cycleLogScale}
+          onLogScaleChange={onCycleLogScaleChange}
+          playing={cyclePlaying}
+          onPlayingChange={onCyclePlayingChange}
+          binIndex={cycleBinIndex}
+          onBinIndexChange={onCycleBinIndexChange}
+          fps={cycleFps}
+          onFpsChange={onCycleFpsChange}
+          showParticles={cycleShowParticles}
+          onShowParticlesChange={onCycleShowParticlesChange}
+        />
+      )}
+
       {error && (
         <>
           <h2>PICエラー</h2>
@@ -607,6 +671,105 @@ function PicHistoryChart({ history }: { history: PicDiag[] }) {
         <span><span className="swatch" style={{ background: "#6fd08c" }} />全E</span>
         <span><span className="swatch" style={{ background: "#d8dce4" }} />粒子数</span>
       </div>
+    </>
+  );
+}
+
+interface PicCyclePlayerProps {
+  cycle: PicCycle;
+  field: CyclePicField;
+  onFieldChange: (v: CyclePicField) => void;
+  logScale: boolean;
+  onLogScaleChange: (v: boolean) => void;
+  playing: boolean;
+  onPlayingChange: (v: boolean) => void;
+  binIndex: number;
+  onBinIndexChange: (v: number) => void;
+  fps: number;
+  onFpsChange: (v: number) => void;
+  showParticles: boolean;
+  onShowParticlesChange: (v: boolean) => void;
+}
+
+// PIC: 周期アニメーションプレイヤー。RF 1周期分の位相分解データ (cycle) を
+// 再生/一時停止・位相スライダー・再生速度で辿る UI (実際のビン送り・描画は App/CadCanvas 側で行う)。
+// このコンポーネントは選択状態の表示・入力のみを担う
+function PicCyclePlayer({
+  cycle,
+  field,
+  onFieldChange,
+  logScale,
+  onLogScaleChange,
+  playing,
+  onPlayingChange,
+  binIndex,
+  onBinIndexChange,
+  fps,
+  onFpsChange,
+  showParticles,
+  onShowParticlesChange,
+}: PicCyclePlayerProps) {
+  const bin = Math.min(binIndex, cycle.bins - 1);
+  const phaseDeg = (bin / cycle.bins) * 360;
+  const tInBin = (bin / cycle.bins) * cycle.period_s;
+
+  return (
+    <>
+      <h2>PIC: 周期アニメーション</h2>
+      <div className="field">
+        <span className="label">表示フィールド</span>
+        <select value={field} onChange={(e) => onFieldChange(e.target.value as CyclePicField)}>
+          {CYCLE_FIELD_OPTIONS.map((o) => (
+            <option key={o.value} value={o.value}>{o.label}</option>
+          ))}
+        </select>
+      </div>
+      <div className="field">
+        <span className="label">対数スケール</span>
+        <input
+          type="checkbox"
+          checked={logScale}
+          onChange={(e) => onLogScaleChange(e.target.checked)}
+        />
+      </div>
+      <div className="field">
+        <span className="label">粒子スナップショット表示</span>
+        <input
+          type="checkbox"
+          checked={showParticles}
+          onChange={(e) => onShowParticlesChange(e.target.checked)}
+        />
+      </div>
+
+      <div className="actions">
+        <button className="secondary" onClick={() => onPlayingChange(!playing)}>
+          {playing ? "一時停止" : "再生"}
+        </button>
+        <select value={fps} onChange={(e) => onFpsChange(Number(e.target.value))}>
+          <option value={5}>5 fps</option>
+          <option value={10}>10 fps</option>
+          <option value={20}>20 fps</option>
+        </select>
+      </div>
+
+      <div className="field">
+        <span className="label">位相 (bin {bin + 1}/{cycle.bins})</span>
+        <input
+          type="range"
+          min={0}
+          max={cycle.bins - 1}
+          step={1}
+          value={bin}
+          onChange={(e) => {
+            onPlayingChange(false); // スライダー操作で明示的に位相を選んだら再生は止める
+            onBinIndexChange(Number(e.target.value));
+          }}
+        />
+      </div>
+      <p className="hint">
+        位相角 {phaseDeg.toFixed(1)}° / ビン内時刻 {(tInBin * 1e9).toFixed(2)} ns
+        (周期 {(cycle.period_s * 1e9).toFixed(2)} ns)
+      </p>
     </>
   );
 }

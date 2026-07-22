@@ -177,6 +177,27 @@ class PicSimulation:
                         "メッシュがデバイ長を解像していません"
                     )
 
+        # ---- RF 1周期の位相分解 (prompts/28) ----------------------------------
+        # RF 周波数は boundaries / conductor 領域の voltage_rf から最初に見つかった
+        # ものを使う。無ければ (または phase_bins=0 なら) cycle 機能は無効
+        self._cycle_freq = self._find_rf_freq()
+        self._cycle_bins = int(self.pic.phase_bins)
+        self._cycle_enabled = self._cycle_freq is not None and self._cycle_bins > 0
+        self._cycle_period = 1.0 / self._cycle_freq if self._cycle_enabled else 0.0
+        if self._cycle_enabled:
+            # 平均区間が RF 1周期より短いとステップ数 0 の位相ビンが生じるため警告
+            avg = (
+                self.pic.avg_steps
+                if self.pic.avg_steps is not None
+                else max(1, self.pic.n_steps // 4)
+            )
+            avg = min(avg, self.pic.n_steps)
+            if avg * self.dt < self._cycle_period:
+                self.warnings.append(
+                    f"位相分解平均の区間 {avg * self.dt:.3g} s が RF 1周期 "
+                    f"{self._cycle_period:.3g} s より短いため、空の位相ビンが生じます"
+                )
+
         # ---- 初期プラズマ装荷 -------------------------------------------------
         # 電子・イオンを同一位置に装荷して初期の厳密な電気的中性を保つ (quiet start)
         self.species: dict[str, PicSpecies] = {}
@@ -250,6 +271,16 @@ class PicSimulation:
         self._accum_ion: np.ndarray | None = None
         # run_batch 完了時の時間平均フィールド (averaged_fields() の結果)
         self.fields: dict | None = None
+        # 位相分解アキュムレータ (prompts/28、enable_density_accum で確保)
+        self._cycle_phi: np.ndarray | None = None    # (bins, N)
+        self._cycle_ne: np.ndarray | None = None     # (bins, N) 節点重み積算
+        self._cycle_ni: np.ndarray | None = None
+        self._cycle_count: np.ndarray | None = None  # (bins,) ビンごとのステップ数
+        # 最後の1周期の粒子スナップショット (run_batch で確保)
+        self._cycle_particles: dict[str, list] | None = None
+        self._snap_t_start = math.inf
+        # run_batch 完了時の位相分解データ (cycle_data() の結果)
+        self.cycle: dict | None = None
         # 節点集中面積 = Σ隣接要素面積/3 (averaged_density の規格化に使う)。
         # 周期境界では正準節点番号で積むため、スレーブ節点の面積は 0 になる
         self._node_area = np.bincount(
@@ -285,6 +316,24 @@ class PicSimulation:
                 sp.v[:, :2] -= 0.5 * self.dt * (sp.q / sp.m) * e_at
 
     # ---- 内部処理 -----------------------------------------------------------
+
+    def _find_rf_freq(self) -> float | None:
+        """boundaries / conductor 領域の voltage_rf から最初の RF 周波数を返す。
+
+        複数あれば最初の1つ (boundaries 優先)。無ければ None (cycle 機能無効)。
+        """
+        for bc in self.project.geometry.boundaries:
+            if bc.voltage_rf is not None:
+                return bc.voltage_rf.freq_hz
+        for region in self.project.geometry.regions:
+            if region.type == "conductor" and region.voltage_rf is not None:
+                return region.voltage_rf.freq_hz
+        return None
+
+    def _phase_bin(self, t: float) -> int:
+        """時刻 t の RF 位相ビン番号 bin = floor((t mod T)/T × bins) を返す。"""
+        frac = (t % self._cycle_period) / self._cycle_period
+        return min(int(frac * self._cycle_bins), self._cycle_bins - 1)
 
     def _build_see_edges(self) -> None:
         """境界エッジ (隣接 = -1) ごとの SEE 属性表を構築する。
@@ -827,7 +876,7 @@ class PicSimulation:
 
         # 節点密度・時間平均フィールド (enable_density_accum 以後、毎ステップ積算)
         if accumulating:
-            self._accumulate_fields(phi, ex, ey)
+            self._accumulate_fields(phi, ex, ey, t)
 
         # 診断記録 (毎ステップ)
         el, io = self.species["electron"], self.species["ion"]
@@ -866,28 +915,24 @@ class PicSimulation:
         self._accum_e = np.zeros((len(self.tris), 2))
         self._accum_ke_e = np.zeros(self.n_nodes)
         self._accum_ion = np.zeros(self.n_nodes)
+        # 位相分解アキュムレータ (RF あり + phase_bins > 0 のときのみ、prompts/28)
+        if self._cycle_enabled:
+            nb = self._cycle_bins
+            self._cycle_phi = np.zeros((nb, self.n_nodes))
+            self._cycle_ne = np.zeros((nb, self.n_nodes))
+            self._cycle_ni = np.zeros((nb, self.n_nodes))
+            self._cycle_count = np.zeros(nb, dtype=np.int64)
 
-    def _accumulate_density(self) -> None:
-        """1ステップ分の節点重み (Σ w_p L_i) を種ごとに積算する。
-
-        重心座標は walk のキャッシュを再利用する (このステップ終端の位置と一致)。
-        """
-        for name, sp in self.species.items():
-            if len(sp.x) == 0:
-                continue
-            l = self._bary_cached(sp)
-            contrib = sp.w[:, None] * l
-            self._accum[name] += np.bincount(
-                self._nidx_cached(sp).ravel(), weights=contrib.ravel(), minlength=self.n_nodes
-            )
-        self._accum_count += 1
-
-    def _accumulate_fields(self, phi: np.ndarray, ex: np.ndarray, ey: np.ndarray) -> None:
+    def _accumulate_fields(
+        self, phi: np.ndarray, ex: np.ndarray, ey: np.ndarray, t_step: float
+    ) -> None:
         """1ステップ分のフィールドと密度を積算する (平均区間のみ呼ばれる)。
 
         - φ (節点)・E ベクトル (要素) はそのまま加算
         - 電子温度用に Σ w·L_i·(½m|v|²) (3速度成分) を節点へ散布
-        - 密度は従来の _accumulate_density (カウンタもここで進む)
+        - 種ごとの節点重み (Σ w_p L_i) は1回だけ散布し、全体平均 (_accum) と
+          位相ビン (RF あり) の両方で共有する。重心座標は walk のキャッシュを再利用
+        - t_step はこのステップの開始時刻 (φ の評価時刻。位相ビンの割り当てに使う)
         """
         self._accum_phi += phi
         self._accum_e[:, 0] += ex
@@ -899,7 +944,28 @@ class PicSimulation:
             self._accum_ke_e += np.bincount(
                 self._nidx_cached(el).ravel(), weights=contrib.ravel(), minlength=self.n_nodes
             )
-        self._accumulate_density()
+
+        # RF 位相ビン (cycle 無効なら b = -1 でスキップ)
+        b = -1
+        if self._cycle_phi is not None:
+            b = self._phase_bin(t_step)
+            self._cycle_phi[b] += phi
+            self._cycle_count[b] += 1
+
+        for name, sp in self.species.items():
+            if len(sp.x) == 0:
+                continue
+            contrib = sp.w[:, None] * self._bary_cached(sp)
+            vec = np.bincount(
+                self._nidx_cached(sp).ravel(), weights=contrib.ravel(), minlength=self.n_nodes
+            )
+            self._accum[name] += vec
+            if b >= 0:
+                if name == "electron":
+                    self._cycle_ne[b] += vec
+                elif name == "ion":
+                    self._cycle_ni[b] += vec
+        self._accum_count += 1
 
     def averaged_density(self) -> dict[str, np.ndarray]:
         """種ごとの時間平均節点密度 [m^-3] を返す。
@@ -966,6 +1032,72 @@ class PicSimulation:
             "avg_steps": cnt,
         }
 
+    # ---- RF 1周期の位相分解 (prompts/28) ---------------------------------------
+
+    def _snapshot_particles(self, t_step: float) -> None:
+        """最後の1周期中、各位相ビンに最初に該当したステップの粒子位置を保存する。
+
+        種ごとに最大 1000 点へ間引く (フレーム送出と同じストライド間引き)。
+        """
+        b = self._phase_bin(t_step)
+        for name in ("electron", "ion"):
+            if self._cycle_particles[name][b] is not None:
+                continue
+            sp = self.species[name]
+            n = len(sp.x)
+            if n > 1000:
+                stride = int(math.ceil(n / 1000))
+                pts = sp.x[::stride].copy()
+            else:
+                pts = sp.x.copy()
+            self._cycle_particles[name][b] = pts
+
+    def cycle_data(self) -> dict | None:
+        """RF 1周期の位相分解データを返す (WS done の cycle、prompts/28)。
+
+        RF 未設定・phase_bins=0・平均区間で未積算なら None。
+          bins:      位相ビン数
+          period_s:  RF 周期 [s]
+          phi:       (bins, N) 位相分解平均の電位 [V]
+          n_e / n_i: (bins, N) 同 密度 [m^-3]
+          particles: 種ごとの最後の1周期の生スナップショット (bins × ≤1000点)
+        ステップ数 0 の位相ビンはゼロのまま返す (平均区間が1周期以上あれば
+        通常発生しない。不足時は started に警告済み)。
+        """
+        if not self._cycle_enabled or self._cycle_phi is None:
+            return None
+        if int(self._cycle_count.sum()) == 0:
+            return None
+        # ステップ数 0 のビンはゼロ除算を避ける (積算値も 0 なので結果は 0)
+        cnt = np.maximum(self._cycle_count, 1)[:, None].astype(np.float64)
+        phi = self._cycle_phi / cnt
+        na = np.where(self._node_area > 0.0, self._node_area, 1.0)
+        n_e = self._cycle_ne / (cnt * na[None, :])
+        n_i = self._cycle_ni / (cnt * na[None, :])
+        if self.canon is not None:
+            # 周期境界: スレーブ節点へマスター値をコピー (表示互換)
+            n_e = n_e[:, self.canon]
+            n_i = n_i[:, self.canon]
+
+        particles: dict[str, list] = {}
+        empty = np.zeros((0, 2))
+        for name in ("electron", "ion"):
+            snaps = (
+                self._cycle_particles[name]
+                if self._cycle_particles is not None
+                else [None] * self._cycle_bins
+            )
+            particles[name] = [s if s is not None else empty for s in snaps]
+
+        return {
+            "bins": self._cycle_bins,
+            "period_s": self._cycle_period,
+            "phi": phi,
+            "n_e": n_e,
+            "n_i": n_i,
+            "particles": particles,
+        }
+
     # ---- フレーム・実行 -------------------------------------------------------
 
     def _make_frame(self, phi: np.ndarray) -> dict:
@@ -1008,15 +1140,29 @@ class PicSimulation:
             avg = min(avg, self.pic.n_steps)
             self.enable_density_accum(self.step_count + self.pic.n_steps - avg + 1)
 
+        # 粒子スナップショット: 実行の最後の1周期を対象にする (prompts/28)
+        if self._cycle_enabled:
+            self._cycle_particles = {
+                "electron": [None] * self._cycle_bins,
+                "ion": [None] * self._cycle_bins,
+            }
+            self._snap_t_start = (
+                self.t + self.pic.n_steps * self.dt - self._cycle_period
+            )
+
         frames: list[dict] = []
         for _ in range(self.pic.n_steps):
             if should_stop is not None and should_stop():
                 break
             phi = self.step()
+            if self._cycle_enabled and self.t - self.dt >= self._snap_t_start - 1e-30:
+                # ステップ開始時刻の位相ビンで、粒子位置 (ステップ終端) を保存する
+                self._snapshot_particles(self.t - self.dt)
             if self.step_count % self.pic.frame_every == 0:
                 frame = self._make_frame(phi)
                 frames.append(frame)
                 if callback is not None:
                     callback(frame)
         self.fields = self.averaged_fields()
+        self.cycle = self.cycle_data()
         return self.history, frames

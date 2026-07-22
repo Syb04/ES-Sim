@@ -203,6 +203,24 @@ async def _run_pic_session(ws: WebSocket, project_dict: dict) -> None:
                 k: (v.tolist() if isinstance(v, np.ndarray) else v)
                 for k, v in sim.fields.items()
             }
+        # RF 1周期の位相分解データ (prompts/28)。RF なし・phase_bins=0 なら省略。
+        # ペイロード削減のため数値は float32 精度に丸めて JSON 化する
+        if sim.cycle is not None:
+            def _f32(arr) -> list:
+                return np.asarray(arr, dtype=np.float32).tolist()
+
+            c = sim.cycle
+            done_msg["cycle"] = {
+                "bins": c["bins"],
+                "period_s": c["period_s"],
+                "phi": _f32(c["phi"]),
+                "n_e": _f32(c["n_e"]),
+                "n_i": _f32(c["n_i"]),
+                "particles": {
+                    name: [_f32(s) for s in snaps]
+                    for name, snaps in c["particles"].items()
+                },
+            }
         await ws.send_json(done_msg)
     except Exception as exc:
         try:

@@ -28,13 +28,20 @@ export type Tool = "select" | "polyline" | "rect" | "circle" | "profile" | "emit
 export type FieldView = "v" | "e_abs";
 
 // PIC結果フィールド表示 (done後の「結果表示」セレクトでライブ以外を選んだ場合の描画データ)。
-// 値配列・節点/要素の別・単位・対数フラグを1つにまとめて渡すことで、描画分岐の散乱を避ける
+// 値配列・節点/要素の別・単位・対数フラグを1つにまとめて渡すことで、描画分岐の散乱を避ける。
+// 周期アニメーション再生時もこの型を流用し (App側で優先的に構築して渡す)、
+// fixedRange/particles を指定することで「現在ビンの値+固定min/max+粒子」を表せるようにする
 export interface PicFieldView {
   mesh: MeshResult;
   values: number[]; // nodeBased なら節点値 (長さ=nodes.length)、そうでなければ要素値 (長さ=triangles.length)
   nodeBased: boolean; // true: 節点値 (要素は3節点平均で塗る)。false: 要素値 (e_abs)
   unit: string; // カラーバーに表示する単位
   log: boolean; // 対数スケール表示 (値≤0は最小正値にクランプ。全て≤0なら線形にフォールバック)
+  // 周期アニメーション用: 指定時はカラースケール (min/max/対数クランプ用の最小正値) をこの値に固定する
+  // (未指定時は values から都度自動計算する、従来通りの挙動)
+  fixedRange?: { min: number; max: number; minPositive: number };
+  // 周期アニメーション用: 該当ビンの粒子スナップショットをドットでオーバーレイする (電子/イオン)
+  particles?: { electron: Point[]; ion: Point[] };
 }
 
 interface Props {
@@ -442,6 +449,17 @@ export default function CadCanvas({
       ctx.fillText(minLabel, barX + barW + labelGap, barY + barH);
     };
 
+    // 粒子オーバーレイの共通ヘルパー (1〜2px の小さな矩形。多数点でも軽く保つため fillRect を使う)。
+    // PICライブ表示 / 周期アニメーションの粒子スナップショットで共用する
+    const drawSpecies = (pts: Point[], color: string) => {
+      ctx.fillStyle = color;
+      for (const [px0, py0] of pts) {
+        const px = sx(px0);
+        const py = sy(py0);
+        ctx.fillRect(px - 0.8, py - 0.8, 1.6, 1.6);
+      }
+    };
+
     // PIC結果フィールド表示: done後に「結果表示」セレクトでライブ以外を選んだ場合、
     // 選択したフィールドをカラーマップで描画する (節点値は要素を3節点平均で塗り、
     // 要素値(e_abs)はそのまま塗る)。対数スケール指定時は値≤0を全体の最小正値にクランプしてから
@@ -449,7 +467,7 @@ export default function CadCanvas({
     // Solve/Mesh/PICライブ側の描画は行わない (以降のブロックで !picFieldView を条件に含める)
     if (picFieldView) {
       const { nodes, triangles } = picFieldView.mesh;
-      const { values, nodeBased, log } = picFieldView;
+      const { values, nodeBased, log, fixedRange } = picFieldView;
 
       let rawMin = Infinity;
       let rawMax = -Infinity;
@@ -460,6 +478,12 @@ export default function CadCanvas({
         if (v > 0 && v < minPositive) minPositive = v;
       }
       if (!Number.isFinite(rawMin)) { rawMin = 0; rawMax = 0; }
+      // 周期アニメーション等、フレーム間で色が暴れないよう固定範囲が指定されていればそちらを使う
+      if (fixedRange) {
+        rawMin = fixedRange.min;
+        rawMax = fixedRange.max;
+        minPositive = fixedRange.minPositive;
+      }
       const useLog = log && Number.isFinite(minPositive);
       const transformed = useLog
         ? values.map((v) => Math.log10(v > 0 ? v : minPositive))
@@ -479,6 +503,12 @@ export default function CadCanvas({
         ctx.lineTo(sx(nodes[c][0]), sy(nodes[c][1]));
         ctx.closePath();
         ctx.fill();
+      }
+
+      // 周期アニメーションの粒子スナップショット (表示トグルは App 側で particles の有無に反映済み)
+      if (picFieldView.particles) {
+        drawSpecies(picFieldView.particles.electron, "#4dd4ff"); // 電子: シアン
+        drawSpecies(picFieldView.particles.ion, "#ff9d4d");       // イオン: オレンジ
       }
 
       drawColorbar(rawMin, rawMax, picFieldView.unit);
@@ -510,15 +540,7 @@ export default function CadCanvas({
         ctx.fill();
       }
 
-      // 粒子 (1〜2px の小さな矩形。多数点でも軽く保つため fillRect を使う)
-      const drawSpecies = (pts: Point[], color: string) => {
-        ctx.fillStyle = color;
-        for (const [px0, py0] of pts) {
-          const px = sx(px0);
-          const py = sy(py0);
-          ctx.fillRect(px - 0.8, py - 0.8, 1.6, 1.6);
-        }
-      };
+      // 粒子 (共通ヘルパーで描画)
       drawSpecies(picFrame.particles.electron, "#4dd4ff"); // 電子: シアン
       drawSpecies(picFrame.particles.ion, "#ff9d4d");       // イオン: オレンジ
     }

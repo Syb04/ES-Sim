@@ -168,6 +168,8 @@ export interface PicSettings {
   see_energy_ev: number;    // SEE(二次電子放出)電子の初期エネルギー [eV]
   // 完了時の時間平均フィールドの平均ステップ数 (最終Nステップ)。null/省略 = 最後の25%
   avg_steps?: number | null;
+  // RF 1周期の位相分解データの位相ビン数 (0 で無効)。省略 = 40
+  phase_bins?: number;
 }
 
 // PIC診断 (1ステップ分)
@@ -247,10 +249,24 @@ export interface PicFields {
   avg_steps: number;   // 実際に平均したステップ数
 }
 
+// RF 1周期の位相分解データ (done メッセージの cycle、アニメーション用)
+export interface PicCycle {
+  bins: number;        // 位相ビン数
+  period_s: number;    // RF 周期 [s]
+  phi: number[][];     // bins × 節点  位相分解平均の電位 [V]
+  n_e: number[][];     // bins × 節点  同 電子密度 [m^-3]
+  n_i: number[][];     // bins × 節点  同 イオン密度 [m^-3]
+  particles: {         // 最後の1周期の生スナップショット (位相ビンごと、≤1000点)
+    electron: [number, number][][];
+    ion: [number, number][][];
+  };
+}
+
 export interface PicDoneMsg {
   type: "done";
   history: PicHistoryDict; // 列ごとの辞書 (toDiagArray で PicDiag[] に変換して使う)
   fields?: PicFields;      // 時間平均フィールド (未対応バックエンドでは省略)
+  cycle?: PicCycle;        // RF 1周期の位相分解 (RFなし/phase_bins=0 では省略)
 }
 
 export interface PicErrorMsg {

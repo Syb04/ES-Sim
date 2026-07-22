@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "./api";
 import CadCanvas from "./canvas/CadCanvas";
 import type { FieldView, PicFieldView, Tool } from "./canvas/CadCanvas";
@@ -6,7 +6,7 @@ import ProfilePanel from "./panels/ProfilePanel";
 import FieldPanel from "./panels/FieldPanel";
 import ParticlePanel from "./panels/ParticlePanel";
 import PicPanel, { PIC_FIELD_META } from "./panels/PicPanel";
-import type { PicResultField } from "./panels/PicPanel";
+import type { CyclePicField, PicResultField } from "./panels/PicPanel";
 import { PicClient } from "./picClient";
 import { useHistory } from "./useHistory";
 import { toDiagArray } from "./types";
@@ -18,6 +18,7 @@ import type {
   Health,
   MeshResult,
   ParticleSettings,
+  PicCycle,
   PicDiag,
   PicFields,
   PicFrameMsg,
@@ -61,6 +62,7 @@ const DEFAULT_PIC: PicSettings = {
   mcc: null,
   see_energy_ev: 2.0,
   avg_steps: null,
+  phase_bins: 40,
 };
 
 // pic.injection.emitter は常にフェーズ2 (粒子) パネルの現在のエミッタ設定で上書きしてから
@@ -146,6 +148,27 @@ export default function App() {
   const [picResultField, setPicResultField] = useState<PicResultField>("live");
   const [picLogScale, setPicLogScale] = useState(false);
   const picClientRef = useRef<PicClient | null>(null);
+
+  // RF 1周期の位相分解データ (done で受信、RFなし/phase_bins=0 では null)。
+  // 周期アニメーションプレイヤー (PicPanel) の状態一式も新規実行開始時にリセットする
+  const [picCycle, setPicCycle] = useState<PicCycle | null>(null);
+  const [cycleField, setCycleField] = useState<CyclePicField>("phi");
+  const [cycleLogScale, setCycleLogScale] = useState(false);
+  const [cyclePlaying, setCyclePlaying] = useState(false);
+  const [cycleBinIndex, setCycleBinIndex] = useState(0);
+  const [cycleFps, setCycleFps] = useState(10);
+  const [cycleShowParticles, setCycleShowParticles] = useState(true);
+
+  // 周期アニメーション再生ループ: playing 中は fps に応じた間隔でビンを1つずつ順送りし、
+  // 最後まで行ったら先頭へループする (setInterval + 関数更新で古いクロージャの影響を避ける)
+  useEffect(() => {
+    if (!cyclePlaying || !picCycle || picCycle.bins <= 0) return;
+    const bins = picCycle.bins;
+    const id = setInterval(() => {
+      setCycleBinIndex((i) => (i + 1) % bins);
+    }, 1000 / cycleFps);
+    return () => clearInterval(id);
+  }, [cyclePlaying, cycleFps, picCycle]);
 
   // アンマウント時に WebSocket 接続を確実に閉じる
   useEffect(() => {
@@ -274,6 +297,13 @@ export default function App() {
     setPicFields(null);
     setPicResultField("live");
     setPicLogScale(false);
+    // 周期アニメーションの状態も新規実行開始時にリセットする (前回 done の cycle・再生状態を破棄)
+    setPicCycle(null);
+    setCycleField("phi");
+    setCycleLogScale(false);
+    setCyclePlaying(false);
+    setCycleBinIndex(0);
+    setCycleShowParticles(true);
     const client = new PicClient({
       onStarted: (msg) => setPicStarted(msg),
       onFrame: (msg) => {
@@ -285,6 +315,7 @@ export default function App() {
         // (形式不一致のまま描画するとチャートが例外を投げて画面全体が落ちるため必ず変換を通す)
         setPicHistory(toDiagArray(msg.history));
         setPicFields(msg.fields ?? null);
+        setPicCycle(msg.cycle ?? null);
         setPicRunning(false);
       },
       onError: (detail) => {
@@ -597,6 +628,53 @@ export default function App() {
         }
       : null;
 
+  // 周期アニメーション用のカラースケール固定範囲 (全ビンの min/max)。
+  // フレーム(ビン)が変わるたびに色が暴れないよう、選択フィールドが変わったときだけ再計算する
+  const cycleFixedRange = useMemo(() => {
+    if (!picCycle) return null;
+    const rows = picCycle[cycleField];
+    let min = Infinity;
+    let max = -Infinity;
+    let minPositive = Infinity;
+    for (const row of rows) {
+      for (const v of row) {
+        if (v < min) min = v;
+        if (v > max) max = v;
+        if (v > 0 && v < minPositive) minPositive = v;
+      }
+    }
+    if (!Number.isFinite(min)) { min = 0; max = 0; }
+    return { min, max, minPositive };
+  }, [picCycle, cycleField]);
+
+  // 周期アニメーション表示用ビュー (done で cycle を受信している間のみ非null)。
+  // 現在の位相ビンの値+固定min/max+粒子スナップショットを picFieldView と同形にまとめて渡す
+  const picCycleView: PicFieldView | null =
+    picCycle && picStarted && cycleFixedRange
+      ? (() => {
+          const bin = Math.min(cycleBinIndex, picCycle.bins - 1);
+          const meta = PIC_FIELD_META[cycleField];
+          return {
+            mesh: picStarted.mesh,
+            values: picCycle[cycleField][bin],
+            nodeBased: meta.nodeBased,
+            unit: meta.unit,
+            log: cycleLogScale,
+            fixedRange: cycleFixedRange,
+            particles: cycleShowParticles
+              ? {
+                  electron: picCycle.particles.electron[bin] ?? [],
+                  ion: picCycle.particles.ion[bin] ?? [],
+                }
+              : undefined,
+          };
+        })()
+      : null;
+
+  // 描画優先順位: 周期アニメーション > 結果フィールド表示 (> ライブ表示 > Solve結果、CadCanvas側で処理)。
+  // CadCanvas へは既存の picFieldView prop をそのまま使い回す (新規propは増やさない)
+  const finalPicFieldView = picCycleView ?? picFieldView;
+
   return (
     <div className="app">
       <div className="toolbar">
@@ -729,7 +807,7 @@ export default function App() {
             traceResult={traceResult}
             showTrajectories={showTrajectories}
             picFrame={picLiveFrame}
-            picFieldView={picFieldView}
+            picFieldView={finalPicFieldView}
             onSelectRegion={selectRegionFromCanvas}
             onDeleteRegion={deleteRegion}
             onAddRegion={addRegion}
@@ -867,6 +945,19 @@ export default function App() {
                 onResultFieldChange={setPicResultField}
                 logScale={picLogScale}
                 onLogScaleChange={setPicLogScale}
+                cycle={picCycle}
+                cycleField={cycleField}
+                onCycleFieldChange={setCycleField}
+                cycleLogScale={cycleLogScale}
+                onCycleLogScaleChange={setCycleLogScale}
+                cyclePlaying={cyclePlaying}
+                onCyclePlayingChange={setCyclePlaying}
+                cycleBinIndex={cycleBinIndex}
+                onCycleBinIndexChange={setCycleBinIndex}
+                cycleFps={cycleFps}
+                onCycleFpsChange={setCycleFps}
+                cycleShowParticles={cycleShowParticles}
+                onCycleShowParticlesChange={setCycleShowParticles}
               />
             </div>
 
