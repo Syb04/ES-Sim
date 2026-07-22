@@ -38,15 +38,32 @@ jobs:
       - name: Build backend exe (sidecar)
         shell: pwsh
         run: |
-          # 失敗時に原因を公開の Job Summary へ書き出す (ログは要ログインのため)
-          $out = & powershell -ExecutionPolicy Bypass -File scripts\build_backend.ps1 2>&1 | Out-String
-          Write-Host $out
-          if ($LASTEXITCODE -ne 0) {
-            $tail = if ($out.Length -gt 6000) { $out.Substring($out.Length - 6000) } else { $out }
-            "## build_backend.ps1 failed (exit $LASTEXITCODE)`n``````text`n$tail`n``````" |
-              Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
-            exit 1
-          }
+          # 診断プローブ (失敗時に ci-log ブランチへ公開される)
+          $ErrorActionPreference = "Continue"
+          "== python ==" | Tee-Object -FilePath backend-build.log
+          python -VV 2>&1 | Tee-Object -Append backend-build.log
+          python -c "import sys; print('prefix:', sys.prefix)" 2>&1 | Tee-Object -Append backend-build.log
+          pip show gmsh pyinstaller 2>&1 | Select-String "Name|Version|Location" | Tee-Object -Append backend-build.log
+          "== import probe ==" | Tee-Object -Append backend-build.log
+          python -c "import gmsh; print('gmsh import ok')" 2>&1 | Tee-Object -Append backend-build.log
+          python -c "import es_sim.server; print('es_sim import ok')" 2>&1 | Tee-Object -Append backend-build.log
+          "== build_backend.ps1 ==" | Tee-Object -Append backend-build.log
+          & powershell -ExecutionPolicy Bypass -File scripts\build_backend.ps1 2>&1 | Tee-Object -Append backend-build.log
+          $code = $LASTEXITCODE
+          "== exit code: $code ==" | Tee-Object -Append backend-build.log
+          if ($code -ne 0) { exit 1 }
+      - name: Publish failure log to ci-log branch (公開診断用)
+        if: failure()
+        shell: pwsh
+        run: |
+          git config user.name "ci"
+          git config user.email "ci@localhost"
+          git switch --orphan ci-log
+          Copy-Item backend-build.log log.txt -ErrorAction SilentlyContinue
+          if (-not (Test-Path log.txt)) { "no log captured" | Set-Content log.txt }
+          git add -f log.txt
+          git commit -m "ci failure log"
+          git push -f origin ci-log
       - name: Smoke test backend exe
         shell: pwsh
         run: |
