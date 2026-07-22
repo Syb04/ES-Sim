@@ -401,6 +401,17 @@ export default function App() {
     setPicError(null);
     setPicRunning(true);
     setPicContinueReady(false);
+    // 表示状態を新規実行と同様にリセットする。描画優先順位が
+    // 「周期アニメ > 結果フィールド > ライブ」のため、前回 done の cycle / 結果フィールド
+    // 選択が残っているとライブ表示が隠れ、続き実行中の画面が追従しない (不具合修正)。
+    // 新しい fields / cycle / collectors は追加区間の done で置き換わる
+    setPicFields(null);
+    setPicResultField("live");
+    setPicLogScale(false);
+    setPicCycle(null);
+    setCyclePlaying(false);
+    setCycleBinIndex(0);
+    setPicCollectors([]);
     picClientRef.current.setCallbacks(makePicCallbacks(true));
     picClientRef.current.continueRun({
       n_steps: pic.n_steps,
