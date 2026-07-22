@@ -57,9 +57,11 @@ export async function setPort(n: number): Promise<void> {
 
 /**
  * 起動時にポート番号を初期化する。優先順位:
- * 1. Tauri内: AppConfig の backend-port.txt (存在し、内容が正しい数値であれば)
- * 2. localStorage (`es-sim.backendPort`)
- * 3. 既定値 8317
+ * - Tauri内 (配布版): AppConfig の backend-port.txt > 既定値 8317。
+ *   localStorage は参照しない — サイドカー (main.rs) は同じファイルだけを読んで
+ *   起動ポートを決めるため、localStorage を優先するとフロントエンドとサイドカーの
+ *   ポートが食い違い「backend 未接続」になる (v0.1.0 で保存失敗時に発生した事故)。
+ * - ブラウザ (開発時): localStorage (`es-sim.backendPort`) > 既定値 8317
  * 取得した値をメモリ上の現在値へ反映してから返す。
  */
 export async function initPort(): Promise<number> {
@@ -75,8 +77,11 @@ export async function initPort(): Promise<number> {
         }
       }
     } catch {
-      // 読み込み失敗時 (権限・破損等) は localStorage / 既定値へフォールバックする
+      // 読み込み失敗時 (権限・破損等) は既定値へフォールバックする
     }
+    // ファイルが無い・読めない場合、サイドカーも既定値 8317 で起動しているはず
+    currentPort = DEFAULT_PORT;
+    return currentPort;
   }
 
   const stored = localStorage.getItem(LS_KEY);
