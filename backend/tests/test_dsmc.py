@@ -370,3 +370,89 @@ def test_dsmc_sccm_flow_inlet_mass_balance():
     area = sim.area
     ux_mean = float(np.sum(res.u[:, 0] * res.n * area) / np.sum(res.n * area))
     assert ux_mean > 0.0
+
+
+# ---- 軸対称 (rz、prompts/56) ----------------------------------------------------
+
+
+def test_dsmc_rz_equilibrium_cylinder():
+    """rz 密閉円筒 (軸 = 下辺 y=0、他は壁温 300K): n/T/p を保持し径方向にも一様。"""
+    p0, t0 = 10.0, 300.0
+    rr = 0.01
+    project = Project.model_validate(
+        {
+            "coord": "rz",
+            "geometry": {
+                "domain": {"polygon": [[0, 0], [L, 0], [L, rr], [0, rr]]},
+                "boundaries": [],
+            },
+            "mesh": {"size": 1.5e-3},
+            "dsmc": {
+                "init_pressure_pa": p0,
+                "init_temperature_k": t0,
+                "wall_temperature_k": t0,
+                "n_particles": 30000,
+                "n_steps": 600,
+                "avg_steps": 300,
+                "seed": 8,
+            },
+        }
+    )
+    sim = DsmcSimulation(project)
+    res = sim.run()
+
+    n0 = p0 / (KB * t0)
+    vol = sim.vol
+    n_mean = float(np.sum(res.n * vol) / vol.sum())
+    t_mean = float(np.sum(res.t * res.n * vol) / np.sum(res.n * vol))
+    assert n_mean == pytest.approx(n0, rel=0.03)
+    assert t_mean == pytest.approx(t0, rel=0.03)
+    # 径方向の一様性 (体積規格化 2πr̄A の検証): 内側半分と外側半分の平均密度が一致
+    r_c = sim.mesh.nodes[sim.tris].mean(axis=1)[:, 1]
+    inner = r_c < rr / 2
+    n_in = float(np.sum(res.n[inner] * vol[inner]) / vol[inner].sum())
+    n_out = float(np.sum(res.n[~inner] * vol[~inner]) / vol[~inner].sum())
+    assert n_in == pytest.approx(n_out, rel=0.08)
+    # 粒子が消えていない (軸は物理境界ではない)
+    assert res.n_particles == pytest.approx(30000, rel=0.02)
+
+
+def test_dsmc_rz_axial_effusion():
+    """rz 無衝突円筒: 左端面リザーバ → 右真空。密度 = リザーバの 1/2、u_z = c̄/2。"""
+    p0, t0 = 1.0, 300.0
+    rr = 0.005
+    project = Project.model_validate(
+        {
+            "coord": "rz",
+            "geometry": {
+                "domain": {"polygon": [[0, 0], [L, 0], [L, rr], [0, rr]]},
+                "boundaries": [],
+            },
+            "mesh": {"size": 1.2e-3},
+            "dsmc": {
+                "gas": {"d_ref_m": 1e-15},  # 無衝突
+                "boundaries": [
+                    {"edges": [3], "type": "inlet", "pressure_pa": p0, "temperature_k": t0},
+                    {"edges": [1], "type": "outlet"},
+                    {"edges": [2], "type": "symmetry"},  # 外周 r=R は鏡面 (1D模擬)
+                ],
+                "init_pressure_pa": p0 / 2.0,
+                "init_temperature_k": t0,
+                "n_particles": 40000,
+                "n_steps": 1500,
+                "avg_steps": 500,
+                "seed": 9,
+            },
+        }
+    )
+    sim = DsmcSimulation(project)
+    res = sim.run()
+
+    n_res = p0 / (KB * t0)
+    vol = sim.vol
+    n_mean = float(np.sum(res.n * vol) / vol.sum())
+    assert n_mean == pytest.approx(0.5 * n_res, rel=0.05)
+    c_bar = math.sqrt(8.0 * KB * t0 / (math.pi * M_AR))
+    uz_mean = float(np.sum(res.u[:, 0] * res.n * vol) / np.sum(res.n * vol))
+    assert uz_mean == pytest.approx(0.5 * c_bar, rel=0.05)
+    assert res.outflow == pytest.approx(res.inflow, rel=0.07)

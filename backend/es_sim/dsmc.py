@@ -23,6 +23,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from .fem import _radial_index
 from .meshing import generate_mesh
 from .particles import (
     _adjacency,
@@ -68,13 +69,15 @@ class DsmcSimulation:
     def __init__(self, project: Project):
         if project.dsmc is None:
             raise ValueError("project.dsmc が指定されていません")
-        if project.coord != "xy":
-            raise ValueError("DSMC は平面2D (coord='xy') のみ対応です")
         self.project = project
         self.s: DsmcSettings = project.dsmc
         gas = self.s.gas
         self.m = gas.mass_amu * AMU
         self.mu = 0.5 * self.m  # 同種2体の換算質量
+        # 軸対称モード (prompts/56)。粒子はリング (周方向一様)、v[:, 2] は vθ。
+        # 自由飛行は3D直線の厳密な子午面射影 (r' = √((r+v_r dt)² + (v_θ dt)²)) で扱う
+        self.ridx = _radial_index(project.coord)
+        self.rz = self.ridx is not None
 
         # ---- メッシュ (particles.py のインフラを再利用) ----------------------
         self.mesh = generate_mesh(project)
@@ -84,9 +87,16 @@ class DsmcSimulation:
         self.adjacency = _adjacency(self.tris)
         det = self.coeffs[3]
         self.area = 0.5 * np.abs(det)
+        # セル体積: xy = 面積 (奥行き1m換算)、rz = 2π r̄ A。xy では area と同一
+        # オブジェクトなので既存経路は数値不変
+        if self.rz:
+            self.r_bar = self.mesh.nodes[self.tris][:, :, self.ridx].mean(axis=1)
+            self.vol = 2.0 * np.pi * self.r_bar * self.area
+        else:
+            self.vol = self.area
         self._solid = _solid_elements(project, self.mesh)  # 誘電体 (固体) 要素 or None
         gas_area = float(
-            self.area.sum() if self._solid is None else self.area[~self._solid].sum()
+            self.vol.sum() if self._solid is None else self.vol[~self._solid].sum()
         )
 
         # ---- 境界エッジ表 ((要素, ローカルエッジ) で引く) --------------------
@@ -140,7 +150,7 @@ class DsmcSimulation:
             if self._solid is None
             else np.nonzero(~self._solid)[0]
         )
-        p_elem = self.area[loadable] / self.area[loadable].sum()
+        p_elem = self.vol[loadable] / self.vol[loadable].sum()
         elem0 = loadable[self.rng.choice(len(loadable), size=n0, p=p_elem)]
         r1 = np.sqrt(self.rng.random(n0))
         r2 = self.rng.random(n0)
@@ -239,6 +249,13 @@ class DsmcSimulation:
                 "frac": 0.0,
             }
 
+        # エッジの「面積」: xy = 長さ (奥行き1m換算)、rz = 輪帯面積 2π r̄_e L_e
+        # (流束 [1/m²s] × 面積 = 分子数流量 [1/s] の換算に使う)
+        if self.rz:
+            a_edge = 2.0 * np.pi * mid[:, self.ridx] * length
+        else:
+            a_edge = length
+
         # 流入エッジのリスト (圧力リザーバ・流量指定の両方)
         self._res_edges: list[dict] = []
         for bc in self.s.boundaries:
@@ -270,21 +287,32 @@ class DsmcSimulation:
             idxs = np.nonzero(on)[0]
 
             if flow_inlet:
-                # 総分子流量 [1/s] をエッジ長に比例配分 (2D: 奥行き 1 m 換算)
+                # 総分子流量 [1/s] をエッジ面積 (xy: 長さ、rz: 輪帯面積) で比例配分
                 ndot = bc.flow_sccm * SCCM_TO_PER_S
-                total_len = float(length[idxs].sum())
+                total_a = float(a_edge[idxs].sum())
                 for i in idxs:
                     self._res_edges.append(
-                        _edge_entry(i, ndot * float(length[i]) / total_len, bc.temperature_k)
+                        _edge_entry(i, ndot * float(a_edge[i]) / total_a, bc.temperature_k)
                     )
             elif code == _B_RESERVOIR:
-                # 圧力リザーバ: 平衡流束 Φ = n c̄/4 = n √(kT/2πm) [1/m²s] × エッジ長
+                # 圧力リザーバ: 平衡流束 Φ = n c̄/4 = n √(kT/2πm) [1/m²s] × エッジ面積
                 n_res = bc.pressure_pa / (KB * bc.temperature_k)
                 flux = n_res * math.sqrt(KB * bc.temperature_k / (2.0 * math.pi * self.m))
                 for i in idxs:
                     self._res_edges.append(
-                        _edge_entry(i, flux * float(length[i]), bc.temperature_k)
+                        _edge_entry(i, flux * float(a_edge[i]), bc.temperature_k)
                     )
+
+        # 軸対称: 対称軸 (r = 0) 上の境界メッシュエッジは物理境界ではないため、
+        # ユーザ指定によらず鏡面 (数値的なかすり対策) に強制する。厳密な子午面
+        # 射影では r' ≥ 0 なので通常は到達しない
+        if self.rz:
+            r1 = p1[:, self.ridx]
+            r2 = p2[:, self.ridx]
+            tol_axis = 1e-12 * (scale if scale > 0.0 else 1.0)
+            on_axis = (np.abs(r1) <= tol_axis) & (np.abs(r2) <= tol_axis)
+            if np.any(on_axis):
+                self._b_type[ts[on_axis], loc[on_axis]] = _B_SYMMETRY
 
     # ---- 流入 (リザーバ) ------------------------------------------------------
 
@@ -337,7 +365,26 @@ class DsmcSimulation:
         """
         dt = self.dt
         n = len(self.x)
-        x_new = self.x + dt * self.v[:, :2]
+        if self.rz:
+            # 軸対称 (prompts/56): 自由飛行は3D直線の厳密な子午面射影。
+            # r' = √((r + v_r dt)² + (v_θ dt)²) は常に ≥ 0 で軸を越えない。
+            # 速度は新しい子午面へ回転する (r' ≈ 0 の粒子は回転せずそのまま)。
+            # walk・境界判定は (z, r) 平面の直線分近似 (dt が小さければ誤差は二次)
+            ridx = self.ridx
+            r_mid = self.x[:, ridx] + self.v[:, ridx] * dt
+            d_out = self.v[:, 2] * dt
+            r_new = np.sqrt(r_mid * r_mid + d_out * d_out)
+            x_new = self.x + dt * self.v[:, :2]
+            x_new[:, ridx] = r_new
+            r_safe = np.maximum(r_new, 1e-300)
+            cosw = np.where(r_new > 0.0, r_mid / r_safe, 1.0)
+            sinw = np.where(r_new > 0.0, d_out / r_safe, 0.0)
+            vr = self.v[:, ridx].copy()
+            vt = self.v[:, 2].copy()
+            self.v[:, ridx] = vr * cosw + vt * sinw
+            self.v[:, 2] = vt * cosw - vr * sinw
+        else:
+            x_new = self.x + dt * self.v[:, :2]
         elem_new, absorbed, b_elem, b_loc = _walk_step(
             self.coeffs, self.adjacency, self.elem, x_new, packed=self._packed
         )
@@ -449,7 +496,7 @@ class DsmcSimulation:
         starts = np.zeros(len(self.tris) + 1, dtype=np.int64)
         np.cumsum(counts, out=starts[1:])
 
-        vol = self.area  # × 奥行き 1 m
+        vol = self.vol  # xy: 面積 × 奥行き 1 m、rz: 2π r̄ A
         n_cand_f = (
             0.5 * counts * np.maximum(counts - 1, 0) * self.w
             * self._sigcr_max * self.dt / vol
@@ -550,7 +597,7 @@ class DsmcSimulation:
                 callback(i + 1, len(self.x))
 
         cnt = np.maximum(self._acc_cnt, 1e-300)
-        n_avg = self._acc_cnt * self.w / (self._samples * self.area)
+        n_avg = self._acc_cnt * self.w / (self._samples * self.vol)
         u_mean3 = self._acc_v / cnt[:, None]
         v2_mean = self._acc_v2 / cnt
         # T = m/(3k)·(⟨|v|²⟩ − |⟨v⟩|²) (3成分)
