@@ -8,6 +8,8 @@ import FieldPanel from "./panels/FieldPanel";
 import ParticlePanel from "./panels/ParticlePanel";
 import PicPanel, { PIC_FIELD_META } from "./panels/PicPanel";
 import type { CyclePicField, PicResultField } from "./panels/PicPanel";
+import GasPanel, { GAS_FIELD_META, gasFieldValues } from "./panels/GasPanel";
+import type { GasResultField } from "./panels/GasPanel";
 import { PicClient } from "./picClient";
 import type { PicClientCallbacks } from "./picClient";
 import { useHistory } from "./useHistory";
@@ -18,6 +20,7 @@ import type {
   BField,
   BoundaryCondition,
   CircleShape,
+  DsmcResult,
   EdgeBcType,
   Health,
   MeshResult,
@@ -162,7 +165,7 @@ export default function App() {
 
   // サイドパネルのタブ (静電場/粒子追跡/PIC)。タブ切替は表示の切替のみで、
   // 各タブの編集状態・実行状態 (PIC の WS 接続やチャート履歴など) はアンマウントされずに保持される
-  const [activeTab, setActiveTab] = useState<"field" | "particle" | "pic">("field");
+  const [activeTab, setActiveTab] = useState<"field" | "particle" | "pic" | "gas">("field");
 
   // 粒子設定 (エミッタ・積分パラメータ)。ジオメトリ編集とは独立に管理し、
   // 既存の Undo/Redo 履歴 (history) には積まない。保存/読込 (project.particles) の対象ではある
@@ -211,6 +214,16 @@ export default function App() {
   // 操作している間だけにする (不具合修正: cycle データが存在するだけで常時優先されると、
   // 結果表示セレクトを切り替えてもキャンバスが切り替わらない)
   const [cycleViewActive, setCycleViewActive] = useState(false);
+
+  // ガス流れ (DSMC) 設定は project.dsmc として project state 本体に置く (particles/pic と異なり
+  // 独立 state を持たず、ジオメトリ・メッシュ設定と同様 commitProject 経由で Undo/Redo 対象になる)。
+  // 実行結果・実行状態は他パネルの result 系 state と同様に App 側で保持する
+  const [gasBusy, setGasBusy] = useState(false);
+  const [gasError, setGasError] = useState<string | null>(null);
+  const [gasResult, setGasResult] = useState<DsmcResult | null>(null);
+  // 「結果表示」セレクトの選択と対数スケールチェックボックス
+  const [gasResultField, setGasResultField] = useState<GasResultField>("n");
+  const [gasLogScale, setGasLogScale] = useState(false);
 
   // 周期アニメーション再生ループ: playing 中は fps に応じた間隔でビンを1つずつ順送りし、
   // 最後まで行ったら先頭へループする (setInterval + 関数更新で古いクロージャの影響を避ける)
@@ -281,6 +294,7 @@ export default function App() {
     setMeshResult(null);
     setProfileLine(null);
     setTraceResult(null); // ジオメトリ変更で解析結果とともに trace 結果も破棄する
+    setGasResult(null); // メッシュが変わりうるため DSMC 結果 (要素値) も破棄する
     setPicProjectChangedSinceRun(true); // PIC続き実行はサーバー状態と食い違うため無効化する
   }, [history]);
 
@@ -294,6 +308,7 @@ export default function App() {
     setMeshResult(null);
     setProfileLine(null);
     setTraceResult(null);
+    setGasResult(null);
     setSelectedRegionId((sel) => ensureSelection(prev, sel));
     setPicProjectChangedSinceRun(true); // PIC続き実行はサーバー状態と食い違うため無効化する
   }, [history, ensureSelection]);
@@ -307,6 +322,7 @@ export default function App() {
     setMeshResult(null);
     setProfileLine(null);
     setTraceResult(null);
+    setGasResult(null);
     setSelectedRegionId((sel) => ensureSelection(next, sel));
     setPicProjectChangedSinceRun(true); // PIC続き実行はサーバー状態と食い違うため無効化する
   }, [history, ensureSelection]);
@@ -369,6 +385,26 @@ export default function App() {
       setError(String(e));
     } finally {
       setBusy(false);
+    }
+  };
+
+  // ガス流れ (DSMC) 設定の更新。project.dsmc は Project 本体のフィールドなので commitProject
+  // 経由で反映する (ジオメトリ・メッシュ設定と同じ Undo/Redo 対象)
+  const setDsmc = (next: Project["dsmc"]) => {
+    const p = projectRef.current;
+    commitProject({ ...p, dsmc: next });
+  };
+
+  // DSMC ガス流れ計算実行 (project.dsmc を送信する。project.dsmc が null の場合は呼ばれない想定)
+  const runDsmc = async () => {
+    setGasBusy(true);
+    setGasError(null);
+    try {
+      setGasResult(await api.dsmc(project));
+    } catch (e) {
+      setGasError(String(e));
+    } finally {
+      setGasBusy(false);
     }
   };
 
@@ -933,9 +969,24 @@ export default function App() {
         })()
       : null;
 
-  // 描画優先順位: 周期アニメーション > 結果フィールド表示 (> ライブ表示 > Solve結果、CadCanvas側で処理)。
+  // ガス流れ (DSMC) 結果フィールド表示用ビュー。「ガス」タブを選んでいて PIC 実行中でなく、
+  // かつ結果がある場合のみ非null (DSMC の n/t/u/p はすべて要素値なので nodeBased=false 固定)。
+  // PicFieldView 型をそのまま流用し、CadCanvas 側の変更は不要にする
+  const gasFieldView: PicFieldView | null =
+    activeTab === "gas" && !picRunning && gasResult
+      ? {
+          mesh: gasResult.mesh,
+          values: gasFieldValues(gasResult, gasResultField),
+          nodeBased: false,
+          unit: GAS_FIELD_META[gasResultField].unit,
+          log: gasLogScale,
+        }
+      : null;
+
+  // 描画優先順位: 周期アニメーション > 結果フィールド表示 (PIC) > ガス流れ結果表示
+  // (> ライブ表示 > Solve結果、CadCanvas側で処理)。
   // CadCanvas へは既存の picFieldView prop をそのまま使い回す (新規propは増やさない)
-  const finalPicFieldView = picCycleView ?? picFieldView;
+  const finalPicFieldView = picCycleView ?? picFieldView ?? gasFieldView;
 
   return (
     <div className="app">
@@ -1184,6 +1235,12 @@ export default function App() {
             >
               PIC
             </button>
+            <button
+              className={`side-tab ${activeTab === "gas" ? "active" : ""}`}
+              onClick={() => setActiveTab("gas")}
+            >
+              ガス
+            </button>
           </div>
 
           <div className="side-tab-content">
@@ -1278,6 +1335,23 @@ export default function App() {
                 onSelectCollector={setSelectedCollectorIndexRaw}
                 onUpdateCollector={updateCollector}
                 onDeleteCollector={deleteCollector}
+              />
+            </div>
+
+            <div style={{ display: activeTab === "gas" ? "block" : "none" }}>
+              <GasPanel
+                project={project}
+                dsmc={project.dsmc ?? null}
+                onChange={setDsmc}
+                canRun={!!health}
+                busy={gasBusy}
+                onRun={runDsmc}
+                result={gasResult}
+                error={gasError}
+                resultField={gasResultField}
+                onResultFieldChange={setGasResultField}
+                logScale={gasLogScale}
+                onLogScaleChange={setGasLogScale}
               />
             </div>
 

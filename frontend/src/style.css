@@ -224,6 +224,16 @@ button.danger:hover { background: #b34747; }
 .collector-row .collector-tol-input { width: 52px; flex: none; padding: 2px 4px; font-size: 11px; }
 .collector-row .collector-delete { flex: none; padding: 1px 7px; font-size: 12px; line-height: 1.4; }
 
+/* ガスパネル: DSMC 境界条件一覧 (エッジ番号/タイプ + 温度/圧力、追加/削除、prompts/54) */
+.dsmc-boundary-row {
+  display: flex; flex-direction: column; gap: 3px; padding: 5px 6px; border-radius: 3px;
+  border: 1px solid var(--border); font-size: 11px;
+}
+.dsmc-boundary-row-main { display: flex; align-items: center; gap: 4px; }
+.dsmc-boundary-row-main select { flex: 1; }
+.dsmc-boundary-row-sub { display: flex; align-items: center; gap: 8px; }
+.dsmc-edges-input { width: 64px; flex: none; padding: 2px 4px; font-size: 11px; }
+
 /* PICパネル: 進捗バー・警告・履歴チャート */
 .pic-progress { height: 8px; background: var(--bg); border: 1px solid var(--border); border-radius: 4px; overflow: hidden; margin: 6px 0; }
 .pic-progress-bar { height: 100%; background: var(--accent); }

@@ -1,4 +1,4 @@
-import type { Health, MeshResult, Point, Project, ProfileResult, SolveResult, TraceResult, XsProcess } from "./types";
+import type { DsmcResult, Health, MeshResult, Point, Project, ProfileResult, SolveResult, TraceResult, XsProcess } from "./types";
 import { getPort } from "./backendPort";
 
 // リクエストの都度ポート番号を組み立てる (GUIでの変更を即座に反映するため、定数 BASE は使わない)
@@ -27,6 +27,7 @@ export const api = {
   profile: (project: Project, p1: Point, p2: Point, n = 200): Promise<ProfileResult> =>
     post("/profile", { project, p1, p2, n }),
   trace: (project: Project): Promise<TraceResult> => post("/trace", project),
+  dsmc: (project: Project): Promise<DsmcResult> => post("/dsmc", project),
   // LXCat形式テキストを断面積プロセス列にパースする (MCC設定のインポート用)
   lxcatParse: (text: string, species: "electron" | "ion"): Promise<{ processes: XsProcess[]; warnings: string[] }> =>
     post("/lxcat/parse", { text, species }),

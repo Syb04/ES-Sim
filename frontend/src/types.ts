@@ -178,6 +178,58 @@ export interface McSettings {
   electron_processes: XsProcess[]; // elastic/excitation/ionization
   ion_processes: XsProcess[];      // isotropic/backscat
   seed: number;                    // 乱数シード
+  // true なら直前に実行した DSMC の定常ガス場 (n・T・u) を背景として使う (prompts/54)。
+  // サーバーが保持する DSMC 結果とメッシュが一致している必要がある (未実行/不一致はサーバーがエラー)
+  use_dsmc_gas?: boolean;
+}
+
+// ---- DSMC (定常ガス流れ、prompts/54、backend/es_sim/schema.py と手動同期) ----------------
+
+// DSMC のガス分子モデル (VHS: Variable Hard Sphere)。既定は Ar
+export interface DsmcGas {
+  name: string;
+  mass_amu: number;  // 分子質量 [amu]
+  d_ref_m: number;    // VHS 基準直径 [m] (t_ref_k にて)
+  omega: number;      // 粘性の温度指数 ω (HS=0.5)
+  t_ref_k: number;    // 基準温度 [K]
+}
+
+// domain 外周エッジの DSMC 境界条件種別。未指定エッジは拡散反射壁 (wall) になる
+export type DsmcBoundaryType = "wall" | "symmetry" | "inlet" | "outlet";
+
+export interface DsmcBoundary {
+  edges: number[];
+  type: DsmcBoundaryType;
+  temperature_k: number;
+  pressure_pa?: number | null; // inlet は必須 (>0)。outlet は省略/0で真空排気
+}
+
+// 定常ガス流れの DSMC 設定。Project.dsmc が null なら無効
+export interface DsmcSettings {
+  gas: DsmcGas;
+  boundaries: DsmcBoundary[];
+  wall_temperature_k: number; // 未指定エッジ・領域輪郭の壁温 [K]
+  init_pressure_pa: number;   // 初期充填圧 [Pa]
+  init_temperature_k: number;
+  n_particles: number;        // 目標シミュレーション粒子数
+  dt: number | null;          // 秒。null なら自動
+  n_steps: number;
+  avg_steps: number;          // 最終 N ステップで時間平均
+  seed: number;
+}
+
+// POST /dsmc のレスポンス (定常時間平均のガス場)
+export interface DsmcResult {
+  mesh: MeshResult;
+  n: number[];               // 要素ごとの数密度 [m^-3]
+  t: number[];                // 要素ごとの温度 [K]
+  u: [number, number][];      // 要素ごとの面内流速 [m/s]
+  p: number[];                 // 要素ごとの圧力 [Pa]
+  n_particles: number;         // 最終シミュレーション粒子数
+  macro_weight: number;        // 実分子数/シミュレーション粒子
+  dt: number;                  // 実際に使った dt [s]
+  inflow: number;              // 平均区間の流入実分子数
+  outflow: number;             // 平均区間の流出実分子数
 }
 
 export interface PicSettings {
@@ -384,6 +436,8 @@ export interface Project {
   pic?: PicSettings;
   // 一様磁場 [T]。null/undefined または全成分0は磁場なしと同値
   b_field?: BField | null;
+  // 定常ガス流れの DSMC 設定 (prompts/54)。null/undefined なら無効
+  dsmc?: DsmcSettings | null;
 }
 
 // 軸対称モード判定 (rz: 下辺 y=0 が対称軸、rz_x0: 左辺 x=0 が対称軸)。

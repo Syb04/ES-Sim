@@ -488,6 +488,19 @@ export default function PicPanel({
             <span className="label">乱数シード</span>
             <CommitNumberInput value={pic.mcc.seed} onCommit={(v) => updateMcc({ seed: Math.round(v) })} />
           </div>
+
+          <div className="field">
+            <span className="label">DSMCガス場を使用</span>
+            <input
+              type="checkbox"
+              checked={pic.mcc.use_dsmc_gas ?? false}
+              onChange={(e) => updateMcc({ use_dsmc_gas: e.target.checked })}
+            />
+          </div>
+          <p className="hint">
+            直前に実行したガス流れ (DSMC) の n・T・u を背景ガスとして使う
+            (圧力・温度の一様指定は無視される)
+          </p>
         </>
       )}
       <div className="field">
