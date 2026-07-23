@@ -103,14 +103,13 @@ class DsmcSimulation:
         self._build_boundary_tables()
 
         # ---- マクロ重み・時間刻み --------------------------------------------
+        # マクロ重みは初期充填密度基準 (prompts/57)。以前は最大リザーバ密度基準
+        # だったが、小孔から高圧を供給する形状では大半の領域が初期圧近傍に留まり、
+        # 実粒子数が n_particles 目標の何十分の一にもなって統計が崩れていた。
+        # 初期圧は想定される定常の代表圧に合わせること (定常密度が初期圧より
+        # 大きく育つ設定では粒子数が n_particles を超えて増える)
         n_init = self.s.init_pressure_pa / (KB * self.s.init_temperature_k)
-        res_n = [
-            (bc.pressure_pa or 0.0) / (KB * bc.temperature_k)
-            for bc in self.s.boundaries
-            if bc.type in ("inlet", "outlet")
-        ]
-        n_ref = max([n_init] + res_n)  # 定常粒子数の目安になる基準密度
-        self.w = n_ref * gas_area / self.s.n_particles  # 実分子数/シミュレーション粒子
+        self.w = n_init * gas_area / self.s.n_particles  # 実分子数/シミュレーション粒子
 
         t_hot = max(
             [self.s.init_temperature_k, self.s.wall_temperature_k]

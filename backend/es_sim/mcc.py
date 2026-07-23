@@ -121,10 +121,14 @@ class MccModel:
         self.i_procs = [
             self._conv(p, ("isotropic", "backscat")) for p in settings.ion_processes
         ]
-        self.numax_e = self._nu_max(self.e_procs, ME)
+        self._nu_e_table = self._nu_table(self.e_procs, ME)
         # com 系ではテーブルの E は重心系エネルギーなので、相対速度 g = √(2E/μ) で ν を評価
         m_ref = self.mu if self.ion_energy_frame == "com" else m_ion
-        self.numax_i = self._nu_max(self.i_procs, m_ref)
+        self._m_i_ref = m_ref
+        self._nu_i_table = self._nu_table(self.i_procs, m_ref)
+        # グリッド全域の ν_max (上限値。実行時は粒子の最大エネルギーまでに適応的に絞る)
+        self.numax_e = self._numax_upto(self._nu_e_table, math.inf)
+        self.numax_i = self._numax_upto(self._nu_i_table, math.inf)
 
     # ---- 前処理 --------------------------------------------------------------
 
@@ -138,10 +142,15 @@ class MccModel:
             raise ValueError(f"エネルギー列が昇順ではありません: {p.label}")
         return _Proc(p.kind, p.threshold_ev, p.mass_ratio, e, s)
 
-    def _nu_max(self, procs: list[_Proc], m: float) -> float:
-        """共通エネルギーグリッド上の ν_tot(E) の最大値。プロセスが無ければ 0。"""
+    def _nu_table(self, procs: list[_Proc], m: float):
+        """共通エネルギーグリッド上の ν_tot(E) と、その累積最大 (prefix max) を返す。
+
+        累積最大 pref[i] = max(ν_tot(E ≤ grid[i])) を持つことで、
+        「その時点の粒子最大エネルギーまでの ν_max」を O(log N) で引ける
+        (適応 ν_max、prompts/57)。プロセスが無ければ None。
+        """
         if not procs:
-            return 0.0
+            return None
         e_cap = _NU_GRID_MARGIN * max(float(p.e[-1]) for p in procs)
         grid = np.linspace(0.0, e_cap, _NU_GRID_N)
         v = np.sqrt(2.0 * grid * QE / m)
@@ -149,7 +158,23 @@ class MccModel:
         for p in procs:
             # 非一様ガス場では最大密度 _n_ref で評価する (一様時は _n_ref = n_gas)
             nu += self._n_ref * np.interp(grid, p.e, p.s) * v
-        return float(nu.max())
+        return grid, np.maximum.accumulate(nu)
+
+    @staticmethod
+    def _numax_upto(table, e_max_ev: float) -> float:
+        """テーブルの E ≤ e_max_ev における ν_tot の最大値 (適応 ν_max)。
+
+        断面積テーブルが数 keV まで伸びていても、実在する粒子の最大エネルギー
+        までに絞ることで候補率の過大評価を避ける (null-collision は
+        「候補時の全粒子エネルギーで ν_max ≥ ν(E)」なら厳密なまま)。
+        """
+        if table is None:
+            return 0.0
+        grid, pref = table
+        if e_max_ev >= grid[-1]:
+            return float(pref[-1])
+        idx = int(np.searchsorted(grid, e_max_ev, side="right"))
+        return float(pref[min(idx, len(pref) - 1)])
 
     # ---- 共通: 候補抽選とプロセス選択 -----------------------------------------
 
@@ -229,8 +254,15 @@ class MccModel:
             return res
         if self.field is not None and elem is None:
             raise ValueError("非一様ガス場には所属要素 (elem) が必要です")
+        # 適応 ν_max (prompts/57): 現在の粒子最大エネルギーまでに絞る。
+        # テーブルが keV 域まで伸びていても実在しないエネルギーで候補率を
+        # 過大評価しない (ν_max ≥ 全粒子の ν(E) は保たれるので厳密なまま)
+        e_max = 0.5 * ME * float(np.max(np.sum(v * v, axis=1))) / QE
+        numax = self._numax_upto(self._nu_e_table, e_max)
+        if numax <= 0.0:
+            return res
         cand, proc_idx, e_ev, speed = self._select(
-            v, ME, self.numax_e, self.e_procs, dt, elem
+            v, ME, numax, self.e_procs, dt, elem
         )
         if cand.size == 0:
             return res
@@ -314,7 +346,22 @@ class MccModel:
             return 0
         if self.field is not None and elem is None:
             raise ValueError("非一様ガス場には所属要素 (elem) が必要です")
-        cand = self._candidates(len(v), self.numax_i, dt)
+        # 適応 ν_max (prompts/57): 参照エネルギーの上限を粒子の最大速さから見積もる。
+        # com 系はガス原子速度が乗るため 6σ (+流速) のマージンを取る
+        v_max = math.sqrt(float(np.max(np.sum(v * v, axis=1))))
+        if self.ion_energy_frame == "com":
+            vth_m = (
+                float(self._vth_elem.max()) if self._vth_elem is not None else self.vth_gas
+            )
+            u_m = float(np.abs(self._u_elem).max()) if self._u_elem is not None else 0.0
+            g_max = v_max + 6.0 * vth_m + u_m
+            e_cap = 0.5 * self.mu * g_max * g_max / QE
+        else:
+            e_cap = 0.5 * self.m_ion * v_max * v_max / QE
+        numax = self._numax_upto(self._nu_i_table, e_cap)
+        if numax <= 0.0:
+            return 0
+        cand = self._candidates(len(v), numax, dt)
         if cand.size == 0:
             return 0
         vi = v[cand]
@@ -338,7 +385,7 @@ class MccModel:
             s_ref = np.sqrt(np.sum(vi * vi, axis=1))
             e_ref = 0.5 * self.m_ion * s_ref * s_ref / QE
         rel = self._rel[elem[cand]] if (self._rel is not None and elem is not None) else None
-        proc_idx = self._choose_process(e_ref, s_ref, self.numax_i, self.i_procs, rel)
+        proc_idx = self._choose_process(e_ref, s_ref, numax, self.i_procs, rel)
         n_coll = 0
         for j, p in enumerate(self.i_procs):
             mask = proc_idx == j

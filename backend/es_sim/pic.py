@@ -376,14 +376,21 @@ class PicSimulation:
             # 衝突頻度の健全性チェック (prompts/57)。非一様ガス場では ν_max が
             # 最大密度で評価されるため、密度スパイクや高圧領域があると毎ステップ
             # ほぼ全粒子が衝突候補になり、dt が実効的に粗すぎる状態になり得る
-            for label, numax in (("電子", self.mcc.numax_e), ("イオン", self.mcc.numax_i)):
+            # 代表上限 200 eV (シース加速の典型上限) までの ν_max で評価する
+            # (実行時の適応 ν_max と同じテーブル。全域 max だと keV 域の断面積で
+            # 過大評価になるため)
+            for label, table in (
+                ("電子", self.mcc._nu_e_table),
+                ("イオン", self.mcc._nu_i_table),
+            ):
+                numax = MccModel._numax_upto(table, 200.0)
                 if numax > 0.0:
                     p_coll = 1.0 - math.exp(-numax * self.dt)
                     if p_coll > 0.5:
                         self.warnings.append(
-                            f"{label}の1ステップ衝突候補率が {p_coll:.2f} > 0.5: "
-                            "dt が衝突頻度に対して粗すぎます (dt を小さくするか、"
-                            "ガス場の最大密度を確認してください)"
+                            f"{label}の1ステップ衝突候補率が {p_coll:.2f} > 0.5 "
+                            "(〜200 eV 域): dt が衝突頻度に対して粗すぎます "
+                            "(dt を小さくするか、ガス場の最大密度を確認してください)"
                         )
             if gas_field is not None:
                 n_arr = np.asarray(gas_field.n_g, dtype=np.float64)
