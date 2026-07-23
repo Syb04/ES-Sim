@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { api } from "../api";
 import { saveTextFile } from "../saveFile";
+import { LENGTH_UNIT_LABEL, mToUnit } from "../units";
+import type { LengthUnit } from "../units";
 import type { Point, Project, ProfileResult } from "../types";
 
 /**
@@ -12,6 +14,8 @@ import type { Point, Project, ProfileResult } from "../types";
 
 interface Props {
   project: Project;
+  // 長さの表示単位 (mm/µm)。project 内部は常に m のまま
+  lengthUnit: LengthUnit;
   p1: Point;
   p2: Point;
   onClose: () => void;
@@ -30,11 +34,11 @@ const TICKS = 4;
 interface Scale {
   padL: number;
   plotW: number;
-  sMinMm: number;
-  sMaxMm: number;
+  sMinDisp: number; // 表示単位 (mm/µm) 換算後の s 最小値
+  sMaxDisp: number; // 表示単位 (mm/µm) 換算後の s 最大値
 }
 
-export default function ProfilePanel({ project, p1, p2, onClose }: Props) {
+export default function ProfilePanel({ project, lengthUnit, p1, p2, onClose }: Props) {
   const [data, setData] = useState<ProfileResult | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -93,9 +97,9 @@ export default function ProfilePanel({ project, p1, p2, onClose }: Props) {
     const plotW = rect.width - PAD_L - PAD_R;
     const plotH = rect.height - PAD_T - PAD_B;
 
-    const sMinMm = data.s[0] * 1000;
-    const sMaxMm = data.s[data.s.length - 1] * 1000;
-    const sRangeMm = sMaxMm - sMinMm || 1;
+    const sMinDisp = mToUnit(data.s[0], lengthUnit);
+    const sMaxDisp = mToUnit(data.s[data.s.length - 1], lengthUnit);
+    const sRangeDisp = sMaxDisp - sMinDisp || 1;
 
     const vs = data.v.filter((x): x is number => x !== null);
     const es = data.e_abs.filter((x): x is number => x !== null);
@@ -106,9 +110,9 @@ export default function ProfilePanel({ project, p1, p2, onClose }: Props) {
     const vRange = vMax - vMin || 1;
     const eRange = eMax - eMin || 1;
 
-    scaleRef.current = { padL: PAD_L, plotW, sMinMm, sMaxMm };
+    scaleRef.current = { padL: PAD_L, plotW, sMinDisp, sMaxDisp };
 
-    const xOf = (sMm: number) => PAD_L + ((sMm - sMinMm) / sRangeMm) * plotW;
+    const xOf = (sDisp: number) => PAD_L + ((sDisp - sMinDisp) / sRangeDisp) * plotW;
     const yOfV = (v: number) => PAD_T + plotH - ((v - vMin) / vRange) * plotH;
     const yOfE = (e: number) => PAD_T + plotH - ((e - eMin) / eRange) * plotH;
 
@@ -120,8 +124,8 @@ export default function ProfilePanel({ project, p1, p2, onClose }: Props) {
     // 目盛り線とラベル (横軸 s、左縦軸 V、右縦軸 |E|)
     ctx.font = "10px system-ui, sans-serif";
     for (let i = 0; i <= TICKS; i++) {
-      const sMm = sMinMm + (sRangeMm * i) / TICKS;
-      const x = xOf(sMm);
+      const sDisp = sMinDisp + (sRangeDisp * i) / TICKS;
+      const x = xOf(sDisp);
       ctx.strokeStyle = "rgba(255,255,255,0.06)";
       ctx.beginPath();
       ctx.moveTo(x, PAD_T);
@@ -130,7 +134,7 @@ export default function ProfilePanel({ project, p1, p2, onClose }: Props) {
       ctx.fillStyle = "#8a919e";
       ctx.textAlign = i === 0 ? "left" : i === TICKS ? "right" : "center";
       ctx.textBaseline = "top";
-      ctx.fillText(sMm.toFixed(2), x, PAD_T + plotH + 4);
+      ctx.fillText(sDisp.toFixed(2), x, PAD_T + plotH + 4);
 
       const frac = (TICKS - i) / TICKS;
       const v = vMin + vRange * frac;
@@ -152,7 +156,7 @@ export default function ProfilePanel({ project, p1, p2, onClose }: Props) {
     ctx.fillStyle = "#8a919e";
     ctx.textAlign = "center";
     ctx.textBaseline = "alphabetic";
-    ctx.fillText("s [mm]", PAD_L + plotW / 2, rect.height - 2);
+    ctx.fillText(`s [${LENGTH_UNIT_LABEL[lengthUnit]}]`, PAD_L + plotW / 2, rect.height - 2);
 
     // 曲線 (null で線を分断)
     const drawCurve = (values: (number | null)[], yOf: (v: number) => number, color: string) => {
@@ -166,7 +170,7 @@ export default function ProfilePanel({ project, p1, p2, onClose }: Props) {
           started = false;
           continue;
         }
-        const x = xOf(data.s[i] * 1000);
+        const x = xOf(mToUnit(data.s[i], lengthUnit));
         const y = yOf(val);
         if (!started) {
           ctx.moveTo(x, y);
@@ -189,7 +193,7 @@ export default function ProfilePanel({ project, p1, p2, onClose }: Props) {
       ctx.lineTo(hoverX, PAD_T + plotH);
       ctx.stroke();
     }
-  }, [data, hoverX, resizeTick]);
+  }, [data, hoverX, resizeTick, lengthUnit]);
 
   const handleMouseMove = (e: React.MouseEvent<HTMLCanvasElement>) => {
     const el = canvasRef.current;
@@ -198,9 +202,9 @@ export default function ProfilePanel({ project, p1, p2, onClose }: Props) {
     const rect = el.getBoundingClientRect();
     const x = e.clientX - rect.left;
     setHoverX(x);
-    const sRangeMm = sc.sMaxMm - sc.sMinMm || 1;
-    const sMm = sc.sMinMm + ((x - sc.padL) / sc.plotW) * sRangeMm;
-    let idx = Math.round(((sMm - sc.sMinMm) / sRangeMm) * (data.s.length - 1));
+    const sRangeDisp = sc.sMaxDisp - sc.sMinDisp || 1;
+    const sDisp = sc.sMinDisp + ((x - sc.padL) / sc.plotW) * sRangeDisp;
+    let idx = Math.round(((sDisp - sc.sMinDisp) / sRangeDisp) * (data.s.length - 1));
     idx = Math.max(0, Math.min(data.s.length - 1, idx));
     setHoverIdx(idx);
   };
@@ -252,7 +256,7 @@ export default function ProfilePanel({ project, p1, p2, onClose }: Props) {
         )}
         {hoverIdx !== null && data && (
           <div className="profile-hover">
-            s: {(data.s[hoverIdx] * 1000).toFixed(2)} mm &nbsp;
+            s: {mToUnit(data.s[hoverIdx], lengthUnit).toFixed(2)} {LENGTH_UNIT_LABEL[lengthUnit]} &nbsp;
             V: {data.v[hoverIdx] !== null ? data.v[hoverIdx]!.toFixed(2) : "-"} V &nbsp;
             |E|: {data.e_abs[hoverIdx] !== null ? data.e_abs[hoverIdx]!.toExponential(2) : "-"} V/m
           </div>

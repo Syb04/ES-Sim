@@ -1,7 +1,8 @@
 import { useEffect, useRef } from "react";
 import { CommitNullableNumberInput, CommitNumberInput, CommitTextInput } from "../CommitInput";
 import type { DsmcBoundary, DsmcBoundaryType, DsmcGas, DsmcResult, DsmcSettings, Point, Project } from "../types";
-import { mToMm, mmToM } from "../units";
+import { LENGTH_UNIT_LABEL, mToUnit, unitToM } from "../units";
+import type { LengthUnit } from "../units";
 
 /**
  * ガスパネル (タブ4): DSMC 定常ガス流れ
@@ -114,6 +115,8 @@ export interface GasProgress {
 
 interface Props {
   project: Project;
+  // 長さの表示・入力単位 (mm/µm)。project 内部は常に m のまま
+  lengthUnit: LengthUnit;
   dsmc: DsmcSettings | null;
   onChange: (next: DsmcSettings | null) => void;
   canRun: boolean;
@@ -135,6 +138,7 @@ interface Props {
 
 export default function GasPanel({
   project,
+  lengthUnit,
   dsmc,
   onChange,
   canRun,
@@ -152,6 +156,7 @@ export default function GasPanel({
 }: Props) {
   // mode が "all" のときは従来通り両方表示。それ以外は該当モードのみ表示する
   const show = (m: "setup" | "results") => mode === "all" || mode === m;
+  const unitLabel = LENGTH_UNIT_LABEL[lengthUnit];
 
   const dsmcDefaultsRef = useRef<DsmcSettings>(dsmc ?? DEFAULT_DSMC);
   useEffect(() => {
@@ -286,40 +291,40 @@ export default function GasPanel({
                   </div>
                   {rangeMode === "segment" && (
                     <div className="dsmc-boundary-row-sub">
-                      <label className="rf-compact-label" title="p1 x [mm]">
+                      <label className="rf-compact-label" title={`p1 x [${unitLabel}]`}>
                         p1x
                         <CommitNumberInput
                           className="rf-compact"
-                          value={mToMm(p1[0])}
+                          value={mToUnit(p1[0], lengthUnit)}
                           step="0.1"
-                          onCommit={(x) => updateBoundary(i, { p1: [mmToM(x), p1[1]] })}
+                          onCommit={(x) => updateBoundary(i, { p1: [unitToM(x, lengthUnit), p1[1]] })}
                         />
                       </label>
-                      <label className="rf-compact-label" title="p1 y [mm]">
+                      <label className="rf-compact-label" title={`p1 y [${unitLabel}]`}>
                         p1y
                         <CommitNumberInput
                           className="rf-compact"
-                          value={mToMm(p1[1])}
+                          value={mToUnit(p1[1], lengthUnit)}
                           step="0.1"
-                          onCommit={(y) => updateBoundary(i, { p1: [p1[0], mmToM(y)] })}
+                          onCommit={(y) => updateBoundary(i, { p1: [p1[0], unitToM(y, lengthUnit)] })}
                         />
                       </label>
-                      <label className="rf-compact-label" title="p2 x [mm]">
+                      <label className="rf-compact-label" title={`p2 x [${unitLabel}]`}>
                         p2x
                         <CommitNumberInput
                           className="rf-compact"
-                          value={mToMm(p2[0])}
+                          value={mToUnit(p2[0], lengthUnit)}
                           step="0.1"
-                          onCommit={(x) => updateBoundary(i, { p2: [mmToM(x), p2[1]] })}
+                          onCommit={(x) => updateBoundary(i, { p2: [unitToM(x, lengthUnit), p2[1]] })}
                         />
                       </label>
-                      <label className="rf-compact-label" title="p2 y [mm]">
+                      <label className="rf-compact-label" title={`p2 y [${unitLabel}]`}>
                         p2y
                         <CommitNumberInput
                           className="rf-compact"
-                          value={mToMm(p2[1])}
+                          value={mToUnit(p2[1], lengthUnit)}
                           step="0.1"
-                          onCommit={(y) => updateBoundary(i, { p2: [p2[0], mmToM(y)] })}
+                          onCommit={(y) => updateBoundary(i, { p2: [p2[0], unitToM(y, lengthUnit)] })}
                         />
                       </label>
                     </div>

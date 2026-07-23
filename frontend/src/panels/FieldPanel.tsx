@@ -1,5 +1,6 @@
 import { CommitNumberInput, CommitTextInput } from "../CommitInput";
-import { mToMm, mmToM } from "../units";
+import { LENGTH_UNIT_LABEL, mToUnit, unitToM } from "../units";
+import type { LengthUnit } from "../units";
 import { isAxisymmetric, rfComponents } from "../types";
 import type {
   BField,
@@ -104,6 +105,8 @@ export const EDGE_LABELS_RZ_X0 = ["下 (z=0)", "右 (r=R)", "上 (z=L)", "対称
 
 interface Props {
   project: Project;
+  // 長さの表示・入力単位 (mm/µm)。project 内部は常に m のまま
+  lengthUnit: LengthUnit;
   domainW: number;
   domainH: number;
   setDomainSize: (w: number, h: number) => void;
@@ -146,6 +149,7 @@ interface Props {
 
 export default function FieldPanel({
   project,
+  lengthUnit,
   domainW,
   domainH,
   setDomainSize,
@@ -188,8 +192,9 @@ export default function FieldPanel({
   // 座標系ごとの対称軸エッジ番号 (rz: 下辺=0、rz_x0: 左辺=3。xy は該当なし)
   const axisEdge = isRz ? 0 : isRzX0 ? 3 : null;
   // domain 幅/高さのラベル。rz は x=z(軸方向)・y=r(径方向)、rz_x0 は x=r(径方向)・y=z(軸方向)
-  const widthLabel = isRz ? "長さ z [mm]" : isRzX0 ? "半径 r [mm]" : "幅 [mm]";
-  const heightLabel = isRz ? "半径 r [mm]" : isRzX0 ? "長さ z [mm]" : "高さ [mm]";
+  const unitLabel = LENGTH_UNIT_LABEL[lengthUnit];
+  const widthLabel = isRz ? `長さ z [${unitLabel}]` : isRzX0 ? `半径 r [${unitLabel}]` : `幅 [${unitLabel}]`;
+  const heightLabel = isRz ? `半径 r [${unitLabel}]` : isRzX0 ? `長さ z [${unitLabel}]` : `高さ [${unitLabel}]`;
   const bField = project.b_field ?? { bx: 0, by: 0, bz: 0 };
 
   return (
@@ -213,17 +218,17 @@ export default function FieldPanel({
           <div className="field">
             <span className="label">{widthLabel}</span>
             <CommitNumberInput
-              value={mToMm(domainW)}
+              value={mToUnit(domainW, lengthUnit)}
               step="0.1"
-              onCommit={(w) => setDomainSize(mmToM(w), domainH)}
+              onCommit={(w) => setDomainSize(unitToM(w, lengthUnit), domainH)}
             />
           </div>
           <div className="field">
             <span className="label">{heightLabel}</span>
             <CommitNumberInput
-              value={mToMm(domainH)}
+              value={mToUnit(domainH, lengthUnit)}
               step="0.1"
-              onCommit={(h) => setDomainSize(domainW, mmToM(h))}
+              onCommit={(h) => setDomainSize(domainW, unitToM(h, lengthUnit))}
             />
           </div>
         </>
@@ -288,11 +293,11 @@ export default function FieldPanel({
         <>
           <h2>メッシュ</h2>
           <div className="field">
-            <span className="label">サイズ [mm]</span>
+            <span className="label">サイズ [{unitLabel}]</span>
             <CommitNumberInput
-              value={mToMm(project.mesh.size)}
+              value={mToUnit(project.mesh.size, lengthUnit)}
               step="0.01"
-              onCommit={(v) => setMeshSize(mmToM(v))}
+              onCommit={(v) => setMeshSize(unitToM(v, lengthUnit))}
             />
           </div>
           <div className="field">
@@ -392,37 +397,39 @@ export default function FieldPanel({
               {selected.shape && (
                 <>
                   <label>
-                    中心 X [mm]
+                    中心 X [{unitLabel}]
                     <CommitNumberInput
-                      value={mToMm(selected.shape.center[0])}
+                      value={mToUnit(selected.shape.center[0], lengthUnit)}
                       step="0.1"
                       onCommit={(x) =>
                         editRegionShape(selected.id, {
                           ...selected.shape!,
-                          center: [mmToM(x), selected.shape!.center[1]],
+                          center: [unitToM(x, lengthUnit), selected.shape!.center[1]],
                         })
                       }
                     />
                   </label>
                   <label>
-                    中心 Y [mm]
+                    中心 Y [{unitLabel}]
                     <CommitNumberInput
-                      value={mToMm(selected.shape.center[1])}
+                      value={mToUnit(selected.shape.center[1], lengthUnit)}
                       step="0.1"
                       onCommit={(y) =>
                         editRegionShape(selected.id, {
                           ...selected.shape!,
-                          center: [selected.shape!.center[0], mmToM(y)],
+                          center: [selected.shape!.center[0], unitToM(y, lengthUnit)],
                         })
                       }
                     />
                   </label>
                   <label>
-                    半径 [mm]
+                    半径 [{unitLabel}]
                     <CommitNumberInput
-                      value={mToMm(selected.shape.radius)}
+                      value={mToUnit(selected.shape.radius, lengthUnit)}
                       step="0.1"
-                      onCommit={(radius) => editRegionShape(selected.id, { ...selected.shape!, radius: mmToM(radius) })}
+                      onCommit={(radius) =>
+                        editRegionShape(selected.id, { ...selected.shape!, radius: unitToM(radius, lengthUnit) })
+                      }
                     />
                   </label>
                 </>
@@ -491,12 +498,13 @@ export default function FieldPanel({
                 </label>
               )}
               <label title="この領域とその輪郭のメッシュ特性長。0で解除 (全体サイズを使用)。非構造メッシュのみ有効">
-                ローカルメッシュサイズ [mm] (0=全体)
+                ローカルメッシュサイズ [{unitLabel}] (0=全体)
                 <CommitNumberInput
-                  value={mToMm(
+                  value={mToUnit(
                     project.mesh.local_sizes?.find((ls) => ls.region === selected.id)?.size ?? 0,
+                    lengthUnit,
                   )}
-                  onCommit={(v) => setRegionLocalSize(selected.id, v > 0 ? mmToM(v) : null)}
+                  onCommit={(v) => setRegionLocalSize(selected.id, v > 0 ? unitToM(v, lengthUnit) : null)}
                 />
               </label>
               {(project.mesh.mode ?? "unstructured") === "structured" &&

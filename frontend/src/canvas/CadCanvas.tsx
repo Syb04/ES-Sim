@@ -12,6 +12,8 @@ import type {
   TraceResult,
 } from "../types";
 import { computeIsolines } from "./isolines";
+import { LENGTH_UNIT_LABEL, mToUnit } from "../units";
+import type { LengthUnit } from "../units";
 
 /**
  * CAD キャンバス
@@ -68,6 +70,8 @@ export interface PicFieldView {
 
 interface Props {
   project: Project;
+  // 長さの表示単位 (mm/µm)。project 内部は常に m のまま (カーソル座標・ルーラー目盛りの表示に使う)
+  lengthUnit: LengthUnit;
   result: SolveResult | null;
   // Mesh ボタン (解析なし) で生成したメッシュ。result がある間は result 側の表示を優先する
   meshResult: MeshResult | null;
@@ -145,7 +149,8 @@ function bcStyle(type: BoundaryCondition["type"]): { color: string; dash: number
   return { color: "#b070f0", dash: [8, 5], width: 2.5 }; // periodic
 }
 
-// 画面上でグリッド間隔が20px以上になるよう 1,10,100...mm から自動選択
+// 画面上でグリッド間隔が20px以上になるよう 1,10,100...mm 相当 (世界座標=m) の
+// 10の冪から自動選択する。表示単位 (mm/µm) には依存しない (ラベル表示のみが追従する)
 function gridStep(scale: number): number {
   let step = 0.001;
   while (step * scale < 20) step *= 10;
@@ -305,6 +310,7 @@ function hitHandleRadius(
 
 export default function CadCanvas({
   project,
+  lengthUnit,
   result,
   meshResult,
   showMesh,
@@ -434,7 +440,7 @@ export default function CadCanvas({
     const sx = (x: number) => view.ox + x * view.scale;
     const sy = (y: number) => view.oy - y * view.scale;
 
-    // グリッド (1, 10, 100 mm を自動選択)
+    // グリッド (世界座標の10の冪ステップを自動選択。表示単位には依存しない)
     const step = gridStep(view.scale);
     ctx.strokeStyle = "#2a2f38";
     ctx.lineWidth = 1;
@@ -1124,7 +1130,7 @@ export default function CadCanvas({
 
       ctx.font = `${rulerFontSize}px system-ui, sans-serif`;
 
-      // 上辺: x 方向の目盛り (主目盛りに mm ラベル、1/10 間隔で副目盛り)
+      // 上辺: x 方向の目盛り (主目盛りに表示単位のラベル、1/10 間隔で副目盛り)
       const xStart = Math.floor(toWorld(RULER_SIZE, 0, view)[0] / minorStep) * minorStep;
       ctx.strokeStyle = "#8a919e";
       ctx.fillStyle = "#d8dce4";
@@ -1139,7 +1145,7 @@ export default function CadCanvas({
         const len = isMajor ? 9 : 4;
         ctx.moveTo(px, RULER_SIZE - len);
         ctx.lineTo(px, RULER_SIZE);
-        if (isMajor) ctx.fillText(`${Math.round(x * 1000)}`, px + 2, 1);
+        if (isMajor) ctx.fillText(`${Math.round(mToUnit(x, lengthUnit))}`, px + 2, 1);
       }
       ctx.stroke();
 
@@ -1158,7 +1164,7 @@ export default function CadCanvas({
           ctx.save();
           ctx.textAlign = "left";
           ctx.textBaseline = "middle";
-          ctx.fillText(`${Math.round(y * 1000)}`, 1, py);
+          ctx.fillText(`${Math.round(mToUnit(y, lengthUnit))}`, 1, py);
           ctx.restore();
         }
       }
@@ -1230,6 +1236,7 @@ export default function CadCanvas({
     isRz,
     isRzX0,
     isAxisym,
+    lengthUnit,
   ]);
 
   // Space キーの追跡 (入力欄にフォーカス中は無視)
@@ -1581,8 +1588,8 @@ export default function CadCanvas({
       />
       {cursor && (
         <div className="coords">
-          {isRzX0 ? "r" : isRz ? "z" : "x"}: {(cursor[0] * 1000).toFixed(2)} mm&nbsp;&nbsp;
-          {isRzX0 ? "z" : isRz ? "r" : "y"}: {(cursor[1] * 1000).toFixed(2)} mm
+          {isRzX0 ? "r" : isRz ? "z" : "x"}: {mToUnit(cursor[0], lengthUnit).toFixed(2)} {LENGTH_UNIT_LABEL[lengthUnit]}&nbsp;&nbsp;
+          {isRzX0 ? "z" : isRz ? "r" : "y"}: {mToUnit(cursor[1], lengthUnit).toFixed(2)} {LENGTH_UNIT_LABEL[lengthUnit]}
         </div>
       )}
       {/* 境界条件の凡例 (常時表示。色/線種は bcStyle() と対応させる) */}

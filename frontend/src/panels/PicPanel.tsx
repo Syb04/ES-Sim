@@ -3,6 +3,8 @@ import { api } from "../api";
 import { saveTextFile } from "../saveFile";
 import { CommitNullableNumberInput, CommitNumberInput, CommitTextInput } from "../CommitInput";
 import FnEmissionSection from "./FnPanel";
+import { LENGTH_UNIT_LABEL, mToUnit, unitToM } from "../units";
+import type { LengthUnit } from "../units";
 import { isAxisymmetric } from "../types";
 import type {
   Emitter,
@@ -67,6 +69,8 @@ export const PIC_FIELD_META: Record<Exclude<PicResultField, "live">, { unit: str
 
 interface Props {
   project: Project;
+  // 長さの表示・入力単位 (mm/µm)。project 内部は常に m のまま
+  lengthUnit: LengthUnit;
   pic: PicSettings;
   onChange: (next: PicSettings) => void;
   // フェーズ2 (粒子) パネルの現在のエミッタ設定。injection.emitter として共用する
@@ -164,13 +168,16 @@ function ProcessList({ processes }: { processes: XsProcess[] }) {
   );
 }
 
-function emitterSummary(e: Emitter): string {
-  if (e.kind === "point") return `点 (${(e.p1[0] * 1000).toFixed(1)}, ${(e.p1[1] * 1000).toFixed(1)} mm), n=${e.n}`;
-  return `ライン (${(e.p1[0] * 1000).toFixed(1)}, ${(e.p1[1] * 1000).toFixed(1)}) - (${(e.p2[0] * 1000).toFixed(1)}, ${(e.p2[1] * 1000).toFixed(1)}) mm, n=${e.n}`;
+function emitterSummary(e: Emitter, lengthUnit: LengthUnit): string {
+  const u = LENGTH_UNIT_LABEL[lengthUnit];
+  const f = (m: number) => mToUnit(m, lengthUnit).toFixed(1);
+  if (e.kind === "point") return `点 (${f(e.p1[0])}, ${f(e.p1[1])} ${u}), n=${e.n}`;
+  return `ライン (${f(e.p1[0])}, ${f(e.p1[1])}) - (${f(e.p2[0])}, ${f(e.p2[1])}) ${u}, n=${e.n}`;
 }
 
 export default function PicPanel({
   project,
+  lengthUnit,
   pic,
   onChange,
   emitter,
@@ -212,6 +219,7 @@ export default function PicPanel({
 }: Props) {
   // mode が "all" のときは従来通り両方表示。それ以外は該当モードのみ表示する
   const show = (m: "setup" | "results") => mode === "all" || mode === m;
+  const unitLabel = LENGTH_UNIT_LABEL[lengthUnit];
   // 有効チェックを一度オフにしても、再度オンにしたときに直前の値を復元できるよう保持する
   const plasmaDefaultsRef = useRef<InitialPlasma>(pic.initial_plasma ?? DEFAULT_INITIAL_PLASMA);
   useEffect(() => {
@@ -387,7 +395,7 @@ export default function PicPanel({
       {pic.injection && (
         <>
           <p className="hint">
-            エミッタはフェーズ2(粒子)パネルの設定を共用します: {emitterSummary(emitter)}
+            エミッタはフェーズ2(粒子)パネルの設定を共用します: {emitterSummary(emitter, lengthUnit)}
           </p>
           <div className="field">
             <span className="label">種</span>
@@ -626,17 +634,17 @@ export default function PicPanel({
             />
             <span
               className="collector-points"
-              title={`(${(c.p1[0] * 1000).toFixed(2)}, ${(c.p1[1] * 1000).toFixed(2)}) - (${(c.p2[0] * 1000).toFixed(2)}, ${(c.p2[1] * 1000).toFixed(2)}) mm`}
+              title={`(${mToUnit(c.p1[0], lengthUnit).toFixed(2)}, ${mToUnit(c.p1[1], lengthUnit).toFixed(2)}) - (${mToUnit(c.p2[0], lengthUnit).toFixed(2)}, ${mToUnit(c.p2[1], lengthUnit).toFixed(2)}) ${unitLabel}`}
             >
-              ({(c.p1[0] * 1000).toFixed(1)},{(c.p1[1] * 1000).toFixed(1)})–({(c.p2[0] * 1000).toFixed(1)},{(c.p2[1] * 1000).toFixed(1)})
+              ({mToUnit(c.p1[0], lengthUnit).toFixed(1)},{mToUnit(c.p1[1], lengthUnit).toFixed(1)})–({mToUnit(c.p2[0], lengthUnit).toFixed(1)},{mToUnit(c.p2[1], lengthUnit).toFixed(1)})
             </span>
             <input
               type="text"
               inputMode="decimal"
               className="collector-tol-input"
               placeholder="mesh"
-              title="判定距離 tol [mm] (空欄=メッシュサイズ)"
-              value={c.tol == null ? "" : String(c.tol * 1000)}
+              title={`判定距離 tol [${unitLabel}] (空欄=メッシュサイズ)`}
+              value={c.tol == null ? "" : String(mToUnit(c.tol, lengthUnit))}
               onClick={(e) => e.stopPropagation()}
               onChange={(e) => {
                 const raw = e.target.value;
@@ -645,7 +653,7 @@ export default function PicPanel({
                   return;
                 }
                 const n = Number(raw);
-                if (Number.isFinite(n)) onUpdateCollector(i, { tol: n / 1000 });
+                if (Number.isFinite(n)) onUpdateCollector(i, { tol: unitToM(n, lengthUnit) });
               }}
             />
             <button

@@ -1,5 +1,6 @@
 import { CommitNullableNumberInput, CommitNumberInput } from "../CommitInput";
-import { mToMm, mmToM } from "../units";
+import { LENGTH_UNIT_LABEL, mToUnit, unitToM } from "../units";
+import type { LengthUnit } from "../units";
 import FnEmissionSection from "./FnPanel";
 import { isAxisymmetric } from "../types";
 import type { Emitter, FnEmission, ParticleSettings, Project, Species, TraceResult } from "../types";
@@ -15,6 +16,8 @@ import type { Emitter, FnEmission, ParticleSettings, Project, Species, TraceResu
 
 interface Props {
   project: Project;
+  // 長さの表示・入力単位 (mm/µm)。project 内部は常に m のまま
+  lengthUnit: LengthUnit;
   particles: ParticleSettings;
   onChange: (next: ParticleSettings) => void;
   busy: boolean;
@@ -34,6 +37,7 @@ const PROTON: Species = { preset: "proton" };
 
 export default function ParticlePanel({
   project,
+  lengthUnit,
   particles,
   onChange,
   busy,
@@ -49,6 +53,7 @@ export default function ParticlePanel({
 
   const { species, emitter, fn } = particles;
   const fnEnabled = !!fn;
+  const unitLabel = LENGTH_UNIT_LABEL[lengthUnit];
 
   const setSpecies = (next: Species) => onChange({ ...particles, species: next });
   const setEmitter = (patch: Partial<Emitter>) =>
@@ -153,37 +158,37 @@ export default function ParticlePanel({
             </select>
           </div>
           <div className="field">
-            <span className="label">p1 x [mm]</span>
+            <span className="label">p1 x [{unitLabel}]</span>
             <CommitNumberInput
-              value={mToMm(emitter.p1[0])}
+              value={mToUnit(emitter.p1[0], lengthUnit)}
               step="0.1"
-              onCommit={(x) => setEmitter({ p1: [mmToM(x), emitter.p1[1]] })}
+              onCommit={(x) => setEmitter({ p1: [unitToM(x, lengthUnit), emitter.p1[1]] })}
             />
           </div>
           <div className="field">
-            <span className="label">p1 y [mm]</span>
+            <span className="label">p1 y [{unitLabel}]</span>
             <CommitNumberInput
-              value={mToMm(emitter.p1[1])}
+              value={mToUnit(emitter.p1[1], lengthUnit)}
               step="0.1"
-              onCommit={(y) => setEmitter({ p1: [emitter.p1[0], mmToM(y)] })}
+              onCommit={(y) => setEmitter({ p1: [emitter.p1[0], unitToM(y, lengthUnit)] })}
             />
           </div>
           {emitter.kind === "line" && (
             <>
               <div className="field">
-                <span className="label">p2 x [mm]</span>
+                <span className="label">p2 x [{unitLabel}]</span>
                 <CommitNumberInput
-                  value={mToMm(emitter.p2[0])}
+                  value={mToUnit(emitter.p2[0], lengthUnit)}
                   step="0.1"
-                  onCommit={(x) => setEmitter({ p2: [mmToM(x), emitter.p2[1]] })}
+                  onCommit={(x) => setEmitter({ p2: [unitToM(x, lengthUnit), emitter.p2[1]] })}
                 />
               </div>
               <div className="field">
-                <span className="label">p2 y [mm]</span>
+                <span className="label">p2 y [{unitLabel}]</span>
                 <CommitNumberInput
-                  value={mToMm(emitter.p2[1])}
+                  value={mToUnit(emitter.p2[1], lengthUnit)}
                   step="0.1"
-                  onCommit={(y) => setEmitter({ p2: [emitter.p2[0], mmToM(y)] })}
+                  onCommit={(y) => setEmitter({ p2: [emitter.p2[0], unitToM(y, lengthUnit)] })}
                 />
               </div>
             </>

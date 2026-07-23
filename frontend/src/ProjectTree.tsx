@@ -1,5 +1,7 @@
 import { useState } from "react";
 import { EDGE_LABELS_RZ, EDGE_LABELS_RZ_X0, EDGE_LABELS_XY } from "./panels/FieldPanel";
+import { LENGTH_UNIT_LABEL, mToUnit } from "./units";
+import type { LengthUnit } from "./units";
 import { isAxisymmetric, rfComponents } from "./types";
 import type {
   DsmcResult,
@@ -39,6 +41,8 @@ export type TreeNode =
 
 interface Props {
   project: Project;
+  // 長さの表示単位 (mm/µm)。project 内部は常に m のまま
+  lengthUnit: LengthUnit;
   activeNode: TreeNode;
   onSelectNode: (node: TreeNode) => void;
   selectedRegionId: string | null;
@@ -79,6 +83,7 @@ function pct(numer: number, denom: number): number {
 
 export default function ProjectTree({
   project,
+  lengthUnit,
   activeNode,
   onSelectNode,
   selectedRegionId,
@@ -239,7 +244,10 @@ export default function ProjectTree({
                   onClick={() => onSelectNode("mesh")}
                 >
                   <span>メッシュ</span>
-                  <span className="tree-row-sub">{(project.mesh.size * 1000).toFixed(2)}mm</span>
+                  <span className="tree-row-sub">
+                    {mToUnit(project.mesh.size, lengthUnit).toFixed(2)}
+                    {LENGTH_UNIT_LABEL[lengthUnit]}
+                  </span>
                 </div>
               )}
 

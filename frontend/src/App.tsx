@@ -20,7 +20,8 @@ import type { DsmcClientCallbacks } from "./dsmcClient";
 import { useHistory } from "./useHistory";
 import { saveTextFile } from "./saveFile";
 import { isAxisymmetric, toDiagArray } from "./types";
-import { mToMm, mmToM } from "./units";
+import { LENGTH_UNIT_LABEL } from "./units";
+import type { LengthUnit } from "./units";
 import type {
   BField,
   BoundaryCondition,
@@ -88,6 +89,9 @@ function withInjectionEmitter(pic: PicSettings, emitter: ParticleSettings["emitt
 
 // コレクタ追加数の上限 (バックエンドの validator と同じ、prompts/36/37)
 const MAX_COLLECTORS = 8;
+
+// 長さ表示単位の localStorage キー。プロジェクトファイルには含めない (表示設定のみ)
+const LENGTH_UNIT_STORAGE_KEY = "es-sim-length-unit";
 
 // 次のコレクタラベルを生成する ("C1", "C2", ...)。既存ラベルが "C<数字>" 形式の場合のみ
 // 番号を拾い、その最大値+1を使う (欠番があっても詰めない。カスタムラベルは無視する)
@@ -204,6 +208,15 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
 
   const [tool, setTool] = useState<Tool>("select");
+  // 長さ表示単位 (mm/µm)。内部データ (project) は m のままで、表示・入力の解釈のみが変わる。
+  // FN電界放出の検証など µm スケールの形状を扱う場合に切替える (ユーザー要望、prompts/62)
+  const [lengthUnit, setLengthUnit] = useState<LengthUnit>(() => {
+    const saved = localStorage.getItem(LENGTH_UNIT_STORAGE_KEY);
+    return saved === "mm" || saved === "um" ? saved : "mm";
+  });
+  useEffect(() => {
+    localStorage.setItem(LENGTH_UNIT_STORAGE_KEY, lengthUnit);
+  }, [lengthUnit]);
   const [gridSnap, setGridSnap] = useState(true);
   // ルーラー目盛りラベルのフォントサイズ (px)。プロジェクトファイルには保存しない表示設定
   const [rulerFontSize, setRulerFontSize] = useState(11);
@@ -1167,6 +1180,13 @@ export default function App() {
             <option value="rz_x0">軸対称 r-z (左辺が軸)</option>
           </select>
         </label>
+        <label className="snap" title="長さの表示・入力単位を切替えます (project 内部は常に m)">
+          単位
+          <select value={lengthUnit} onChange={(e) => setLengthUnit(e.target.value as LengthUnit)}>
+            <option value="mm">{LENGTH_UNIT_LABEL.mm}</option>
+            <option value="um">{LENGTH_UNIT_LABEL.um}</option>
+          </select>
+        </label>
         <div className="spacer" />
         <label
           className="snap port-field"
@@ -1200,6 +1220,7 @@ export default function App() {
         <div className="tree-col">
           <ProjectTree
             project={project}
+            lengthUnit={lengthUnit}
             activeNode={activeNode}
             onSelectNode={selectNode}
             selectedRegionId={selectedRegionId}
@@ -1233,6 +1254,7 @@ export default function App() {
             <div style={{ display: showFieldPage ? "block" : "none" }}>
               <FieldPanel
                 project={project}
+                lengthUnit={lengthUnit}
                 domainW={domainW}
                 domainH={domainH}
                 setDomainSize={setDomainSize}
@@ -1272,6 +1294,7 @@ export default function App() {
             <div style={{ display: showParticleSetupPage ? "block" : "none" }}>
               <ParticlePanel
                 project={project}
+                lengthUnit={lengthUnit}
                 particles={particles}
                 onChange={setParticles}
                 busy={busy}
@@ -1286,6 +1309,7 @@ export default function App() {
             <div style={{ display: showParticleResultsPage ? "block" : "none" }}>
               <ParticlePanel
                 project={project}
+                lengthUnit={lengthUnit}
                 particles={particles}
                 onChange={setParticles}
                 busy={busy}
@@ -1303,6 +1327,7 @@ export default function App() {
             <div style={{ display: showPicSetupPage ? "block" : "none" }}>
               <PicPanel
                 project={project}
+                lengthUnit={lengthUnit}
                 pic={pic}
                 onChange={setPic}
                 emitter={particles.emitter}
@@ -1351,6 +1376,7 @@ export default function App() {
             <div style={{ display: showPicResultsPage ? "block" : "none" }}>
               <PicPanel
                 project={project}
+                lengthUnit={lengthUnit}
                 pic={pic}
                 onChange={setPic}
                 emitter={particles.emitter}
@@ -1402,6 +1428,7 @@ export default function App() {
             <div style={{ display: showGasSetupPage ? "block" : "none" }}>
               <GasPanel
                 project={project}
+                lengthUnit={lengthUnit}
                 dsmc={project.dsmc ?? null}
                 onChange={setDsmc}
                 canRun={!!health}
@@ -1421,6 +1448,7 @@ export default function App() {
             <div style={{ display: showGasResultsPage ? "block" : "none" }}>
               <GasPanel
                 project={project}
+                lengthUnit={lengthUnit}
                 dsmc={project.dsmc ?? null}
                 onChange={setDsmc}
                 canRun={!!health}
@@ -1603,6 +1631,7 @@ export default function App() {
 
           <CadCanvas
             project={project}
+            lengthUnit={lengthUnit}
             result={result}
             meshResult={meshResult}
             showMesh={showMesh}
@@ -1634,6 +1663,7 @@ export default function App() {
           {profileLine && (
             <ProfilePanel
               project={project}
+              lengthUnit={lengthUnit}
               p1={profileLine[0]}
               p2={profileLine[1]}
               onClose={() => setProfileLine(null)}
