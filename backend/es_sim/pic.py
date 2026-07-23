@@ -28,7 +28,7 @@ import scipy.sparse.linalg as spla
 
 from .fem import EPS0, _material_arrays, _radial_index, assemble
 from .fn import build_fn_surface, distribute_particles, fn_segment_currents
-from .mcc import MccModel
+from .mcc import GasField, MccModel
 from .meshing import generate_mesh
 from .particles import (
     ME,
@@ -99,11 +99,13 @@ class PicSimulation:
     step() ごとに右辺のみ更新して解く。
     """
 
-    def __init__(self, project: Project):
+    def __init__(self, project: Project, gas_field: GasField | None = None):
         if project.pic is None:
             raise ValueError("project.pic が指定されていません")
         self.project = project
         self.pic: PicSettings = project.pic
+        # 非一様背景ガス場 (prompts/54)。DSMC の定常解などを MCC が参照する
+        self.gas_field = gas_field
         # 軸対称モード (prompts/47)。rz: 径方向 = y、rz_x0: 径方向 = x。
         # マクロ粒子は「リング」(周方向に一様な実粒子 w 個の輪) として扱い、
         # v[:, 2] は vz の代わりに vθ (周方向速度) を表す
@@ -358,8 +360,18 @@ class PicSimulation:
                 )
 
         # ---- MCC (モンテカルロ衝突、prompts/19) ------------------------------
-        # mcc=null なら無効 (従来の無衝突動作と完全一致)
-        self.mcc = MccModel(self.pic.mcc, self.m_ion) if self.pic.mcc is not None else None
+        # mcc=null なら無効 (従来の無衝突動作と完全一致)。
+        # gas_field あり (prompts/54) なら要素数の整合を検査して MCC へ渡す
+        if gas_field is not None and len(gas_field.n_g) != len(self.tris):
+            raise ValueError(
+                f"ガス場の要素数 ({len(gas_field.n_g)}) がメッシュの要素数 "
+                f"({len(self.tris)}) と一致しません (DSMC を再実行してください)"
+            )
+        self.mcc = (
+            MccModel(self.pic.mcc, self.m_ion, gas_field)
+            if self.pic.mcc is not None
+            else None
+        )
 
         # ---- SEE (二次電子放出) の境界エッジ属性表 ----------------------------
         mcc_seed = self.pic.mcc.seed if self.pic.mcc is not None else 0
@@ -1380,8 +1392,10 @@ class PicSimulation:
             if io.mobile and len(io.x) and push_ions:
                 # サブサイクル時 (prompts/50) はイオン衝突もプッシュステップに
                 # 実効刻み _sub·dt でまとめて適用する (衝突は速度のみ変えるため
-                # 堆積キャッシュには影響しない)
-                self.mcc.collide_ions(io.v, dt * self._sub if self._sub > 1 else dt)
+                # 堆積キャッシュには影響しない)。elem は非一様ガス場の局所参照用
+                self.mcc.collide_ions(
+                    io.v, dt * self._sub if self._sub > 1 else dt, io.elem
+                )
 
         # 6. 注入
         if self.pic.injection is not None:

@@ -318,6 +318,9 @@ class MccSettings(BaseModel):
     # イオン断面積テーブルの参照エネルギー系: "lab" = 実験室系イオンエネルギー (従来動作)、
     # "com" = 重心系エネルギー E = ½μg² (μ = m_i·m_g/(m_i+m_g)、Turner の He+/He データ用)
     ion_energy_frame: Literal["com", "lab"] = "lab"
+    # true なら直前に実行した DSMC の定常ガス場 (n·T·u) を背景として使う (prompts/54)。
+    # サーバーが保持する DSMC 結果とメッシュが一致している必要がある
+    use_dsmc_gas: bool = False
 
 
 class Collector(BaseModel):
@@ -378,6 +381,60 @@ class PicSettings(BaseModel):
     threads: int = Field(1, ge=1, le=32)
 
 
+# ---- DSMC (定常ガス流れ、prompts/54) ------------------------------------------
+
+
+class DsmcGas(BaseModel):
+    """DSMC のガス分子モデル (VHS: Variable Hard Sphere)。既定は Ar。"""
+
+    name: str = "Ar"
+    mass_amu: float = Field(39.948, gt=0, description="分子質量 [amu]")
+    d_ref_m: float = Field(4.17e-10, gt=0, description="VHS 基準直径 [m] (T_ref にて)")
+    omega: float = Field(0.81, ge=0.5, le=1.0, description="粘性の温度指数 ω (HS=0.5)")
+    t_ref_k: float = Field(273.0, gt=0, description="基準温度 [K]")
+
+
+class DsmcBoundary(BaseModel):
+    """domain 外周エッジの DSMC 境界条件。未指定エッジは拡散反射壁になる。
+
+    - "wall":     拡散反射 (完全適応、temperature_k で再放出)
+    - "symmetry": 鏡面反射
+    - "inlet":    圧力リザーバ (pressure_pa, temperature_k の平衡流入 + 流出吸収)
+    - "outlet":   圧力リザーバまたは真空 (pressure_pa 省略/0 = 真空排気)
+    """
+
+    edges: list[int]
+    type: Literal["wall", "symmetry", "inlet", "outlet"] = "wall"
+    temperature_k: float = Field(300.0, gt=0)
+    pressure_pa: float | None = Field(None, ge=0)
+
+    @model_validator(mode="after")
+    def _check_inlet_pressure(self) -> "DsmcBoundary":
+        if self.type == "inlet" and not (self.pressure_pa and self.pressure_pa > 0.0):
+            raise ValueError("inlet には pressure_pa (> 0) の指定が必要です")
+        return self
+
+
+class DsmcSettings(BaseModel):
+    """定常ガス流れの DSMC 設定 (prompts/54)。null なら無効。
+
+    NTC 法 + VHS 分子モデル。既存の三角形メッシュをセルとして使い、
+    定常後の時間平均で要素ごとの n・T・u を得る (MCC の背景ガス場に使える)。
+    平面2D (coord="xy") のみ対応。
+    """
+
+    gas: DsmcGas = DsmcGas()
+    boundaries: list[DsmcBoundary] = []
+    wall_temperature_k: float = Field(300.0, gt=0, description="未指定エッジ・領域輪郭の壁温 [K]")
+    init_pressure_pa: float = Field(..., gt=0, description="初期充填圧 [Pa]")
+    init_temperature_k: float = Field(300.0, gt=0)
+    n_particles: int = Field(50000, gt=0, description="目標シミュレーション粒子数")
+    dt: float | None = Field(None, description="秒。None なら 0.25·h_min/v_mp から自動")
+    n_steps: int = Field(2000, gt=0)
+    avg_steps: int = Field(500, gt=0, description="最終 N ステップで時間平均")
+    seed: int = 0
+
+
 class Project(BaseModel):
     version: int = 1
     unit: Literal["m", "mm"] = "m"
@@ -390,6 +447,8 @@ class Project(BaseModel):
     solver: SolverSettings = SolverSettings()
     # 一様磁場 [T] (prompts/51)。null または全成分 0 で磁場なし (従来と完全一致)
     b_field: BField | None = None
+    # 定常ガス流れの DSMC 設定 (prompts/54)。null なら無効
+    dsmc: DsmcSettings | None = None
     particles: ParticleSettings | None = None
     pic: PicSettings | None = None
 
@@ -437,6 +496,21 @@ class Project(BaseModel):
 
 
 # ---- API レスポンス ----------------------------------------------------------
+
+
+class DsmcResultModel(BaseModel):
+    """POST /dsmc のレスポンス (定常時間平均のガス場、prompts/54)。"""
+
+    mesh: "MeshResult"
+    n: list[float]                    # 要素ごとの数密度 [m^-3]
+    t: list[float]                    # 要素ごとの温度 [K]
+    u: list[tuple[float, float]]      # 要素ごとの面内流速 [m/s]
+    p: list[float]                    # 要素ごとの圧力 [Pa] = n kB T
+    n_particles: int                  # 最終シミュレーション粒子数
+    macro_weight: float               # 実分子数/シミュレーション粒子
+    dt: float                         # 実際に使った dt [s]
+    inflow: float                     # 平均区間の流入実分子数
+    outflow: float                    # 平均区間の流出実分子数
 
 
 class MeshResult(BaseModel):

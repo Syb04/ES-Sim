@@ -22,7 +22,10 @@ from .meshing import generate_mesh
 from .particles import trace
 from .pic import PicSimulation
 from .postprocess import sample_line
+from .dsmc import DsmcSimulation
+from .mcc import GasField
 from .schema import (
+    DsmcResultModel,
     LxcatParseRequest,
     LxcatParseResult,
     MeshResult,
@@ -129,6 +132,45 @@ def trace_endpoint(project: Project) -> TraceResult:
     )
 
 
+# ---- DSMC (定常ガス流れ、prompts/54) ------------------------------------------
+
+# 直近の DSMC 結果 (プロセス内に1つ)。PIC の mcc.use_dsmc_gas が参照する
+_last_dsmc: dict | None = None
+
+
+@app.post("/dsmc", response_model=DsmcResultModel)
+def dsmc_endpoint(project: Project) -> DsmcResultModel:
+    """定常ガス流れの DSMC を実行し、要素ごとの n・T・u・p を返す。
+
+    結果はサーバー内に保持され、PIC (mcc.use_dsmc_gas=true) の背景ガス場として
+    使われる (メッシュの要素数が一致している必要がある)。
+    """
+    global _last_dsmc
+    if project.dsmc is None:
+        raise HTTPException(status_code=422, detail="project.dsmc が指定されていません")
+    try:
+        sim = DsmcSimulation(project)
+        res = sim.run()
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    _last_dsmc = {
+        "n_elems": len(res.n),
+        "field": GasField(n_g=res.n, t_g=res.t, u_g=res.u),
+    }
+    return DsmcResultModel(
+        mesh=_mesh_result(sim.mesh),
+        n=res.n.tolist(),
+        t=res.t.tolist(),
+        u=[tuple(x) for x in res.u.tolist()],
+        p=res.p.tolist(),
+        n_particles=res.n_particles,
+        macro_weight=res.macro_weight,
+        dt=res.dt,
+        inflow=res.inflow,
+        outflow=res.outflow,
+    )
+
+
 @app.post("/lxcat/parse", response_model=LxcatParseResult)
 def lxcat_parse_endpoint(req: LxcatParseRequest) -> LxcatParseResult:
     """LXCat 形式テキストをパースして断面積プロセス一覧を返す (prompts/19)。"""
@@ -153,8 +195,20 @@ async def _run_pic_session(ws: WebSocket, project_dict: dict) -> None:
     global _last_sim
     try:
         project = Project.model_validate(project_dict)
+        # 非一様背景ガス場 (prompts/54): mcc.use_dsmc_gas なら直近の DSMC 結果を渡す
+        gas_field = None
+        if (
+            project.pic is not None
+            and project.pic.mcc is not None
+            and project.pic.mcc.use_dsmc_gas
+        ):
+            if _last_dsmc is None:
+                raise ValueError(
+                    "DSMC の実行結果がありません (先にガス流れ (DSMC) を実行してください)"
+                )
+            gas_field = _last_dsmc["field"]
         # メッシュ生成・行列組み立ても重いのでスレッドで実行
-        sim = await asyncio.to_thread(PicSimulation, project)
+        sim = await asyncio.to_thread(PicSimulation, project, gas_field)
     except Exception as exc:
         await ws.send_json({"type": "error", "detail": str(exc)})
         return
