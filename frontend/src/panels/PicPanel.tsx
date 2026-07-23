@@ -673,6 +673,8 @@ export default function PicPanel({
                 color="#ffb84d"
                 fixedRange={[-90, 90]}
               />
+              <p className="hint">IAEDF (角度×エネルギー、カラー = 確率密度)</p>
+              <IaedfChart result={selectedResult} bins={collectorBins} />
               {csvError && <div className="error">{csvError}</div>}
               <div className="actions">
                 <button className="secondary" onClick={downloadCollectorCsv}>
@@ -1024,6 +1026,240 @@ function HistogramChart({ values, weights, bins, unit, color, fixedRange }: Hist
         {hoverIdx !== null && hoverBinLo !== null && hoverBinHi !== null
           ? `${hoverBinLo.toFixed(2)} 〜 ${hoverBinHi.toFixed(2)} ${unit}: ${counts[hoverIdx].toExponential(3)}`
           : " "}
+      </div>
+    </div>
+  );
+}
+
+// 簡易 viridis 風カラーマップ (CadCanvas の colormap と同じ制御点、canvas/CadCanvas.tsx からは
+// export されていないためここで独立に定義する)
+const IAEDF_COLOR_STOPS: [number, number, number][] = [
+  [68, 1, 84], [59, 82, 139], [33, 145, 140], [94, 201, 98], [253, 231, 37],
+];
+function iaedfColormap(t: number): string {
+  const x = Math.min(0.9999, Math.max(0, t)) * (IAEDF_COLOR_STOPS.length - 1);
+  const i = Math.floor(x);
+  const f = x - i;
+  const [r1, g1, b1] = IAEDF_COLOR_STOPS[i];
+  const [r2, g2, b2] = IAEDF_COLOR_STOPS[i + 1];
+  return `rgb(${r1 + (r2 - r1) * f},${g1 + (g2 - g1) * f},${b1 + (b2 - b1) * f})`;
+}
+// 0カウントのビンに使う背景色 (既存ダークテーマの canvas 背景相当)
+const IAEDF_BG_COLOR = "#0e1116";
+
+interface IaedfChartProps {
+  result: PicCollectorResult;
+  bins: number;
+}
+
+// IAEDF (角度×エネルギー) 2Dヒートマップ。HistogramChart と同じ canvas 直描きスタイル
+// (枠 #363c48, 9px 目盛りフォント, padL≈44) に合わせ、右側に細いカラーバーを添える。
+// 横軸=入射角 [-90,90] 固定、縦軸=エネルギー (サンプルのmin/max、下から上へ増加)。
+// 「対数」チェックボックスでカラーを log10 スケールに切替できる (0カウントは常に背景色)
+function IaedfChart({ result, bins }: IaedfChartProps) {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const [hoverCell, setHoverCell] = useState<{ ix: number; iy: number } | null>(null);
+  const [logScale, setLogScale] = useState(false);
+  const scaleRef = useRef<{ padL: number; padT: number; plotW: number; plotH: number; nx: number; ny: number } | null>(
+    null
+  );
+
+  // 重み付き2Dカウントのビニング (角度は常に[-90,90]固定、エネルギーはサンプルのmin/max)
+  const { counts, eLo, eHi, maxCount, nx, ny } = useMemo(() => {
+    const n = Math.max(1, Math.round(bins));
+    const nx = n;
+    const ny = n;
+    const aLo = -90;
+    const aHi = 90;
+    const energies = result.energies_ev;
+    let eLo: number;
+    let eHi: number;
+    if (energies.length === 0) {
+      eLo = 0;
+      eHi = 1;
+    } else {
+      eLo = Math.min(...energies);
+      eHi = Math.max(...energies);
+      if (!(eHi > eLo)) eHi = eLo + 1;
+    }
+    const counts: number[][] = [];
+    for (let j = 0; j < ny; j++) counts.push(new Array(nx).fill(0));
+    const aRange = aHi - aLo || 1;
+    const eRange = eHi - eLo || 1;
+    for (let i = 0; i < energies.length; i++) {
+      const a = result.angles_deg[i];
+      const e = energies[i];
+      let ix = Math.floor(((a - aLo) / aRange) * nx);
+      let iy = Math.floor(((e - eLo) / eRange) * ny);
+      if (ix < 0) ix = 0;
+      if (ix >= nx) ix = nx - 1;
+      if (iy < 0) iy = 0;
+      if (iy >= ny) iy = ny - 1;
+      counts[iy][ix] += result.weights[i] ?? 1;
+    }
+    let maxCount = 0;
+    for (let j = 0; j < ny; j++) {
+      for (let i = 0; i < nx; i++) {
+        if (counts[j][i] > maxCount) maxCount = counts[j][i];
+      }
+    }
+    return { counts, eLo, eHi, maxCount, nx, ny };
+  }, [result, bins]);
+
+  useEffect(() => {
+    const el = canvasRef.current;
+    if (!el) return;
+    const dpr = window.devicePixelRatio || 1;
+    const rect = el.getBoundingClientRect();
+    el.width = rect.width * dpr;
+    el.height = rect.height * dpr;
+    const ctx = el.getContext("2d")!;
+    ctx.scale(dpr, dpr);
+    ctx.clearRect(0, 0, rect.width, rect.height);
+
+    const padL = 44;
+    const padT = 6;
+    const padB = 16;
+    const barW = 14;
+    const barGap = 8;
+    const labelW = 52; // カラーバー右のtoExponential(2)ラベル分の余白見積もり
+    const padR = barW + barGap + labelW;
+    const plotW = rect.width - padL - padR;
+    const plotH = rect.height - padT - padB;
+    scaleRef.current = { padL, padT, plotW, plotH, nx, ny };
+
+    const cellW = plotW / nx;
+    const cellH = plotH / ny;
+
+    // 対数スケール時の正規化に使う「正の最小カウント」
+    let minPositive = Infinity;
+    for (let j = 0; j < ny; j++) {
+      for (let i = 0; i < nx; i++) {
+        const v = counts[j][i];
+        if (v > 0 && v < minPositive) minPositive = v;
+      }
+    }
+    if (!(minPositive < Infinity)) minPositive = 1e-30;
+    const maxCountSafe = Math.max(maxCount, 1e-30);
+    const logLo = Math.log10(minPositive);
+    const logHi = Math.log10(maxCountSafe);
+    const logRange = logHi - logLo || 1;
+
+    // 正規化: 0ビンは負値を返し、呼び出し側で背景色に落とす
+    const normalize = (v: number): number => {
+      if (v <= 0) return -1;
+      if (logScale) return (Math.log10(v) - logLo) / logRange;
+      return v / maxCountSafe;
+    };
+
+    // ヒートマップ本体 (行iy=0がエネルギー最小=下端になるよう描画)
+    for (let j = 0; j < ny; j++) {
+      const y = padT + plotH - (j + 1) * cellH;
+      for (let i = 0; i < nx; i++) {
+        const t = normalize(counts[j][i]);
+        ctx.fillStyle = t < 0 ? IAEDF_BG_COLOR : iaedfColormap(t);
+        const x = padL + i * cellW;
+        // 継ぎ目の隙間を避けるためわずかに重ねて描画する
+        ctx.fillRect(x, y, cellW + 0.6, cellH + 0.6);
+      }
+    }
+
+    // 枠
+    ctx.strokeStyle = "#363c48";
+    ctx.lineWidth = 1;
+    ctx.strokeRect(padL, padT, plotW, plotH);
+
+    // 横軸目盛り (-90/0/90)
+    ctx.font = "9px system-ui, sans-serif";
+    ctx.fillStyle = "#8a919e";
+    ctx.textBaseline = "top";
+    ctx.textAlign = "left";
+    ctx.fillText("-90", padL, padT + plotH + 3);
+    ctx.textAlign = "center";
+    ctx.fillText("0", padL + plotW / 2, padT + plotH + 3);
+    ctx.textAlign = "right";
+    ctx.fillText("90", padL + plotW, padT + plotH + 3);
+
+    // 縦軸目盛り (min/中央/max エネルギー、下から上へ増加)
+    ctx.textAlign = "right";
+    ctx.textBaseline = "top";
+    ctx.fillText(eHi.toFixed(1), padL - 4, padT);
+    ctx.textBaseline = "middle";
+    ctx.fillText(((eLo + eHi) / 2).toFixed(1), padL - 4, padT + plotH / 2);
+    ctx.textBaseline = "bottom";
+    ctx.fillText(eLo.toFixed(1), padL - 4, padT + plotH);
+
+    // カラーバー (右側、縦方向。上=最大値、下=0)
+    const barX = padL + plotW + barGap;
+    const barY = padT;
+    const barH = plotH;
+    const steps = 32;
+    for (let s = 0; s < steps; s++) {
+      const tVal = 1 - s / steps; // このセルが表す色の正規化値 (上ほど大きい)
+      ctx.fillStyle = iaedfColormap(tVal);
+      const y = barY + (s / steps) * barH;
+      ctx.fillRect(barX, y, barW, barH / steps + 0.6);
+    }
+    ctx.strokeStyle = "#363c48";
+    ctx.strokeRect(barX, barY, barW, barH);
+    ctx.fillStyle = "#8a919e";
+    ctx.textAlign = "left";
+    ctx.textBaseline = "top";
+    ctx.fillText(maxCount.toExponential(2), barX + barW + 4, barY);
+    ctx.textBaseline = "bottom";
+    ctx.fillText("0", barX + barW + 4, barY + barH);
+
+    // ホバー中のビンを枠で強調
+    if (hoverCell) {
+      const { ix, iy } = hoverCell;
+      if (ix >= 0 && ix < nx && iy >= 0 && iy < ny) {
+        ctx.strokeStyle = "rgba(255,255,255,0.6)";
+        ctx.lineWidth = 1;
+        const x = padL + ix * cellW;
+        const y = padT + plotH - (iy + 1) * cellH;
+        ctx.strokeRect(x, y, cellW, cellH);
+      }
+    }
+  }, [counts, eLo, eHi, maxCount, nx, ny, hoverCell, logScale]);
+
+  const handleMouseMove = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    const el = canvasRef.current;
+    const sc = scaleRef.current;
+    if (!el || !sc) return;
+    const rect = el.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+    const ix = Math.floor((x - sc.padL) / (sc.plotW / sc.nx));
+    const rowFromTop = Math.floor((y - sc.padT) / (sc.plotH / sc.ny));
+    const iy = sc.ny - 1 - rowFromTop;
+    if (ix >= 0 && ix < sc.nx && iy >= 0 && iy < sc.ny) setHoverCell({ ix, iy });
+    else setHoverCell(null);
+  };
+
+  const aRange = 180;
+  const eRange = eHi - eLo || 1;
+  const hoverAngleLo = hoverCell ? -90 + (aRange * hoverCell.ix) / nx : null;
+  const hoverAngleHi = hoverCell ? -90 + (aRange * (hoverCell.ix + 1)) / nx : null;
+  const hoverEnergyLo = hoverCell ? eLo + (eRange * hoverCell.iy) / ny : null;
+  const hoverEnergyHi = hoverCell ? eLo + (eRange * (hoverCell.iy + 1)) / ny : null;
+  const hoverCount = hoverCell ? counts[hoverCell.iy][hoverCell.ix] : null;
+
+  return (
+    <div className="iedf-hist-wrap">
+      <canvas
+        ref={canvasRef}
+        className="iaedf-canvas"
+        onMouseMove={handleMouseMove}
+        onMouseLeave={() => setHoverCell(null)}
+      />
+      <div className="hint iedf-hist-hover">
+        {hoverCell && hoverAngleLo !== null && hoverAngleHi !== null && hoverEnergyLo !== null && hoverEnergyHi !== null
+          ? `${hoverAngleLo.toFixed(1)} 〜 ${hoverAngleHi.toFixed(1)} deg, ${hoverEnergyLo.toFixed(2)} 〜 ${hoverEnergyHi.toFixed(2)} eV: ${hoverCount!.toExponential(3)}`
+          : " "}
+      </div>
+      <div className="field iaedf-log-field">
+        <span className="label">対数スケール</span>
+        <input type="checkbox" checked={logScale} onChange={(e) => setLogScale(e.target.checked)} />
       </div>
     </div>
   );

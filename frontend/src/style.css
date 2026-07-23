@@ -231,3 +231,7 @@ button.danger:hover { background: #b34747; }
 .iedf-hist { display: block; width: 100%; height: 130px; background: var(--bg); border: 1px solid var(--border); border-radius: 3px; }
 .iedf-hist-hover { min-height: 14px; margin: 2px 0 0; }
 .pic-chart-legend .swatch { display: inline-block; width: 8px; height: 8px; border-radius: 2px; margin-right: 3px; vertical-align: middle; }
+
+/* PICパネル: IAEDF 2Dヒートマップ (角度×エネルギー、prompts/48) */
+.iaedf-canvas { display: block; width: 100%; height: 220px; background: var(--bg); border: 1px solid var(--border); border-radius: 3px; }
+.iaedf-log-field { margin: 2px 0 6px; }
