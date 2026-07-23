@@ -2,6 +2,7 @@ import { CommitNumberInput, CommitTextInput } from "../CommitInput";
 import { mToMm, mmToM } from "../units";
 import { isAxisymmetric, rfComponents } from "../types";
 import type {
+  BField,
   CircleShape,
   EdgeBcType,
   MeshResult,
@@ -109,6 +110,7 @@ interface Props {
   setEdgeSeeGamma: (edgeIndex: number, see_gamma: number) => void;
   setMeshSize: (size: number) => void;
   setMeshMode: (mode: "unstructured" | "structured") => void;
+  setBField: (patch: Partial<BField>) => void;
   meshResult: MeshResult | null;
   selectedRegionId: string | null;
   onSelectRegion: (id: string) => void;
@@ -136,6 +138,7 @@ export default function FieldPanel({
   setEdgeSeeGamma,
   setMeshSize,
   setMeshMode,
+  setBField,
   meshResult,
   selectedRegionId,
   onSelectRegion,
@@ -158,6 +161,7 @@ export default function FieldPanel({
   // domain 幅/高さのラベル。rz は x=z(軸方向)・y=r(径方向)、rz_x0 は x=r(径方向)・y=z(軸方向)
   const widthLabel = isRz ? "長さ z [mm]" : isRzX0 ? "半径 r [mm]" : "幅 [mm]";
   const heightLabel = isRz ? "半径 r [mm]" : isRzX0 ? "長さ z [mm]" : "高さ [mm]";
+  const bField = project.b_field ?? { bx: 0, by: 0, bz: 0 };
 
   return (
     <>
@@ -272,6 +276,38 @@ export default function FieldPanel({
           <div className="kv"><span>要素数</span><span>{meshResult.triangles.length}</span></div>
         </>
       )}
+
+      <h2>一様磁場 [T]</h2>
+      <div className="hint">
+        粒子軌道追跡・PIC のローレンツ力に適用 (静電場ソルブには影響しない)。軸対称モードでは使用不可
+      </div>
+      {isAxisym && (
+        <div className="hint">軸対称モードでは一様磁場は設定できません (∇·B=0 と矛盾するため)。</div>
+      )}
+      <div className="field">
+        <span className="label">Bx</span>
+        <CommitNumberInput
+          value={bField.bx}
+          disabled={isAxisym}
+          onCommit={(v) => setBField({ bx: v })}
+        />
+      </div>
+      <div className="field">
+        <span className="label">By</span>
+        <CommitNumberInput
+          value={bField.by}
+          disabled={isAxisym}
+          onCommit={(v) => setBField({ by: v })}
+        />
+      </div>
+      <div className="field">
+        <span className="label">Bz</span>
+        <CommitNumberInput
+          value={bField.bz}
+          disabled={isAxisym}
+          onCommit={(v) => setBField({ bz: v })}
+        />
+      </div>
 
       <h2>領域一覧 ({project.geometry.regions.length})</h2>
       <div className="region-list">

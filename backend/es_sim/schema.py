@@ -128,6 +128,23 @@ class Geometry(BaseModel):
         return self
 
 
+class BField(BaseModel):
+    """一様磁場 [T] (prompts/51)。
+
+    粒子軌道追跡・PIC のローレンツ力 (Boris 回転) に適用する。静電場ソルブには
+    影響しない。全成分 0 は未指定 (磁場なし) と等価。面内成分 (bx, by) は
+    面外速度 vz と結合し、bz は面内のジャイロ運動・E×B ドリフトを生む。
+    軸対称モード (rz / rz_x0) は未対応 (一様な径方向磁場は ∇·B=0 と矛盾するため)。
+    """
+
+    bx: float = 0.0
+    by: float = 0.0
+    bz: float = 0.0
+
+    def is_zero(self) -> bool:
+        return self.bx == 0.0 and self.by == 0.0 and self.bz == 0.0
+
+
 class LocalSize(BaseModel):
     region: str
     size: float
@@ -371,8 +388,19 @@ class Project(BaseModel):
     geometry: Geometry
     mesh: MeshSettings
     solver: SolverSettings = SolverSettings()
+    # 一様磁場 [T] (prompts/51)。null または全成分 0 で磁場なし (従来と完全一致)
+    b_field: BField | None = None
     particles: ParticleSettings | None = None
     pic: PicSettings | None = None
+
+    @model_validator(mode="after")
+    def _check_b_field(self) -> "Project":
+        if self.coord != "xy" and self.b_field is not None and not self.b_field.is_zero():
+            raise ValueError(
+                "一様磁場 (b_field) は平面2D (coord='xy') のみ対応です "
+                "(軸対称モードでは未対応)"
+            )
+        return self
 
     @model_validator(mode="after")
     def _check_rz(self) -> "Project":

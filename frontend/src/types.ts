@@ -355,6 +355,14 @@ export interface PicLiveFrame {
   particles: { electron: Point[]; ion: Point[] };
 }
 
+// 一様磁場 [T] (prompts/51)。粒子軌道追跡・PIC の Boris 法ローレンツ力にのみ適用され、
+// 静電場ソルブ (/solve) には影響しない。軸対称 (rz/rz_x0) では全成分0以外は不可 (∇·B=0 と矛盾するため)
+export interface BField {
+  bx: number;
+  by: number;
+  bz: number;
+}
+
 export interface Project {
   version: number;
   unit: "m" | "mm";
@@ -370,6 +378,8 @@ export interface Project {
   solver?: { backend: "numpy" | "cupy" | "auto" };
   particles?: ParticleSettings;
   pic?: PicSettings;
+  // 一様磁場 [T]。null/undefined または全成分0は磁場なしと同値
+  b_field?: BField | null;
 }
 
 // 軸対称モード判定 (rz: 下辺 y=0 が対称軸、rz_x0: 左辺 x=0 が対称軸)。

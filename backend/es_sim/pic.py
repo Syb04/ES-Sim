@@ -36,12 +36,14 @@ from .particles import (
     QE,
     _adjacency,
     _barycentric_coeffs,
+    _boris_matrix,
     _build_boundary_tables,
     _init_particles,
     _locate_initial,
     _pack_coeffs,
     _solid_elements,
     _walk_step,
+    b_vector,
 )
 from .schema import PicSettings, Project, rf_components
 
@@ -332,6 +334,23 @@ class PicSimulation:
             if self._nthreads > 1
             else None
         )
+
+        # ---- 一様磁場 (prompts/51) --------------------------------------------
+        # Boris 回転行列を種ごとに前計算する (イオンサブサイクルで dt が異なるため)。
+        # b_field なし (または全成分 0) では None = 従来経路と完全一致。
+        # 初期/注入の半ステップ後退キックは E のみの近似 (回転は初回ステップから)
+        self._b = b_vector(project)
+        self._boris_rt: dict[str, np.ndarray] = {}
+        if self._b is not None:
+            for name, q_s, m_s in (("electron", -QE, ME), ("ion", QE, self.m_ion)):
+                dt_s = self.dt * self._sub if (name == "ion" and self._sub > 1) else self.dt
+                self._boris_rt[name] = _boris_matrix(q_s, m_s, dt_s, self._b).T
+            wc_e = QE * float(np.linalg.norm(self._b)) / ME
+            if wc_e * self.dt > 0.3:
+                self.warnings.append(
+                    f"ωce·dt = {wc_e * self.dt:.3g} > 0.3: 電子サイクロトロン運動を"
+                    "解像できていません (dt を小さくしてください)"
+                )
 
         # ---- MCC (モンテカルロ衝突、prompts/19) ------------------------------
         # mcc=null なら無効 (従来の無衝突動作と完全一致)
@@ -1206,6 +1225,12 @@ class PicSimulation:
                 ang_l = sp.x[:, ridx] * sp.v[:, 2]  # 角運動量 L = r·vθ (保存量)
                 a_rz[:, ridx] += sp.v[:, 2] ** 2 / r_cur
                 v_new[:, :2] += dt_sp * a_rz
+            elif self._b is not None:
+                # 一様磁場 (prompts/51): Boris 法 (半キック E → 回転 B → 半キック E)
+                half = (sp.q / sp.m) * (0.5 * dt_sp)
+                v_new[:, :2] += half * e_at
+                v_new = v_new @ self._boris_rt[sp.name]
+                v_new[:, :2] += half * e_at
             else:
                 # 2d3v: E は vx, vy のみに作用し、vz はそのまま
                 v_new[:, :2] += (sp.q / sp.m) * dt_sp * e_at

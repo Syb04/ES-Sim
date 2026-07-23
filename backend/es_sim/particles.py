@@ -46,6 +46,34 @@ class TraceOutput:
     fn_current: float | None = None     # 総放出電流 (xy: [A/m]、rz: [A])
 
 
+def b_vector(project: Project) -> np.ndarray | None:
+    """project.b_field を (3,) ベクトル [T] にする。未指定・全成分 0 なら None。"""
+    b = project.b_field
+    if b is None or b.is_zero():
+        return None
+    return np.array([b.bx, b.by, b.bz], dtype=np.float64)
+
+
+def _boris_matrix(q: float, m: float, dt: float, b: np.ndarray) -> np.ndarray:
+    """Boris 回転の 3×3 行列 R を返す (v⁺ = R v⁻、prompts/51)。
+
+    t = (q dt / 2m) B、s = 2t/(1+|t|²) として
+        v' = v⁻ + v⁻×t、v⁺ = v⁻ + v'×s
+    は線形写像なので、一様磁場・固定 dt では行列を前計算できる。
+    v×t = -[t]×v より R = I - [s]× + [s]×[t]× (厳密にノルム保存)。
+    """
+    t = (q * dt / (2.0 * m)) * b
+    s = 2.0 * t / (1.0 + float(t @ t))
+
+    def cross_mat(a: np.ndarray) -> np.ndarray:
+        return np.array(
+            [[0.0, -a[2], a[1]], [a[2], 0.0, -a[0]], [-a[1], a[0], 0.0]]
+        )
+
+    st = cross_mat(s)
+    return np.eye(3) - st + st @ cross_mat(t)
+
+
 def _species_qm(species: Species) -> tuple[float, float]:
     """粒子種から (q, m) を決定する。"""
     if species.preset == "electron":
@@ -551,12 +579,16 @@ def trace(project: Project, mesh: Mesh, sol: Solution) -> TraceOutput:
     # 両半キックに組み込む。軸交差 (r<0) は径座標・径速度の鏡映で処理する
     ridx = _radial_index(project.coord)
     rz = ridx is not None
+    # 一様磁場 (prompts/51)。schema の validator で rz + B は弾かれている。
+    # B ありでは面内成分と vz が結合するため xy でも速度を3成分で扱う
+    b_vec = b_vector(project)
+    three_v = rz or b_vec is not None
     fn_currents: np.ndarray | None = None
     fn_total: float | None = None
     if settings.fn is not None:
         # FN 電界放出 (prompts/46): 電極表面の電界から放出電流を計算し、
         # fn.n 個のマクロ電子を電流比例で放出面に配置する
-        n_comp = 3 if rz else 2
+        n_comp = 3 if three_v else 2
         surf = build_fn_surface(project, mesh, adjacency, settings.fn)
         if surf is None:
             seg_i = np.zeros(0)
@@ -591,7 +623,7 @@ def trace(project: Project, mesh: Mesh, sol: Solution) -> TraceOutput:
             v0[:, :2] = speed * surf.nrm[seg_idx]
             fn_currents = seg_i[seg_idx] / counts[seg_idx]
     else:
-        x0, v0 = _init_particles(settings.emitter, m, vtheta=rz)
+        x0, v0 = _init_particles(settings.emitter, m, vtheta=three_v)
     n = len(x0)
     ang_l = x0[:, ridx] * v0[:, 2] if rz else None  # L = r·vθ (軸鏡映で符号反転)
     _R_TINY = 1e-30  # 軸上 (r=0) のゼロ割ガード
@@ -599,7 +631,15 @@ def trace(project: Project, mesh: Mesh, sol: Solution) -> TraceOutput:
     dt = settings.dt
     if dt is None:
         dt = _estimate_dt(mesh, e_field, v0, q, m)
+        if b_vec is not None:
+            # ジャイロ運動の解像: dt ≤ 0.2/ωc (Boris は無条件安定だが精度確保)
+            wc = abs(q) * float(np.linalg.norm(b_vec)) / m
+            if wc > 0.0:
+                dt = min(dt, 0.2 / wc)
     dt = float(dt)
+
+    # Boris 回転行列 (一様磁場・固定 dt なので前計算できる)。転置を持ち v @ R.T で適用
+    boris_rt = _boris_matrix(q, m, dt, b_vec).T if b_vec is not None else None
 
     n_steps = settings.n_steps
     save_every = settings.save_every
@@ -630,6 +670,13 @@ def trace(project: Project, mesh: Mesh, sol: Solution) -> TraceOutput:
                 vth = np.where(l_act != 0.0, l_act / r_cur, 0.0)
                 a_cur[:, ridx] += vth * vth / r_cur  # (qm*e_at は新規配列なので in-place 可)
                 v_half = v[idx_active, :2] + 0.5 * dt * a_cur
+            elif boris_rt is not None:
+                # 一様磁場 (prompts/51): Boris 法。半キック (E) → 回転 (B) の順で
+                # 3成分速度 v3 を作り、ドリフト・境界処理は面内成分ビューで行う
+                v3 = v[idx_active].copy()
+                v3[:, :2] += 0.5 * dt * a_cur
+                v3 = v3 @ boris_rt
+                v_half = v3[:, :2]  # ビュー: 反射等の面内変更は v3 に反映される
             else:
                 v_half = v[idx_active] + 0.5 * dt * a_cur
             x_new = x_prev + dt * v_half
@@ -677,6 +724,10 @@ def trace(project: Project, mesh: Mesh, sol: Solution) -> TraceOutput:
                     a_new[:, ridx] += vth_new * vth_new / r_new
                     v[cont_idx, :2] = v_half[cont] + 0.5 * dt * a_new
                     v[cont_idx, 2] = vth_new
+                elif boris_rt is not None:
+                    # 後半キック (E のみ)。vz は回転で更新済み
+                    v[cont_idx] = v3[cont]
+                    v[cont_idx, :2] += 0.5 * dt * a_new
                 else:
                     v[cont_idx] = v_half[cont] + 0.5 * dt * a_new
 
@@ -704,6 +755,9 @@ def trace(project: Project, mesh: Mesh, sol: Solution) -> TraceOutput:
                     r_abs = np.maximum(x[abs_idx, ridx], _R_TINY)
                     l_abs = ang_l[abs_idx]
                     v[abs_idx, 2] = np.where(l_abs != 0.0, l_abs / r_abs, 0.0)
+                elif boris_rt is not None:
+                    # 半キック+回転後の速度を衝突時速度として採用する (近似)
+                    v[abs_idx] = v3[absorbed_mask]
                 else:
                     v[abs_idx] = v[abs_idx] + frac[:, None] * dt * a_cur[absorbed_mask]
                 tof[abs_idx] = t_elapsed + frac * dt
@@ -719,6 +773,8 @@ def trace(project: Project, mesh: Mesh, sol: Solution) -> TraceOutput:
                     r_hit = np.maximum(x_new[hit_solid, ridx], _R_TINY)
                     l_hit = ang_l[hit_idx]
                     v[hit_idx, 2] = np.where(l_hit != 0.0, l_hit / r_hit, 0.0)
+                elif boris_rt is not None:
+                    v[hit_idx] = v3[hit_solid]
                 else:
                     v[hit_idx] = v_half[hit_solid]
                 tof[hit_idx] = t_elapsed + dt

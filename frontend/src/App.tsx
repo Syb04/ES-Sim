@@ -15,6 +15,7 @@ import { saveTextFile } from "./saveFile";
 import { isAxisymmetric, toDiagArray } from "./types";
 import { mToMm, mmToM } from "./units";
 import type {
+  BField,
   BoundaryCondition,
   CircleShape,
   EdgeBcType,
@@ -639,6 +640,16 @@ export default function App() {
     commitProject({ ...p, mesh: { ...p.mesh, mode } });
   };
 
+  // --- 一様磁場 (prompts/51) ---
+  // 全成分0なら b_field を undefined にする (バックエンドでは磁場なしと同値)
+  const setBField = (patch: Partial<BField>) => {
+    const p = projectRef.current;
+    const cur = p.b_field ?? { bx: 0, by: 0, bz: 0 };
+    const next = { ...cur, ...patch };
+    const isZero = next.bx === 0 && next.by === 0 && next.bz === 0;
+    commitProject({ ...p, b_field: isZero ? undefined : next });
+  };
+
   // --- 領域 ---
   // ポリゴン (ポリライン/矩形ツール) または circle shape (円ツール) のどちらでも領域を追加できる
   const addRegion = (geom: Point[] | CircleShape) => {
@@ -1190,6 +1201,7 @@ export default function App() {
                 setEdgeSeeGamma={setEdgeSeeGamma}
                 setMeshSize={setMeshSize}
                 setMeshMode={setMeshMode}
+                setBField={setBField}
                 meshResult={meshResult}
                 selectedRegionId={selectedRegionId}
                 onSelectRegion={setSelectedRegionId}
