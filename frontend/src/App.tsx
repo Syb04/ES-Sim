@@ -814,7 +814,12 @@ export default function App() {
         commitProject(loaded);
         // particles / pic は独立管理の state なので、読込んだファイルにあれば反映し、なければ既定値に戻す
         const loadedParticles = (obj as Project).particles;
-        setParticles(loadedParticles ?? DEFAULT_PARTICLES);
+        // FN 専用プロジェクト (fn_diode.json 等) は emitter を省略できる (スキーマ上
+        // fn 指定時は emitter 不要) ため、既定値をベースに合成して欠損フィールドを
+        // 補完する (emitter が無いまま state に入れると UI が .p1 等の参照で落ちる)
+        setParticles(
+          loadedParticles ? { ...DEFAULT_PARTICLES, ...loadedParticles } : DEFAULT_PARTICLES,
+        );
         const loadedPic = (obj as Project).pic;
         // mcc/see_energy_ev が無い旧形式のファイルでも安全に読み込めるよう、既定値をベースに合成し、
         // 旧形式 (単数 collector) のプロジェクトは collectors 配列へ移行する
