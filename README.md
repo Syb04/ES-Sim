@@ -25,6 +25,7 @@
 - `frontend/` — Tauri 2 + React + TypeScript(CADキャンバス・結果ビューア)
 - `examples/` — サンプルプロジェクト(JSON、詳細は下記)
 - `docs/SPEC.md` — 仕様書
+- `docs/DSMC.md` — DSMC(定常ガス流れ)のアルゴリズム解説
 - `docs/VALIDATION.md` / `docs/validation_report.html` — 検証記録
 - `prompts/` — 開発時のサブエージェント指示書(下記参照)
 
