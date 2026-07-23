@@ -1,6 +1,6 @@
 import { CommitNumberInput, CommitTextInput } from "../CommitInput";
 import { mToMm, mmToM } from "../units";
-import { isAxisymmetric } from "../types";
+import { isAxisymmetric, rfComponents } from "../types";
 import type {
   CircleShape,
   EdgeBcType,
@@ -22,6 +22,70 @@ import type {
 
 // RF重畳電圧の既定値 (13.56MHz の CCP を想定)
 const DEFAULT_VOLTAGE_RF: VoltageRf = { amplitude: 100.0, freq_hz: 13.56e6, phase_deg: 0.0 };
+// 2成分目以降を追加する際の既定値 (デュアル周波数の例として低周波側を想定)
+const DEFAULT_VOLTAGE_RF_2ND: VoltageRf = { amplitude: 100.0, freq_hz: 2e6, phase_deg: 0.0 };
+
+// RF重畳電圧 (単一/複数成分) の編集UI。成分ごとに振幅/周波数/位相 + 削除ボタン、
+// 末尾に成分追加ボタンを表示する。全成分削除で RF 自体を無効化 (undefined) する
+function RfComponentsEditor({
+  components,
+  onChange,
+}: {
+  components: VoltageRf[];
+  onChange: (next: VoltageRf[] | undefined) => void;
+}) {
+  return (
+    <div className="rf-editor">
+      {components.map((c, idx) => (
+        <div className="edge-rf-row" key={idx}>
+          <span className="rf-comp-label">成分{idx + 1}</span>
+          <label className="rf-compact-label" title="振幅 [V]">
+            A
+            <CommitNumberInput
+              className="rf-compact"
+              value={c.amplitude}
+              onCommit={(v) => onChange(components.map((cc, i) => (i === idx ? { ...cc, amplitude: v } : cc)))}
+            />
+          </label>
+          <label className="rf-compact-label" title="周波数 [Hz]">
+            f
+            <CommitNumberInput
+              className="rf-compact"
+              value={c.freq_hz}
+              onCommit={(v) => onChange(components.map((cc, i) => (i === idx ? { ...cc, freq_hz: v } : cc)))}
+            />
+          </label>
+          <label className="rf-compact-label" title="位相 [deg]">
+            φ
+            <CommitNumberInput
+              className="rf-compact"
+              value={c.phase_deg}
+              onCommit={(v) => onChange(components.map((cc, i) => (i === idx ? { ...cc, phase_deg: v } : cc)))}
+            />
+          </label>
+          <button
+            type="button"
+            className="rf-remove-btn"
+            title="この成分を削除"
+            onClick={() => {
+              const next = components.filter((_, i) => i !== idx);
+              onChange(next.length > 0 ? next : undefined);
+            }}
+          >
+            ×
+          </button>
+        </div>
+      ))}
+      <button
+        type="button"
+        className="rf-add-btn"
+        onClick={() => onChange([...components, components.length === 0 ? DEFAULT_VOLTAGE_RF : DEFAULT_VOLTAGE_RF_2ND])}
+      >
+        + RF成分を追加
+      </button>
+    </div>
+  );
+}
 
 // 矩形 domain の外周エッジ順: 0=下, 1=右, 2=上, 3=左
 const EDGE_LABELS_XY = ["下 (y=0)", "右 (x=w)", "上 (y=h)", "左 (x=0)"];
@@ -36,10 +100,12 @@ interface Props {
   domainH: number;
   setDomainSize: (w: number, h: number) => void;
   setCoord: (coord: "xy" | "rz" | "rz_x0") => void;
-  edgeState: (edgeIndex: number) => { type: EdgeBcType; voltage: number; voltageRf?: VoltageRf; seeGamma: number };
+  edgeState: (
+    edgeIndex: number,
+  ) => { type: EdgeBcType; voltage: number; voltageRf?: VoltageRf | VoltageRf[]; seeGamma: number };
   setEdgeType: (edgeIndex: number, type: EdgeBcType) => void;
   setEdgeVoltage: (edgeIndex: number, voltage: number) => void;
-  setEdgeVoltageRf: (edgeIndex: number, voltage_rf: VoltageRf | undefined) => void;
+  setEdgeVoltageRf: (edgeIndex: number, voltage_rf: VoltageRf | VoltageRf[] | undefined) => void;
   setEdgeSeeGamma: (edgeIndex: number, see_gamma: number) => void;
   setMeshSize: (size: number) => void;
   setMeshMode: (mode: "unstructured" | "structured") => void;
@@ -131,6 +197,7 @@ export default function FieldPanel({
         const st = edgeState(i);
         // 対称軸そのものとなる辺 (自然境界) は切替不可・固定表示とする
         const isAxisEdge = axisEdge === i;
+        const rfList = rfComponents(st.voltageRf);
         return (
           <div className="edge-row" key={i}>
             <span className="edge-label">{label}</span>
@@ -151,10 +218,8 @@ export default function FieldPanel({
                   <label className="rf-check-inline">
                     <input
                       type="checkbox"
-                      checked={!!st.voltageRf}
-                      onChange={(e) =>
-                        setEdgeVoltageRf(i, e.target.checked ? st.voltageRf ?? DEFAULT_VOLTAGE_RF : undefined)
-                      }
+                      checked={rfList.length > 0}
+                      onChange={(e) => setEdgeVoltageRf(i, e.target.checked ? [DEFAULT_VOLTAGE_RF] : undefined)}
                     />
                     RF
                   </label>
@@ -169,24 +234,8 @@ export default function FieldPanel({
                 </>
               )}
             </div>
-            {!isAxisEdge && st.type === "dirichlet" && st.voltageRf && (
-              <div className="edge-rf-row">
-                <CommitNumberInput
-                  className="rf-compact"
-                  value={st.voltageRf.amplitude}
-                  onCommit={(v) => setEdgeVoltageRf(i, { ...st.voltageRf!, amplitude: v })}
-                />
-                <CommitNumberInput
-                  className="rf-compact"
-                  value={st.voltageRf.freq_hz}
-                  onCommit={(v) => setEdgeVoltageRf(i, { ...st.voltageRf!, freq_hz: v })}
-                />
-                <CommitNumberInput
-                  className="rf-compact"
-                  value={st.voltageRf.phase_deg}
-                  onCommit={(v) => setEdgeVoltageRf(i, { ...st.voltageRf!, phase_deg: v })}
-                />
-              </div>
+            {!isAxisEdge && st.type === "dirichlet" && rfList.length > 0 && (
+              <RfComponentsEditor components={rfList} onChange={(next) => setEdgeVoltageRf(i, next)} />
             )}
           </div>
         );
@@ -311,45 +360,20 @@ export default function FieldPanel({
               <label className="checkbox-row">
                 <input
                   type="checkbox"
-                  checked={!!selected.voltage_rf}
+                  checked={rfComponents(selected.voltage_rf).length > 0}
                   onChange={(e) =>
                     updateRegion(selected.id, {
-                      voltage_rf: e.target.checked ? selected.voltage_rf ?? DEFAULT_VOLTAGE_RF : undefined,
+                      voltage_rf: e.target.checked ? [DEFAULT_VOLTAGE_RF] : undefined,
                     })
                   }
                 />
                 RF重畳
               </label>
-              {selected.voltage_rf && (
-                <>
-                  <label>
-                    振幅 [V]
-                    <CommitNumberInput
-                      value={selected.voltage_rf.amplitude}
-                      onCommit={(v) =>
-                        updateRegion(selected.id, { voltage_rf: { ...selected.voltage_rf!, amplitude: v } })
-                      }
-                    />
-                  </label>
-                  <label>
-                    周波数 [Hz]
-                    <CommitNumberInput
-                      value={selected.voltage_rf.freq_hz}
-                      onCommit={(v) =>
-                        updateRegion(selected.id, { voltage_rf: { ...selected.voltage_rf!, freq_hz: v } })
-                      }
-                    />
-                  </label>
-                  <label>
-                    位相 [deg]
-                    <CommitNumberInput
-                      value={selected.voltage_rf.phase_deg}
-                      onCommit={(v) =>
-                        updateRegion(selected.id, { voltage_rf: { ...selected.voltage_rf!, phase_deg: v } })
-                      }
-                    />
-                  </label>
-                </>
+              {rfComponents(selected.voltage_rf).length > 0 && (
+                <RfComponentsEditor
+                  components={rfComponents(selected.voltage_rf)}
+                  onChange={(next) => updateRegion(selected.id, { voltage_rf: next })}
+                />
               )}
               <label>
                 二次電子放出係数 γ

@@ -557,7 +557,7 @@ export default function App() {
 
   const edgeState = (
     edgeIndex: number,
-  ): { type: EdgeBcType; voltage: number; voltageRf?: VoltageRf; seeGamma: number } => {
+  ): { type: EdgeBcType; voltage: number; voltageRf?: VoltageRf | VoltageRf[]; seeGamma: number } => {
     const b = project.geometry.boundaries.find((b) => b.edges.includes(edgeIndex));
     if (!b) return { type: "neumann", voltage: 0, seeGamma: 0 };
     if (b.type === "dirichlet") {
@@ -597,8 +597,9 @@ export default function App() {
     commitProject({ ...p, geometry: { ...p.geometry, boundaries } });
   };
 
-  // 境界条件のRF重畳設定 (対象エッジが Dirichlet でない場合は何もしない)
-  const setEdgeVoltageRf = (edgeIndex: number, voltage_rf: VoltageRf | undefined) => {
+  // 境界条件のRF重畳設定 (対象エッジが Dirichlet でない場合は何もしない)。
+  // 複数成分 (デュアル周波数) は配列で渡す
+  const setEdgeVoltageRf = (edgeIndex: number, voltage_rf: VoltageRf | VoltageRf[] | undefined) => {
     const p = projectRef.current;
     commitProject({
       ...p,

@@ -18,6 +18,14 @@ export interface VoltageRf {
   phase_deg: number;  // [deg]
 }
 
+// voltage_rf は単一成分または複数成分 (デュアル周波数等) のリストを受け付ける。
+// V(t) = voltage + Σ_k amplitude_k * sin(2π freq_hz_k t + phase_deg_k)
+// 位相分解アニメーションの基本周波数は全成分の最小周波数になる (バックエンド側処理)。
+export function rfComponents(rf: VoltageRf | VoltageRf[] | null | undefined): VoltageRf[] {
+  if (!rf) return [];
+  return Array.isArray(rf) ? rf : [rf];
+}
+
 export interface Region {
   id: string;
   type: RegionType;
@@ -27,7 +35,7 @@ export interface Region {
   voltage?: number; // conductor
   eps_r?: number;   // dielectric
   rho?: number;     // charge
-  voltage_rf?: VoltageRf; // conductor: RF重畳 (未指定なら直流のみ)
+  voltage_rf?: VoltageRf | VoltageRf[]; // conductor: RF重畳 (未指定なら直流のみ。複数成分でデュアル周波数)
   see_gamma?: number; // conductor: 二次電子放出係数 γ (未指定/0 で無効)
 }
 
@@ -52,7 +60,7 @@ export interface DirichletBC {
   edges: number[];
   type: "dirichlet";
   voltage: number;
-  voltage_rf?: VoltageRf; // RF重畳 (未指定なら直流のみ)
+  voltage_rf?: VoltageRf | VoltageRf[]; // RF重畳 (未指定なら直流のみ。複数成分でデュアル周波数)
   see_gamma?: number; // 二次電子放出係数 γ (未指定/0 で無効)
 }
 

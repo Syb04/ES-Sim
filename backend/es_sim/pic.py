@@ -43,7 +43,7 @@ from .particles import (
     _solid_elements,
     _walk_step,
 )
-from .schema import PicSettings, Project
+from .schema import PicSettings, Project, rf_components
 
 # フレーム送出時の種ごとの最大粒子数 (間引き)
 MAX_FRAME_PARTICLES = 2000
@@ -155,14 +155,21 @@ class PicSimulation:
         items = sorted(mesh.dirichlet.items())      # 節点順に固定して決定的に
         self.fixed = np.array([i for i, _ in items], dtype=np.int64)
         self.v_dc = np.array([v for _, v in items], dtype=np.float64)
+        # RF 成分 (デュアル周波数対応、prompts/49): (n_fixed, K) 行列。
+        # K は全電極の最大成分数 (成分の無い列はゼロパディング = 振幅0で寄与なし)。
+        # K=1 (従来の単一周波数) では sum(axis=1) が単一要素の恒等なので数値不変
         rf = mesh.dirichlet_rf
-        self.rf_amp = np.array([rf.get(i, (0.0, 0.0, 0.0))[0] for i, _ in items])
-        self.rf_omega = np.array(
-            [2.0 * math.pi * rf.get(i, (0.0, 0.0, 0.0))[1] for i, _ in items]
-        )
-        self.rf_phase = np.array(
-            [math.radians(rf.get(i, (0.0, 0.0, 0.0))[2]) for i, _ in items]
-        )
+        kmax = max((len(c) for c in rf.values()), default=1)
+        kmax = max(kmax, 1)
+        n_fixed = len(items)
+        self.rf_amp = np.zeros((n_fixed, kmax))
+        self.rf_omega = np.zeros((n_fixed, kmax))
+        self.rf_phase = np.zeros((n_fixed, kmax))
+        for row, (i, _) in enumerate(items):
+            for kc, (amp, freq, ph) in enumerate(rf.get(i, ())):
+                self.rf_amp[row, kc] = amp
+                self.rf_omega[row, kc] = 2.0 * math.pi * freq
+                self.rf_phase[row, kc] = math.radians(ph)
         exclude = self.fixed
         if self.canon is not None:
             # 周期スレーブ節点は自由度から除外する (剛性行列の行がマスターへ寄っている)
@@ -427,17 +434,19 @@ class PicSimulation:
     # ---- 内部処理 -----------------------------------------------------------
 
     def _find_rf_freq(self) -> float | None:
-        """boundaries / conductor 領域の voltage_rf から最初の RF 周波数を返す。
+        """boundaries / conductor 領域の voltage_rf から位相分解の基本周波数を返す。
 
-        複数あれば最初の1つ (boundaries 優先)。無ければ None (cycle 機能無効)。
+        デュアル周波数 (prompts/49) では全成分の最小周波数 (= 基本波。低周波の
+        1周期に高周波の複数サイクルが収まる) を使う。無ければ None (cycle 無効)。
+        単一周波数のみの従来構成では従来と同じ値になる。
         """
+        freqs: list[float] = []
         for bc in self.project.geometry.boundaries:
-            if bc.voltage_rf is not None:
-                return bc.voltage_rf.freq_hz
+            freqs.extend(c.freq_hz for c in rf_components(bc.voltage_rf))
         for region in self.project.geometry.regions:
-            if region.type == "conductor" and region.voltage_rf is not None:
-                return region.voltage_rf.freq_hz
-        return None
+            if region.type == "conductor":
+                freqs.extend(c.freq_hz for c in rf_components(region.voltage_rf))
+        return min(freqs) if freqs else None
 
     def _phase_bin(self, t: float) -> int:
         """時刻 t の RF 位相ビン番号 bin = floor((t mod T)/T × bins) を返す。"""
@@ -907,8 +916,13 @@ class PicSimulation:
         return f
 
     def _dirichlet_values(self, t: float) -> np.ndarray:
-        """時刻 t の Dirichlet 値 V(t) = V_dc + A sin(ωt + φ)。"""
-        return self.v_dc + self.rf_amp * np.sin(self.rf_omega * t + self.rf_phase)
+        """時刻 t の Dirichlet 値 V(t) = V_dc + Σ_k A_k sin(ω_k t + φ_k)。
+
+        デュアル周波数対応 (prompts/49): rf_* は (n_fixed, K) 行列で、成分和を取る。
+        """
+        return self.v_dc + np.sum(
+            self.rf_amp * np.sin(self.rf_omega * t + self.rf_phase), axis=1
+        )
 
     def _solve_phi(self, f_dep: np.ndarray, t: float) -> np.ndarray:
         """ポアソン求解。前分解済み LU で右辺のみ更新して解く (再分解しない)。"""

@@ -178,11 +178,16 @@ button.danger:hover { background: #b34747; }
 
 .side .particle-trace-toggle { display: flex; align-items: center; gap: 6px; margin: 4px 0 8px; }
 
-/* RF重畳 (領域プロパティ / 境界条件) */
+/* RF重畳 (領域プロパティ / 境界条件、複数成分対応 prompts/49) */
 .region-edit label.checkbox-row { flex-direction: row; align-items: center; gap: 6px; }
-.edge-row .rf-check-inline { display: flex; align-items: center; gap: 3px; font-size: 11px; color: var(--muted); white-space: nowrap; }
-.edge-row .edge-rf-row { display: flex; gap: 4px; margin-top: 3px; }
-.edge-row .edge-rf-row input.rf-compact { width: 56px; }
+.rf-check-inline { display: flex; align-items: center; gap: 3px; font-size: 11px; color: var(--muted); white-space: nowrap; }
+.rf-editor { display: flex; flex-direction: column; gap: 3px; margin-top: 3px; }
+.edge-rf-row { display: flex; gap: 4px; align-items: center; margin-top: 3px; }
+.edge-rf-row input.rf-compact { width: 56px; }
+.rf-comp-label { font-size: 10px; color: var(--muted); flex: none; width: 34px; }
+.rf-compact-label { display: flex; align-items: center; gap: 2px; font-size: 10px; color: var(--muted); flex: none; }
+.rf-remove-btn { flex: none; padding: 1px 6px; font-size: 12px; line-height: 1.4; }
+.rf-add-btn { align-self: flex-start; font-size: 11px; padding: 3px 8px; margin-top: 2px; }
 
 /* PICパネル: MCC(衝突)プロセス一覧 */
 .mcc-process-list {

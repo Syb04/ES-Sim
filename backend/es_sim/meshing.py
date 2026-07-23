@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 import gmsh
 import numpy as np
 
-from .schema import Project, Region
+from .schema import Project, Region, rf_components
 
 # 円形状の多角形分割数の下限・上限 (仕様書 §8 スキーマ契約参照)
 CIRCLE_SEGMENTS_MIN = 24
@@ -35,8 +35,9 @@ class Mesh:
     triangles: np.ndarray      # (M, 3) int64
     tri_region: np.ndarray     # (M,) int64  regions のインデックス。-1 は背景 (真空)
     dirichlet: dict[int, float] = field(default_factory=dict)  # 節点番号 -> 電位 [V] (直流分)
-    # 節点番号 -> (振幅 [V], 周波数 [Hz], 位相 [deg])。PIC のみ使用 (フェーズ1/2 は無視)
-    dirichlet_rf: dict[int, tuple[float, float, float]] = field(default_factory=dict)
+    # 節点番号 -> RF 成分列 ((振幅 [V], 周波数 [Hz], 位相 [deg]), ...)。
+    # デュアル周波数対応 (prompts/49) で成分のタプル列。PIC のみ使用 (フェーズ1/2 は無視)
+    dirichlet_rf: dict[int, tuple[tuple[float, float, float], ...]] = field(default_factory=dict)
     # 節点番号 -> 二次電子放出係数 γ (>0 の節点のみ)。PIC のみ使用
     see_gamma: dict[int, float] = field(default_factory=dict)
     # 周期境界の正準化写像 (N,)。periodic_map[i] = 節点 i のマスター節点番号
@@ -302,7 +303,7 @@ def _generate_unstructured(project: Project) -> Mesh:
 
         # ---- Dirichlet 節点 ------------------------------------------------
         dirichlet: dict[int, float] = {}
-        dirichlet_rf: dict[int, tuple[float, float, float]] = {}
+        dirichlet_rf: dict[int, tuple[tuple[float, float, float], ...]] = {}
         see_gamma: dict[int, float] = {}
 
         def _curve_nodes(curve_tag: int) -> np.ndarray:
@@ -310,10 +311,11 @@ def _generate_unstructured(project: Project) -> Mesh:
             return tag_to_index[np.asarray(tags, dtype=np.int64)]
 
         def _assign(n: int, voltage: float, rf) -> None:
-            """節点に直流分と RF 成分を設定する (RF なしなら既存 RF を消して上書き)。"""
+            """節点に直流分と RF 成分列を設定する (RF なしなら既存 RF を消して上書き)。"""
             dirichlet[n] = voltage
-            if rf is not None:
-                dirichlet_rf[n] = (rf.amplitude, rf.freq_hz, rf.phase_deg)
+            comps = rf_components(rf)
+            if comps:
+                dirichlet_rf[n] = tuple((c.amplitude, c.freq_hz, c.phase_deg) for c in comps)
             else:
                 dirichlet_rf.pop(n, None)
 
@@ -364,7 +366,7 @@ def _finalize_mesh(
     triangles: np.ndarray,
     tri_region: np.ndarray,
     dirichlet: dict[int, float],
-    dirichlet_rf: dict[int, tuple[float, float, float]],
+    dirichlet_rf: dict[int, tuple[tuple[float, float, float], ...]],
     see_gamma: dict[int, float],
     pairs: dict[int, int],
 ) -> Mesh:
@@ -545,14 +547,15 @@ def _generate_structured(project: Project) -> Mesh:
 
     # ---- Dirichlet 節点 -------------------------------------------------------
     dirichlet: dict[int, float] = {}
-    dirichlet_rf: dict[int, tuple[float, float, float]] = {}
+    dirichlet_rf: dict[int, tuple[tuple[float, float, float], ...]] = {}
     see_gamma: dict[int, float] = {}
 
     def _assign(n: int, voltage: float, rf) -> None:
-        """節点に直流分と RF 成分を設定する (RF なしなら既存 RF を消して上書き)。"""
+        """節点に直流分と RF 成分列を設定する (RF なしなら既存 RF を消して上書き)。"""
         dirichlet[n] = voltage
-        if rf is not None:
-            dirichlet_rf[n] = (rf.amplitude, rf.freq_hz, rf.phase_deg)
+        comps = rf_components(rf)
+        if comps:
+            dirichlet_rf[n] = tuple((c.amplitude, c.freq_hz, c.phase_deg) for c in comps)
         else:
             dirichlet_rf.pop(n, None)
 

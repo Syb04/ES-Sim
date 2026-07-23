@@ -26,8 +26,10 @@ class CircleShape(BaseModel):
 
 
 class VoltageRF(BaseModel):
-    """RF 電圧成分 (フェーズ3)。V(t) = voltage + amplitude * sin(2π f t + phase)。
+    """RF 電圧成分 (フェーズ3)。V(t) = voltage + Σ_k amplitude_k * sin(2π f_k t + phase_k)。
 
+    voltage_rf フィールドには単一成分 (VoltageRF) と成分リスト (list[VoltageRF]、
+    デュアル周波数など) のどちらも指定できる (prompts/49)。
     静電ソルブ (/solve) は従来通り直流分 voltage のみを使い、PIC のみが V(t) を使う。
     """
 
@@ -36,13 +38,23 @@ class VoltageRF(BaseModel):
     phase_deg: float = 0.0
 
 
+def rf_components(rf: "VoltageRF | list[VoltageRF] | None") -> "list[VoltageRF]":
+    """voltage_rf フィールド (単一 / リスト / None) を成分リストへ正規化する。"""
+    if rf is None:
+        return []
+    if isinstance(rf, VoltageRF):
+        return [rf]
+    return list(rf)
+
+
 class Region(BaseModel):
     id: str
     type: Literal["conductor", "dielectric", "charge"]
     polygon: list[Point] | None = Field(None, min_length=3)
     shape: CircleShape | None = None
     voltage: float | None = None  # conductor: 電位 [V] (直流分)
-    voltage_rf: VoltageRF | None = None  # conductor: RF 成分 (PIC のみ使用)
+    # conductor: RF 成分 (PIC のみ使用)。単一またはリスト (デュアル周波数、prompts/49)
+    voltage_rf: VoltageRF | list[VoltageRF] | None = None
     eps_r: float = 1.0            # dielectric: 比誘電率
     rho: float = 0.0              # charge: 電荷密度 [C/m^3]
     see_gamma: float = Field(
@@ -73,7 +85,8 @@ class BoundaryCondition(BaseModel):
     edges: list[int]
     type: Literal["dirichlet", "symmetry", "periodic"] = "dirichlet"
     voltage: float = 0.0
-    voltage_rf: VoltageRF | None = None  # RF 成分 (PIC のみ使用)
+    # RF 成分 (PIC のみ使用)。単一またはリスト (デュアル周波数、prompts/49)
+    voltage_rf: VoltageRF | list[VoltageRF] | None = None
     see_gamma: float = Field(0.0, ge=0, description="二次電子放出係数 γ (0 = 無効、PIC のみ使用)")
 
     @model_validator(mode="after")
