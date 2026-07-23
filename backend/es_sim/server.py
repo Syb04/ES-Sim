@@ -255,6 +255,10 @@ async def _stream_run(ws: WebSocket, sim: PicSimulation) -> None:
                 "phi": _f32(c["phi"]),
                 "n_e": _f32(c["n_e"]),
                 "n_i": _f32(c["n_i"]),
+                # 追加フィールド (prompts/52)。e_abs は要素値、他は節点値
+                "e_abs": _f32(c["e_abs"]),
+                "te_ev": _f32(c["te_ev"]),
+                "ion_rate": _f32(c["ion_rate"]),
                 "particles": {
                     name: [_f32(s) for s in snaps]
                     for name, snaps in c["particles"].items()

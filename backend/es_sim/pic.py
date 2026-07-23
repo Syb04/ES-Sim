@@ -381,6 +381,11 @@ class PicSimulation:
         self._cycle_ne: np.ndarray | None = None     # (bins, N) 節点重み積算
         self._cycle_ni: np.ndarray | None = None
         self._cycle_count: np.ndarray | None = None  # (bins,) ビンごとのステップ数
+        # 位相分解の追加フィールド (prompts/52): E ベクトル (要素)・電子運動エネルギー・
+        # 電離イベント (いずれも位相ビンごとの積算)
+        self._cycle_e: np.ndarray | None = None      # (bins, M, 2)
+        self._cycle_ke: np.ndarray | None = None     # (bins, N)
+        self._cycle_ion: np.ndarray | None = None    # (bins, N)
         # 最後の1周期の粒子スナップショット (run_batch で確保)
         self._cycle_particles: dict[str, list] | None = None
         self._snap_t_start = math.inf
@@ -1331,11 +1336,15 @@ class PicSimulation:
                     new_l = self._bary_of(res.new_x, res.new_elem)  # 電子・イオン共通
                     if accumulating:
                         # 電離イベント発生位置を P1 重みで散布 (電離レート用)
-                        self._accum_ion += np.bincount(
+                        ion_vec = np.bincount(
                             self.tris_dep[res.new_elem].ravel(),
                             weights=(res.new_w[:, None] * new_l).ravel(),
                             minlength=self.n_nodes,
                         )
+                        self._accum_ion += ion_vec
+                        if self._cycle_ion is not None:
+                            # 位相分解の電離レート (prompts/52)。t はステップ開始時刻
+                            self._cycle_ion[self._phase_bin(t)] += ion_vec
                     el.x = np.concatenate([el.x, res.new_x])
                     el.v = np.concatenate([el.v, res.new_v_e])
                     el.w = np.concatenate([el.w, res.new_w])
@@ -1415,6 +1424,10 @@ class PicSimulation:
             self._cycle_ne = np.zeros((nb, self.n_nodes))
             self._cycle_ni = np.zeros((nb, self.n_nodes))
             self._cycle_count = np.zeros(nb, dtype=np.int64)
+            # 追加フィールド (prompts/52): E ベクトル・電子KE・電離イベント
+            self._cycle_e = np.zeros((nb, len(self.tris), 2))
+            self._cycle_ke = np.zeros((nb, self.n_nodes))
+            self._cycle_ion = np.zeros((nb, self.n_nodes))
 
     def _accumulate_fields(
         self, phi: np.ndarray, ex: np.ndarray, ey: np.ndarray, t_step: float
@@ -1430,13 +1443,6 @@ class PicSimulation:
         self._accum_phi += phi
         self._accum_e[:, 0] += ex
         self._accum_e[:, 1] += ey
-        el = self.species["electron"]
-        if len(el.x):
-            ke_p = 0.5 * ME * (el.v[:, 0] ** 2 + el.v[:, 1] ** 2 + el.v[:, 2] ** 2)
-            contrib = (el.w * ke_p)[:, None] * self._bary_cached(el)
-            self._accum_ke_e += np.bincount(
-                self._nidx_cached(el).ravel(), weights=contrib.ravel(), minlength=self.n_nodes
-            )
 
         # RF 位相ビン (cycle 無効なら b = -1 でスキップ)
         b = -1
@@ -1444,6 +1450,21 @@ class PicSimulation:
             b = self._phase_bin(t_step)
             self._cycle_phi[b] += phi
             self._cycle_count[b] += 1
+            # 位相分解の E ベクトル (prompts/52)
+            self._cycle_e[b, :, 0] += ex
+            self._cycle_e[b, :, 1] += ey
+
+        el = self.species["electron"]
+        if len(el.x):
+            ke_p = 0.5 * ME * (el.v[:, 0] ** 2 + el.v[:, 1] ** 2 + el.v[:, 2] ** 2)
+            contrib = (el.w * ke_p)[:, None] * self._bary_cached(el)
+            ke_vec = np.bincount(
+                self._nidx_cached(el).ravel(), weights=contrib.ravel(), minlength=self.n_nodes
+            )
+            self._accum_ke_e += ke_vec
+            if b >= 0:
+                # 位相分解の電子温度用 KE 散布 (prompts/52)
+                self._cycle_ke[b] += ke_vec
 
         for name, sp in self.species.items():
             if len(sp.x) == 0:
@@ -1567,10 +1588,21 @@ class PicSimulation:
         na = np.where(self._node_area > 0.0, self._node_area, 1.0)
         n_e = self._cycle_ne / (cnt * na[None, :])
         n_i = self._cycle_ni / (cnt * na[None, :])
+        # 追加フィールド (prompts/52)。規格化は averaged_fields と同じ規約:
+        # |E| は E ベクトルをビン平均してから絶対値 (要素値)、Te = (2/3)(KE和/重み和)/e、
+        # 電離レート = 積算重み / (ビン内時間 × 節点集中体積)
+        e_avg = self._cycle_e / cnt[:, :, None]  # cnt (bins,1) → (bins,1,1)
+        e_abs = np.sqrt(e_avg[:, :, 0] ** 2 + e_avg[:, :, 1] ** 2)  # (bins, M)
+        te = np.zeros_like(self._cycle_ne)
+        pos = self._cycle_ne > 0.0
+        te[pos] = (2.0 / 3.0) * (self._cycle_ke[pos] / self._cycle_ne[pos]) / QE
+        ion_rate = self._cycle_ion / (cnt * self.dt * na[None, :])
         if self.canon is not None:
             # 周期境界: スレーブ節点へマスター値をコピー (表示互換)
             n_e = n_e[:, self.canon]
             n_i = n_i[:, self.canon]
+            te = te[:, self.canon]
+            ion_rate = ion_rate[:, self.canon]
 
         particles: dict[str, list] = {}
         empty = np.zeros((0, 2))
@@ -1588,6 +1620,9 @@ class PicSimulation:
             "phi": phi,
             "n_e": n_e,
             "n_i": n_i,
+            "e_abs": e_abs,        # (bins, M) 要素値 (prompts/52)
+            "te_ev": te,           # (bins, N)
+            "ion_rate": ion_rate,  # (bins, N)
             "particles": particles,
         }
 
@@ -1638,6 +1673,9 @@ class PicSimulation:
         self._cycle_ne = None
         self._cycle_ni = None
         self._cycle_count = None
+        self._cycle_e = None
+        self._cycle_ke = None
+        self._cycle_ion = None
         self._cycle_particles = None
         self._snap_t_start = math.inf
         self.fields = None

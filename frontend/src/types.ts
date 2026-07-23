@@ -303,6 +303,10 @@ export interface PicCycle {
   phi: number[][];     // bins × 節点  位相分解平均の電位 [V]
   n_e: number[][];     // bins × 節点  同 電子密度 [m^-3]
   n_i: number[][];     // bins × 節点  同 イオン密度 [m^-3]
+  // 以下3つは追加分 (prompts/52)。古いバックエンドでは省略され得る (optional)
+  e_abs?: number[][];    // bins × 要素数  同 |E| [V/m] (要素値。phi/n_e/n_i 等の節点値と異なる)
+  te_ev?: number[][];    // bins × 節点数  同 電子温度 [eV] (節点値)
+  ion_rate?: number[][]; // bins × 節点数  同 電離レート [m^-3 s^-1] (節点値)
   particles: {         // 最後の1周期の生スナップショット (位相ビンごと、≤1000点)
     electron: [number, number][][];
     ion: [number, number][][];

@@ -22,13 +22,16 @@ import type {
   XsProcess,
 } from "../types";
 
-// 周期アニメーションで表示可能なフィールド (すべて節点値)
-export type CyclePicField = "phi" | "n_e" | "n_i";
+// 周期アニメーションで表示可能なフィールド。e_abs のみ要素値、他は節点値
+export type CyclePicField = "phi" | "n_e" | "n_i" | "e_abs" | "te_ev" | "ion_rate";
 
 export const CYCLE_FIELD_OPTIONS: { value: CyclePicField; label: string }[] = [
   { value: "phi", label: "電位 [V]" },
   { value: "n_e", label: "電子密度 [m^-3]" },
   { value: "n_i", label: "イオン密度 [m^-3]" },
+  { value: "e_abs", label: "|E| [V/m]" },
+  { value: "te_ev", label: "電子温度 [eV]" },
+  { value: "ion_rate", label: "電離レート [m^-3 s^-1]" },
 ];
 
 // PIC「結果表示」セレクトの選択肢。"live" はライブ (最終フレーム) 表示、それ以外は
@@ -1330,7 +1333,9 @@ function PicCyclePlayer({
         <span className="label">表示フィールド</span>
         <select value={field} onChange={(e) => onFieldChange(e.target.value as CyclePicField)}>
           {CYCLE_FIELD_OPTIONS.map((o) => (
-            <option key={o.value} value={o.value}>{o.label}</option>
+            <option key={o.value} value={o.value} disabled={cycle[o.value] === undefined}>
+              {o.label}
+            </option>
           ))}
         </select>
       </div>

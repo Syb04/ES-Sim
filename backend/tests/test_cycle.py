@@ -7,6 +7,7 @@
 """
 
 import numpy as np
+import pytest
 
 from es_sim.pic import PicSimulation
 from es_sim.schema import Project
@@ -159,3 +160,48 @@ def test_cycle_disabled_without_rf_or_bins():
     # 平均区間 < 1 周期なら started 用の警告が付く (実行前に判定される)
     sim = PicSimulation(_rf_project({**base, "avg_steps": 10}))
     assert any("位相" in w and "周期" in w for w in sim.warnings)
+
+
+# ---- 4. 追加フィールド |E|・Te・電離レート (prompts/52) --------------------------
+
+
+def test_cycle_extra_fields():
+    """位相分解の e_abs / te_ev / ion_rate の寸法と真空ケースでの物理整合。
+
+    粒子なしの真空 RF ケース: ギャップ内 |E| は |A sin(2πft)|/L を追うので、
+    ビン間で振動し最大値が A/L のオーダーになる。粒子・MCC が無いので
+    te_ev と ion_rate は全ゼロ。
+    """
+    bins = 40
+    project = _rf_project(
+        {
+            "dt": 1e-9,
+            "n_steps": 170,
+            "n_macro": 10,
+            "frame_every": 170,
+            "avg_steps": 160,
+            "phase_bins": bins,
+        }
+    )
+    sim = PicSimulation(project)
+    sim.run_batch()
+    cycle = sim.cycle
+    assert cycle is not None
+
+    n_nodes, n_elems = sim.n_nodes, len(sim.tris)
+    assert cycle["e_abs"].shape == (bins, n_elems)
+    assert cycle["te_ev"].shape == (bins, n_nodes)
+    assert cycle["ion_rate"].shape == (bins, n_nodes)
+    for key in ("e_abs", "te_ev", "ion_rate"):
+        assert np.all(np.isfinite(cycle[key]))
+
+    # ギャップ中央付近の要素の |E|: 最大ビン ≈ A/L、最小ビン ≈ 0 (V=0 の位相)
+    centroids = sim.mesh.nodes[sim.tris].mean(axis=1)
+    mid = int(np.argmin(np.abs(centroids[:, 0] - 0.01) + np.abs(centroids[:, 1] - 0.005)))
+    e_series = cycle["e_abs"][:, mid]
+    e_expected = AMP / 0.02  # A/L = 2500 V/m
+    assert e_series.max() == pytest.approx(e_expected, rel=0.15)
+    assert e_series.min() < 0.2 * e_expected
+    # 粒子なし → Te・電離レートは全ゼロ
+    assert np.all(cycle["te_ev"] == 0.0)
+    assert np.all(cycle["ion_rate"] == 0.0)

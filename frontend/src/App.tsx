@@ -892,6 +892,7 @@ export default function App() {
   const cycleFixedRange = useMemo(() => {
     if (!picCycle) return null;
     const rows = picCycle[cycleField];
+    if (!rows) return null; // 旧バックエンド等でこのフィールドのデータが無い
     let min = Infinity;
     let max = -Infinity;
     let minPositive = Infinity;
@@ -911,11 +912,13 @@ export default function App() {
   const picCycleView: PicFieldView | null =
     cycleViewActive && picCycle && picStarted && cycleFixedRange
       ? (() => {
+          const rows = picCycle[cycleField];
+          if (!rows) return null; // 旧バックエンド等でこのフィールドのデータが無い
           const bin = Math.min(cycleBinIndex, picCycle.bins - 1);
           const meta = PIC_FIELD_META[cycleField];
           return {
             mesh: picStarted.mesh,
-            values: picCycle[cycleField][bin],
+            values: rows[bin],
             nodeBased: meta.nodeBased,
             unit: meta.unit,
             log: cycleLogScale,
