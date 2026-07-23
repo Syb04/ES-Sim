@@ -574,14 +574,18 @@ class DsmcSimulation:
         self._move()
         self._collide()
 
-    def run(self, callback=None) -> DsmcResult:
+    def run(self, callback=None, should_stop=None) -> DsmcResult:
         """n_steps 進め、最終 avg_steps の時間平均から DsmcResult を作る。
 
-        callback(step, n_particles) を 200 ステップごとに呼ぶ (進捗表示用)。
+        callback(step, n_particles) を 100 ステップごとに呼ぶ (進捗表示用)。
+        should_stop() が True を返したら中断する (WS の stop コマンド用)。
+        平均区間に入る前に中断された場合は結果が無いためエラーを送出する。
         """
         n_steps = self.s.n_steps
         avg_start = max(0, n_steps - self.s.avg_steps)
         for i in range(n_steps):
+            if should_stop is not None and should_stop():
+                break
             if i == avg_start:
                 self._samples = 0  # 以降のステップでサンプリング
                 self._acc_cnt[:] = 0.0
@@ -592,8 +596,13 @@ class DsmcSimulation:
             self.step()
             if i >= avg_start:
                 self._sample()
-            if callback is not None and (i + 1) % 200 == 0:
+            if callback is not None and (i + 1) % 100 == 0:
                 callback(i + 1, len(self.x))
+        if self._samples == 0:
+            raise ValueError(
+                "平均区間に入る前に停止したため、ガス場の結果がありません "
+                "(avg_steps を長くするか、停止せず完走させてください)"
+            )
 
         cnt = np.maximum(self._acc_cnt, 1e-300)
         n_avg = self._acc_cnt * self.w / (self._samples * self.vol)

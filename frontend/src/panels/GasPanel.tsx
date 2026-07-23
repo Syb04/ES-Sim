@@ -105,13 +105,22 @@ function inletSpecModeOf(b: DsmcBoundary): InletSpecMode {
   return b.flow_sccm != null ? "flow" : "pressure";
 }
 
+// 実行中の進捗 (WebSocket started/progress メッセージ由来)
+export interface GasProgress {
+  step: number;
+  nSteps: number;
+  nParticles: number;
+}
+
 interface Props {
   project: Project;
   dsmc: DsmcSettings | null;
   onChange: (next: DsmcSettings | null) => void;
   canRun: boolean;
-  busy: boolean;
+  running: boolean;
   onRun: () => void;
+  onStop: () => void;
+  progress: GasProgress | null;
   result: DsmcResult | null;
   error: string | null;
   resultField: GasResultField;
@@ -125,8 +134,10 @@ export default function GasPanel({
   dsmc,
   onChange,
   canRun,
-  busy,
+  running,
   onRun,
+  onStop,
+  progress,
   result,
   error,
   resultField,
@@ -443,10 +454,32 @@ export default function GasPanel({
           </div>
 
           <div className="actions">
-            <button onClick={onRun} disabled={!canRun || busy}>
-              {busy ? "計算中..." : "ガス流れ計算"}
+            <button onClick={onRun} disabled={!canRun || running}>
+              {running ? "計算中..." : "ガス流れ計算"}
+            </button>
+            <button className="secondary" onClick={onStop} disabled={!running}>
+              停止
             </button>
           </div>
+
+          {running && progress && (
+            <>
+              <div className="gas-progress">
+                <div
+                  className="gas-progress-bar"
+                  style={{
+                    width: `${progress.nSteps > 0 ? Math.min(100, (progress.step / progress.nSteps) * 100) : 0}%`,
+                  }}
+                />
+              </div>
+              <div className="kv">
+                <span>進捗</span>
+                <span>
+                  ステップ {progress.step} / {progress.nSteps} (粒子数 {progress.nParticles})
+                </span>
+              </div>
+            </>
+          )}
 
           {error && (
             <>

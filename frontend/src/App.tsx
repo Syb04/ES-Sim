@@ -12,6 +12,8 @@ import GasPanel, { GAS_FIELD_META, gasFieldValues } from "./panels/GasPanel";
 import type { GasResultField } from "./panels/GasPanel";
 import { PicClient } from "./picClient";
 import type { PicClientCallbacks } from "./picClient";
+import { DsmcClient } from "./dsmcClient";
+import type { DsmcClientCallbacks } from "./dsmcClient";
 import { useHistory } from "./useHistory";
 import { saveTextFile } from "./saveFile";
 import { isAxisymmetric, toDiagArray } from "./types";
@@ -218,9 +220,12 @@ export default function App() {
   // ガス流れ (DSMC) 設定は project.dsmc として project state 本体に置く (particles/pic と異なり
   // 独立 state を持たず、ジオメトリ・メッシュ設定と同様 commitProject 経由で Undo/Redo 対象になる)。
   // 実行結果・実行状態は他パネルの result 系 state と同様に App 側で保持する
-  const [gasBusy, setGasBusy] = useState(false);
+  const [gasRunning, setGasRunning] = useState(false);
   const [gasError, setGasError] = useState<string | null>(null);
   const [gasResult, setGasResult] = useState<DsmcResult | null>(null);
+  // 実行中の進捗 (started/progress メッセージから更新。未実行/完了後は null)
+  const [gasProgress, setGasProgress] = useState<{ step: number; nSteps: number; nParticles: number } | null>(null);
+  const dsmcClientRef = useRef<DsmcClient | null>(null);
   // 「結果表示」セレクトの選択と対数スケールチェックボックス
   const [gasResultField, setGasResultField] = useState<GasResultField>("n");
   const [gasLogScale, setGasLogScale] = useState(false);
@@ -238,7 +243,10 @@ export default function App() {
 
   // アンマウント時に WebSocket 接続を確実に閉じる
   useEffect(() => {
-    return () => picClientRef.current?.close();
+    return () => {
+      picClientRef.current?.close();
+      dsmcClientRef.current?.close();
+    };
   }, []);
 
   // 起動時にポート設定を初期化する (Tauri内なら AppConfig の backend-port.txt、
@@ -395,17 +403,37 @@ export default function App() {
     commitProject({ ...p, dsmc: next });
   };
 
-  // DSMC ガス流れ計算実行 (project.dsmc を送信する。project.dsmc が null の場合は呼ばれない想定)
-  const runDsmc = async () => {
-    setGasBusy(true);
+  // DSMC ガス流れ計算実行 (WebSocket。project.dsmc を送信する。project.dsmc が null の場合は呼ばれない想定)
+  const runDsmc = () => {
     setGasError(null);
-    try {
-      setGasResult(await api.dsmc(project));
-    } catch (e) {
-      setGasError(String(e));
-    } finally {
-      setGasBusy(false);
-    }
+    setGasResult(null);
+    setGasProgress(null);
+    setGasRunning(true);
+    const callbacks: DsmcClientCallbacks = {
+      onStarted: (msg) => {
+        setGasProgress({ step: 0, nSteps: msg.n_steps, nParticles: msg.n_particles });
+      },
+      onProgress: (msg) => {
+        setGasProgress({ step: msg.step, nSteps: msg.n_steps, nParticles: msg.n_particles });
+      },
+      onDone: (msg) => {
+        setGasResult(msg.result);
+        setGasRunning(false);
+      },
+      onError: (detail) => {
+        setGasError(detail);
+        setGasRunning(false);
+      },
+      onClose: () => setGasRunning(false),
+    };
+    const client = new DsmcClient(callbacks);
+    dsmcClientRef.current = client;
+    client.start(project);
+  };
+
+  // DSMC 計算の中断
+  const stopDsmc = () => {
+    dsmcClientRef.current?.stop();
   };
 
   // PIC実行中のコールバック生成 (start/continue で共通化)。isContinue が true のときは
@@ -1344,8 +1372,10 @@ export default function App() {
                 dsmc={project.dsmc ?? null}
                 onChange={setDsmc}
                 canRun={!!health}
-                busy={gasBusy}
+                running={gasRunning}
                 onRun={runDsmc}
+                onStop={stopDsmc}
+                progress={gasProgress}
                 result={gasResult}
                 error={gasError}
                 resultField={gasResultField}

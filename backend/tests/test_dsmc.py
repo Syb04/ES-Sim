@@ -456,3 +456,50 @@ def test_dsmc_rz_axial_effusion():
     uz_mean = float(np.sum(res.u[:, 0] * res.n * vol) / np.sum(res.n * vol))
     assert uz_mean == pytest.approx(0.5 * c_bar, rel=0.05)
     assert res.outflow == pytest.approx(res.inflow, rel=0.07)
+
+
+def test_dsmc_ws_progress():
+    """/ws/dsmc: started → progress (100ステップごと) → done が届く (prompts/58)。"""
+    from starlette.testclient import TestClient
+
+    from es_sim import server as srv
+
+    c = TestClient(srv.app)
+    project = {
+        "geometry": {
+            "domain": {"polygon": [[0, 0], [L, 0], [L, H], [0, H]]},
+            "boundaries": [],
+        },
+        "mesh": {"size": 2e-3},
+        "dsmc": {
+            "init_pressure_pa": 5.0,
+            "n_particles": 5000,
+            "n_steps": 350,
+            "avg_steps": 100,
+            "seed": 11,
+        },
+    }
+    with c.websocket_connect("/ws/dsmc") as ws:
+        ws.send_json({"cmd": "start", "project": project})
+        started = ws.receive_json()
+        assert started["type"] == "started"
+        assert started["n_steps"] == 350
+        assert started["n_particles"] > 0
+
+        progress = 0
+        while True:
+            msg = ws.receive_json()
+            if msg["type"] == "progress":
+                progress += 1
+                assert 0 < msg["step"] <= 350
+                assert msg["n_particles"] > 0
+            elif msg["type"] == "done":
+                break
+            else:
+                raise AssertionError(f"想定外のメッセージ: {msg['type']}")
+        assert progress == 3  # 100, 200, 300
+        result = msg["result"]
+        assert len(result["n"]) > 0
+        assert all(np.isfinite(result["p"]))
+    # done 後は保持スロットが更新されている
+    assert srv._last_dsmc is not None

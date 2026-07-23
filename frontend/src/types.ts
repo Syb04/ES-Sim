@@ -235,6 +235,38 @@ export interface DsmcResult {
   outflow: number;             // 平均区間の流出実分子数
 }
 
+// ---- DSMC WebSocket プロトコル (server→client, /ws/dsmc、prompts/58) ------------------------
+
+export interface DsmcStartedMsg {
+  type: "started";
+  n_steps: number;
+  dt: number;
+  n_particles: number;
+}
+
+// 100ステップごとに送られる進捗通知
+export interface DsmcProgressMsg {
+  type: "progress";
+  step: number;
+  n_steps: number;
+  n_particles: number;
+}
+
+export interface DsmcDoneMsg {
+  type: "done";
+  result: DsmcResult; // REST /dsmc と同形
+}
+
+export interface DsmcErrorMsg {
+  type: "error";
+  detail: string;
+}
+
+export type DsmcServerMessage = DsmcStartedMsg | DsmcProgressMsg | DsmcDoneMsg | DsmcErrorMsg;
+
+// client→server コマンド
+export type DsmcClientCommand = { cmd: "start"; project: Project } | { cmd: "stop" };
+
 export interface PicSettings {
   initial_plasma: InitialPlasma | null;
   injection: PicInjection | null;

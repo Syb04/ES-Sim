@@ -138,25 +138,16 @@ def trace_endpoint(project: Project) -> TraceResult:
 _last_dsmc: dict | None = None
 
 
-@app.post("/dsmc", response_model=DsmcResultModel)
-def dsmc_endpoint(project: Project) -> DsmcResultModel:
-    """定常ガス流れの DSMC を実行し、要素ごとの n・T・u・p を返す。
-
-    結果はサーバー内に保持され、PIC (mcc.use_dsmc_gas=true) の背景ガス場として
-    使われる (メッシュの要素数が一致している必要がある)。
-    """
+def _store_dsmc_result(res) -> None:
+    """DSMC 結果を PIC (mcc.use_dsmc_gas) 用の保持スロットへ格納する。"""
     global _last_dsmc
-    if project.dsmc is None:
-        raise HTTPException(status_code=422, detail="project.dsmc が指定されていません")
-    try:
-        sim = DsmcSimulation(project)
-        res = sim.run()
-    except Exception as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
     _last_dsmc = {
         "n_elems": len(res.n),
         "field": GasField(n_g=res.n, t_g=res.t, u_g=res.u),
     }
+
+
+def _dsmc_result_model(sim: DsmcSimulation, res) -> DsmcResultModel:
     return DsmcResultModel(
         mesh=_mesh_result(sim.mesh),
         n=res.n.tolist(),
@@ -169,6 +160,119 @@ def dsmc_endpoint(project: Project) -> DsmcResultModel:
         inflow=res.inflow,
         outflow=res.outflow,
     )
+
+
+@app.post("/dsmc", response_model=DsmcResultModel)
+def dsmc_endpoint(project: Project) -> DsmcResultModel:
+    """定常ガス流れの DSMC を実行し、要素ごとの n・T・u・p を返す (同期版)。
+
+    結果はサーバー内に保持され、PIC (mcc.use_dsmc_gas=true) の背景ガス場として
+    使われる (メッシュの要素数が一致している必要がある)。進捗表示つきの実行は
+    /ws/dsmc (prompts/58) を使う。
+    """
+    if project.dsmc is None:
+        raise HTTPException(status_code=422, detail="project.dsmc が指定されていません")
+    try:
+        sim = DsmcSimulation(project)
+        res = sim.run()
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    _store_dsmc_result(res)
+    return _dsmc_result_model(sim, res)
+
+
+async def _run_dsmc_session(ws: WebSocket, project_dict: dict) -> None:
+    """1回の DSMC 実行 (WS)。started → progress (100ステップごと) → done を送出する。"""
+    try:
+        project = Project.model_validate(project_dict)
+        if project.dsmc is None:
+            raise ValueError("project.dsmc が指定されていません")
+        # メッシュ生成・初期充填も重いのでスレッドで実行
+        sim = await asyncio.to_thread(DsmcSimulation, project)
+    except Exception as exc:
+        await ws.send_json({"type": "error", "detail": str(exc)})
+        return
+
+    await ws.send_json(
+        {
+            "type": "started",
+            "n_steps": sim.s.n_steps,
+            "dt": sim.dt,
+            "n_particles": len(sim.x),
+        }
+    )
+
+    loop = asyncio.get_running_loop()
+    stop = threading.Event()
+    queue: asyncio.Queue = asyncio.Queue()
+
+    def on_progress(step: int, n_particles: int) -> None:
+        loop.call_soon_threadsafe(
+            queue.put_nowait,
+            {
+                "type": "progress",
+                "step": step,
+                "n_steps": sim.s.n_steps,
+                "n_particles": n_particles,
+            },
+        )
+
+    run_task = asyncio.create_task(
+        asyncio.to_thread(sim.run, on_progress, stop.is_set)
+    )
+
+    async def watch_stop() -> None:
+        while True:
+            try:
+                msg = json.loads(await ws.receive_text())
+            except (WebSocketDisconnect, RuntimeError):
+                stop.set()
+                return
+            if msg.get("cmd") == "stop":
+                stop.set()
+                return
+
+    stop_task = asyncio.create_task(watch_stop())
+    try:
+        while True:
+            if run_task.done() and queue.empty():
+                break
+            try:
+                item = await asyncio.wait_for(queue.get(), timeout=0.1)
+            except asyncio.TimeoutError:
+                continue
+            await ws.send_json(item)
+        res = await run_task
+        _store_dsmc_result(res)
+        await ws.send_json(
+            {"type": "done", "result": _dsmc_result_model(sim, res).model_dump()}
+        )
+    except Exception as exc:
+        try:
+            await ws.send_json({"type": "error", "detail": str(exc)})
+        except Exception:
+            pass
+    finally:
+        stop.set()
+        stop_task.cancel()
+        await asyncio.gather(run_task, return_exceptions=True)
+
+
+@app.websocket("/ws/dsmc")
+async def ws_dsmc(ws: WebSocket) -> None:
+    """DSMC 実行の WebSocket (prompts/58)。start で実行、stop で中断する。"""
+    await ws.accept()
+    try:
+        while True:
+            msg = json.loads(await ws.receive_text())
+            if msg.get("cmd") == "start":
+                await _run_dsmc_session(ws, msg.get("project") or {})
+            else:
+                await ws.send_json(
+                    {"type": "error", "detail": f"不明なコマンドです: {msg.get('cmd')}"}
+                )
+    except (WebSocketDisconnect, RuntimeError):
+        pass
 
 
 @app.post("/lxcat/parse", response_model=LxcatParseResult)
