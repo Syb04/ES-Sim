@@ -372,6 +372,30 @@ class PicSimulation:
             if self.pic.mcc is not None
             else None
         )
+        if self.mcc is not None:
+            # 衝突頻度の健全性チェック (prompts/57)。非一様ガス場では ν_max が
+            # 最大密度で評価されるため、密度スパイクや高圧領域があると毎ステップ
+            # ほぼ全粒子が衝突候補になり、dt が実効的に粗すぎる状態になり得る
+            for label, numax in (("電子", self.mcc.numax_e), ("イオン", self.mcc.numax_i)):
+                if numax > 0.0:
+                    p_coll = 1.0 - math.exp(-numax * self.dt)
+                    if p_coll > 0.5:
+                        self.warnings.append(
+                            f"{label}の1ステップ衝突候補率が {p_coll:.2f} > 0.5: "
+                            "dt が衝突頻度に対して粗すぎます (dt を小さくするか、"
+                            "ガス場の最大密度を確認してください)"
+                        )
+            if gas_field is not None:
+                n_arr = np.asarray(gas_field.n_g, dtype=np.float64)
+                pos_n = n_arr[n_arr > 0.0]
+                if len(pos_n):
+                    med = float(np.median(pos_n))
+                    if med > 0.0 and float(n_arr.max()) > 100.0 * med:
+                        self.warnings.append(
+                            f"ガス場の最大密度 {n_arr.max():.3g} m^-3 が中央値 {med:.3g} の"
+                            "100倍を超えています (DSMC の統計スパイクの可能性。"
+                            "n_particles や avg_steps を増やして再計算を検討してください)"
+                        )
 
         # ---- SEE (二次電子放出) の境界エッジ属性表 ----------------------------
         mcc_seed = self.pic.mcc.seed if self.pic.mcc is not None else 0
@@ -1777,6 +1801,19 @@ class PicSimulation:
             if should_stop is not None and should_stop():
                 break
             phi = self.step()
+            # 数値発散の検出 (prompts/57): NaN/Inf をフレームに載せると JSON として
+            # 不正になりフロントの解析が落ちるため、その前に明確なエラーで止める
+            if not (
+                math.isfinite(self.history["phi_min"][-1])
+                and math.isfinite(self.history["phi_max"][-1])
+                and math.isfinite(self.history["ke_e"][-1])
+            ):
+                raise ValueError(
+                    f"数値発散を検出しました (step {self.step_count}: 電位またはエネルギーが"
+                    "非有限値)。dt を小さくする、初期密度・注入量を下げる、"
+                    "メッシュを細かくする (デバイ長解像) 等を検討してください。"
+                    "警告一覧 (ωpe·dt、衝突確率など) も参照してください"
+                )
             if self._cycle_enabled and self.t - self.dt >= self._snap_t_start - 1e-30:
                 # ステップ開始時刻の位相ビンで、粒子位置 (ステップ終端) を保存する
                 self._snapshot_particles(self.t - self.dt)
