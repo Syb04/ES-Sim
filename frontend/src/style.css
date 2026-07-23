@@ -231,8 +231,10 @@ button.danger:hover { background: #b34747; }
 }
 .dsmc-boundary-row-main { display: flex; align-items: center; gap: 4px; }
 .dsmc-boundary-row-main select { flex: 1; }
+.dsmc-boundary-row-main select.dsmc-range-select { flex: none; width: 92px; }
 .dsmc-boundary-row-sub { display: flex; align-items: center; gap: 8px; }
 .dsmc-edges-input { width: 64px; flex: none; padding: 2px 4px; font-size: 11px; }
+.dsmc-spec-select { flex: none; width: 82px; font-size: 11px; }
 
 /* PICパネル: 進捗バー・警告・履歴チャート */
 .pic-progress { height: 8px; background: var(--bg); border: 1px solid var(--border); border-radius: 4px; overflow: hidden; margin: 6px 0; }

@@ -294,3 +294,79 @@ def test_dsmc_endpoint_and_pic_coupling():
     for _ in range(5):
         sim.step()
     assert np.all(np.isfinite(sim.species["electron"].v))
+
+
+# ---- 線分指定の流入口 + sccm 流量指定 (prompts/55) ------------------------------
+
+
+def test_dsmc_segment_inlet_classification():
+    """p1-p2 線分指定で上辺の一部だけが流入口 (リザーバ) に分類される。"""
+    from es_sim.dsmc import _B_RESERVOIR
+
+    project = _project(
+        {
+            "boundaries": [
+                # 上辺 (エッジ2) の左 1/4 だけを線分指定で inlet にする
+                {"type": "inlet", "p1": [0.0, H], "p2": [L / 4, H], "pressure_pa": 10.0},
+            ],
+            "init_pressure_pa": 5.0,
+            "n_particles": 5000,
+            "n_steps": 10,
+            "avg_steps": 5,
+            "seed": 6,
+        }
+    )
+    sim = DsmcSimulation(project)
+    ts, loc = np.nonzero(sim.adjacency == -1)
+    types = sim._b_type[ts, loc]
+    res_sel = types == _B_RESERVOIR
+    assert np.any(res_sel)
+    # 分類されたエッジの中点はすべて上辺 y=H かつ x ≤ L/4 (+わずかな許容)
+    tris = sim.tris
+    nodes = sim.mesh.nodes
+    n1 = tris[ts, (loc + 1) % 3]
+    n2 = tris[ts, (loc + 2) % 3]
+    mids = 0.5 * (nodes[n1] + nodes[n2])
+    assert np.all(np.abs(mids[res_sel, 1] - H) < 1e-9)
+    assert np.all(mids[res_sel, 0] <= L / 4 + 1e-6)
+    # 上辺の右側 (x > L/4) は壁のまま = リザーバに分類されていない
+    top_right = (np.abs(mids[:, 1] - H) < 1e-9) & (mids[:, 0] > L / 4 + 1e-6)
+    assert not np.any(res_sel & top_right)
+
+
+def test_dsmc_sccm_flow_inlet_mass_balance():
+    """流量指定 (10 sccm) の流入口: 流入レートが換算値に一致し、定常で流出と釣り合う。"""
+    from es_sim.dsmc import SCCM_TO_PER_S
+
+    sccm = 10.0
+    project = _project(
+        {
+            "gas": {"d_ref_m": 1e-15},  # 無衝突 (輸送を単純化)
+            "boundaries": [
+                {"edges": [3], "type": "inlet", "flow_sccm": sccm},
+                {"edges": [1], "type": "outlet"},  # 真空排気
+                {"edges": [0], "type": "symmetry"},
+                {"edges": [2], "type": "symmetry"},
+            ],
+            "init_pressure_pa": 0.01,
+            "init_temperature_k": 300.0,
+            "n_particles": 30000,
+            "n_steps": 1500,
+            "avg_steps": 500,
+            "seed": 7,
+        }
+    )
+    sim = DsmcSimulation(project)
+    res = sim.run()
+
+    ndot_expected = sccm * SCCM_TO_PER_S  # ≈ 4.478e18 分子/s
+    t_avg = 500 * sim.dt
+    inflow_rate = res.inflow / t_avg
+    # 流入は決定的 (端数持ち越し) なので換算値にほぼ厳密に一致する
+    assert inflow_rate == pytest.approx(ndot_expected, rel=0.02)
+    # 定常の質量収支 (統計誤差 10%)
+    assert res.outflow == pytest.approx(res.inflow, rel=0.10)
+    # 流れは +x 方向
+    area = sim.area
+    ux_mean = float(np.sum(res.u[:, 0] * res.n * area) / np.sum(res.n * area))
+    assert ux_mean > 0.0

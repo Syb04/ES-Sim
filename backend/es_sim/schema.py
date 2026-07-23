@@ -395,23 +395,43 @@ class DsmcGas(BaseModel):
 
 
 class DsmcBoundary(BaseModel):
-    """domain 外周エッジの DSMC 境界条件。未指定エッジは拡散反射壁になる。
+    """DSMC 境界条件。未指定の境界は拡散反射壁になる。
+
+    適用範囲は edges (domain 外周のエッジ番号) と p1-p2 (外周上の線分、部分区間
+    指定。prompts/55) のどちらでも指定できる (両方指定は和集合)。電極と外枠の
+    隙間などエッジの一部だけを流入口にしたい場合は線分指定を使う。
 
     - "wall":     拡散反射 (完全適応、temperature_k で再放出)
     - "symmetry": 鏡面反射
-    - "inlet":    圧力リザーバ (pressure_pa, temperature_k の平衡流入 + 流出吸収)
+    - "inlet":    圧力リザーバ (pressure_pa: 平衡流入 + 流出吸収) または
+                  流量指定 (flow_sccm: 指定流量を注入し、入射粒子は拡散反射壁。
+                  正味流量が指定値に厳密一致する。2D なので奥行き 1 m 換算)
     - "outlet":   圧力リザーバまたは真空 (pressure_pa 省略/0 = 真空排気)
     """
 
-    edges: list[int]
+    edges: list[int] = []
+    p1: Point | None = None
+    p2: Point | None = None
     type: Literal["wall", "symmetry", "inlet", "outlet"] = "wall"
     temperature_k: float = Field(300.0, gt=0)
     pressure_pa: float | None = Field(None, ge=0)
+    # inlet の流量指定 [sccm] (標準状態 273.15 K・101325 Pa の cm^3/min)。
+    # pressure_pa と排他。1 sccm = 4.478e17 分子/s
+    flow_sccm: float | None = Field(None, gt=0)
 
     @model_validator(mode="after")
-    def _check_inlet_pressure(self) -> "DsmcBoundary":
-        if self.type == "inlet" and not (self.pressure_pa and self.pressure_pa > 0.0):
-            raise ValueError("inlet には pressure_pa (> 0) の指定が必要です")
+    def _check(self) -> "DsmcBoundary":
+        if not self.edges and (self.p1 is None or self.p2 is None):
+            raise ValueError("境界の適用範囲を edges か p1/p2 (線分) で指定してください")
+        if self.type == "inlet":
+            has_p = bool(self.pressure_pa and self.pressure_pa > 0.0)
+            has_f = self.flow_sccm is not None
+            if has_p == has_f:
+                raise ValueError(
+                    "inlet には pressure_pa (> 0) か flow_sccm のどちらか一方を指定してください"
+                )
+        elif self.flow_sccm is not None:
+            raise ValueError("flow_sccm は inlet でのみ指定できます")
         return self
 
 

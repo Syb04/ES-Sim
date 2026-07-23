@@ -1,6 +1,7 @@
 import { useEffect, useRef } from "react";
 import { CommitNumberInput, CommitTextInput } from "../CommitInput";
-import type { DsmcBoundary, DsmcBoundaryType, DsmcGas, DsmcResult, DsmcSettings, Project } from "../types";
+import type { DsmcBoundary, DsmcBoundaryType, DsmcGas, DsmcResult, DsmcSettings, Point, Project } from "../types";
+import { mToMm, mmToM } from "../units";
 
 /**
  * ガスパネル (タブ4): DSMC 定常ガス流れ
@@ -62,7 +63,15 @@ const DEFAULT_DSMC: DsmcSettings = {
   seed: 0,
 };
 
-const DEFAULT_BOUNDARY: DsmcBoundary = { edges: [], type: "wall", temperature_k: 300.0, pressure_pa: null };
+const DEFAULT_BOUNDARY: DsmcBoundary = {
+  edges: [],
+  p1: null,
+  p2: null,
+  type: "wall",
+  temperature_k: 300.0,
+  pressure_pa: null,
+  flow_sccm: null,
+};
 
 const BOUNDARY_TYPE_LABELS: Record<DsmcBoundaryType, string> = {
   wall: "壁 (拡散反射)",
@@ -79,6 +88,21 @@ function parseEdgesText(text: string): number[] {
     .filter((s) => s !== "")
     .map((s) => Math.round(Number(s)))
     .filter((n) => Number.isFinite(n) && n >= 0);
+}
+
+// 適用範囲の指定方法。p1/p2 が両方指定されていれば線分指定 (edges との併用も可だが、
+// UI 上はどちらか一方のモードで編集する)
+type RangeMode = "edges" | "segment";
+
+function rangeModeOf(b: DsmcBoundary): RangeMode {
+  return b.p1 != null && b.p2 != null ? "segment" : "edges";
+}
+
+// inlet の指定方法。flow_sccm が指定されていれば流量、それ以外は圧力
+type InletSpecMode = "pressure" | "flow";
+
+function inletSpecModeOf(b: DsmcBoundary): InletSpecMode {
+  return b.flow_sccm != null ? "flow" : "pressure";
 }
 
 interface Props {
@@ -181,66 +205,171 @@ export default function GasPanel({
 
           <h2>境界条件 (domain 外周)</h2>
           <p className="hint">
-            domain 外周のエッジ番号 (カンマ区切り、0-indexed、現在 {domainEdgeCount} 辺) を指定します。
-            未指定のエッジは壁 (拡散反射) になります。
+            domain 外周のエッジ番号 (カンマ区切り、0-indexed、現在 {domainEdgeCount} 辺)、または
+            外周上の線分 p1-p2 (部分区間) で適用範囲を指定します。未指定のエッジは壁 (拡散反射) になります。
+            線分指定は外周上の線分に載る境界メッシュエッジへ適用されます (電極との隙間など部分区間の指定用)。
+          </p>
+          <p className="hint">
+            流入口 (inlet) は圧力指定に加えて流量指定 [sccm] も選べます。
+            1 sccm = 標準状態の 1 cm³/min (奥行き1m換算)。流量指定では入射粒子は壁反射になり、正味流量が指定値に一致します。
           </p>
           <div className="collector-list">
             {dsmc.boundaries.length === 0 && <div className="muted">(未指定。すべて壁境界として扱われます)</div>}
-            {dsmc.boundaries.map((b, i) => (
-              <div className="dsmc-boundary-row" key={i}>
-                <div className="dsmc-boundary-row-main">
-                  <CommitTextInput
-                    className="dsmc-edges-input"
-                    value={b.edges.join(",")}
-                    onCommit={(v) => updateBoundary(i, { edges: parseEdgesText(v) })}
-                  />
-                  <select
-                    value={b.type}
-                    onChange={(e) => updateBoundary(i, { type: e.target.value as DsmcBoundaryType })}
-                  >
-                    {(Object.keys(BOUNDARY_TYPE_LABELS) as DsmcBoundaryType[]).map((t) => (
-                      <option key={t} value={t}>
-                        {BOUNDARY_TYPE_LABELS[t]}
-                      </option>
-                    ))}
-                  </select>
-                  <button className="danger collector-delete" onClick={() => removeBoundary(i)} title="この境界を削除">
-                    ×
-                  </button>
-                </div>
-                <div className="dsmc-boundary-row-sub">
-                  <label className="rf-compact-label" title="温度 [K]">
-                    T
-                    <CommitNumberInput
-                      className="rf-compact"
-                      value={b.temperature_k}
-                      onCommit={(v) => updateBoundary(i, { temperature_k: v })}
-                    />
-                  </label>
-                  {(b.type === "inlet" || b.type === "outlet") && (
-                    <label className="rf-compact-label" title="圧力 [Pa] (outlet は空欄/0で真空排気)">
-                      p
-                      <input
-                        type="text"
-                        inputMode="decimal"
+            {dsmc.boundaries.map((b, i) => {
+              const rangeMode = rangeModeOf(b);
+              const specMode = inletSpecModeOf(b);
+              const p1: Point = b.p1 ?? [0, 0];
+              const p2: Point = b.p2 ?? [0, 0];
+              return (
+                <div className="dsmc-boundary-row" key={i}>
+                  <div className="dsmc-boundary-row-main">
+                    <select
+                      className="dsmc-range-select"
+                      value={rangeMode}
+                      onChange={(e) => {
+                        const mode = e.target.value as RangeMode;
+                        if (mode === "segment") {
+                          updateBoundary(i, { edges: [], p1: b.p1 ?? [0, 0], p2: b.p2 ?? [0, 0] });
+                        } else {
+                          updateBoundary(i, { p1: null, p2: null });
+                        }
+                      }}
+                    >
+                      <option value="edges">エッジ番号</option>
+                      <option value="segment">線分 (p1-p2)</option>
+                    </select>
+                    {rangeMode === "edges" && (
+                      <CommitTextInput
+                        className="dsmc-edges-input"
+                        value={b.edges.join(",")}
+                        onCommit={(v) => updateBoundary(i, { edges: parseEdgesText(v) })}
+                      />
+                    )}
+                    <select
+                      value={b.type}
+                      onChange={(e) => updateBoundary(i, { type: e.target.value as DsmcBoundaryType })}
+                    >
+                      {(Object.keys(BOUNDARY_TYPE_LABELS) as DsmcBoundaryType[]).map((t) => (
+                        <option key={t} value={t}>
+                          {BOUNDARY_TYPE_LABELS[t]}
+                        </option>
+                      ))}
+                    </select>
+                    <button className="danger collector-delete" onClick={() => removeBoundary(i)} title="この境界を削除">
+                      ×
+                    </button>
+                  </div>
+                  {rangeMode === "segment" && (
+                    <div className="dsmc-boundary-row-sub">
+                      <label className="rf-compact-label" title="p1 x [mm]">
+                        p1x
+                        <CommitNumberInput
+                          className="rf-compact"
+                          value={mToMm(p1[0])}
+                          step="0.1"
+                          onCommit={(x) => updateBoundary(i, { p1: [mmToM(x), p1[1]] })}
+                        />
+                      </label>
+                      <label className="rf-compact-label" title="p1 y [mm]">
+                        p1y
+                        <CommitNumberInput
+                          className="rf-compact"
+                          value={mToMm(p1[1])}
+                          step="0.1"
+                          onCommit={(y) => updateBoundary(i, { p1: [p1[0], mmToM(y)] })}
+                        />
+                      </label>
+                      <label className="rf-compact-label" title="p2 x [mm]">
+                        p2x
+                        <CommitNumberInput
+                          className="rf-compact"
+                          value={mToMm(p2[0])}
+                          step="0.1"
+                          onCommit={(x) => updateBoundary(i, { p2: [mmToM(x), p2[1]] })}
+                        />
+                      </label>
+                      <label className="rf-compact-label" title="p2 y [mm]">
+                        p2y
+                        <CommitNumberInput
+                          className="rf-compact"
+                          value={mToMm(p2[1])}
+                          step="0.1"
+                          onCommit={(y) => updateBoundary(i, { p2: [p2[0], mmToM(y)] })}
+                        />
+                      </label>
+                    </div>
+                  )}
+                  <div className="dsmc-boundary-row-sub">
+                    <label className="rf-compact-label" title="温度 [K]">
+                      T
+                      <CommitNumberInput
                         className="rf-compact"
-                        value={b.pressure_pa == null ? "" : String(b.pressure_pa)}
-                        placeholder={b.type === "outlet" ? "真空" : ""}
-                        onChange={(e) => {
-                          const raw = e.target.value;
-                          if (raw.trim() === "") {
-                            updateBoundary(i, { pressure_pa: null });
-                            return;
-                          }
-                          const n = Number(raw);
-                          if (Number.isFinite(n)) updateBoundary(i, { pressure_pa: n });
-                        }}
+                        value={b.temperature_k}
+                        onCommit={(v) => updateBoundary(i, { temperature_k: v })}
                       />
                     </label>
-                  )}
+                    {b.type === "inlet" && (
+                      <select
+                        className="dsmc-spec-select"
+                        value={specMode}
+                        onChange={(e) => {
+                          const mode = e.target.value as InletSpecMode;
+                          if (mode === "flow") {
+                            updateBoundary(i, { pressure_pa: null, flow_sccm: b.flow_sccm ?? 1.0 });
+                          } else {
+                            updateBoundary(i, { flow_sccm: null, pressure_pa: b.pressure_pa ?? 1.0 });
+                          }
+                        }}
+                      >
+                        <option value="pressure">圧力 [Pa]</option>
+                        <option value="flow">流量 [sccm]</option>
+                      </select>
+                    )}
+                    {(b.type === "outlet" || (b.type === "inlet" && specMode === "pressure")) && (
+                      <label className="rf-compact-label" title="圧力 [Pa] (outlet は空欄/0で真空排気)">
+                        p
+                        <input
+                          type="text"
+                          inputMode="decimal"
+                          className="rf-compact"
+                          value={b.pressure_pa == null ? "" : String(b.pressure_pa)}
+                          placeholder={b.type === "outlet" ? "真空" : ""}
+                          onChange={(e) => {
+                            const raw = e.target.value;
+                            if (raw.trim() === "") {
+                              updateBoundary(i, { pressure_pa: null });
+                              return;
+                            }
+                            const n = Number(raw);
+                            if (Number.isFinite(n)) updateBoundary(i, { pressure_pa: n });
+                          }}
+                        />
+                      </label>
+                    )}
+                    {b.type === "inlet" && specMode === "flow" && (
+                      <label className="rf-compact-label" title="流量 [sccm] (1 sccm = 標準状態の1 cm³/min、奥行き1m換算)">
+                        Q
+                        <input
+                          type="text"
+                          inputMode="decimal"
+                          className="rf-compact"
+                          value={b.flow_sccm == null ? "" : String(b.flow_sccm)}
+                          onChange={(e) => {
+                            const raw = e.target.value;
+                            if (raw.trim() === "") {
+                              updateBoundary(i, { flow_sccm: null });
+                              return;
+                            }
+                            const n = Number(raw);
+                            if (Number.isFinite(n)) updateBoundary(i, { flow_sccm: n });
+                          }}
+                        />
+                      </label>
+                    )}
+                  </div>
                 </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
           <div className="actions">
             <button className="secondary" onClick={addBoundary}>

@@ -36,6 +36,10 @@ from .schema import DsmcSettings, Project
 KB = 1.380649e-23     # ボルツマン定数 [J/K]
 AMU = 1.66053906660e-27  # 原子質量単位 [kg]
 
+# 1 sccm = 標準状態 (273.15 K, 101325 Pa) の 1 cm^3/min の分子数流量 [分子/s]
+# = (101325/(kB·273.15))·1e-6/60
+SCCM_TO_PER_S = 101325.0 / (KB * 273.15) * 1e-6 / 60.0  # ≈ 4.478e17
+
 # 境界タイプの内部コード ((要素, ローカルエッジ) 表で引く)
 _B_WALL = 0
 _B_SYMMETRY = 1
@@ -200,61 +204,95 @@ class DsmcSimulation:
         self._b_tan[ts, loc] = t_vec / length[:, None]
         self._b_delta[ts, loc] = 1e-3 * height
 
-        # domain 外周エッジへの割り当て (エッジ中点が domain エッジ線分上にあるか)
+        # domain 外周エッジ / 線分 (p1-p2、prompts/55) への割り当て
+        # (境界メッシュエッジの中点が指定線分上にあるかで判定する)
         poly = np.asarray(self.project.geometry.domain.polygon, dtype=np.float64)
         nv = len(poly)
         scale = float(np.max(np.abs(poly)))
-        tol = 1e-8 * (scale if scale > 0.0 else 1.0)
+        tol_edge = 1e-8 * (scale if scale > 0.0 else 1.0)
+        # 線分指定はユーザ入力座標なので緩めの許容 (グリッドスナップ誤差を吸収)
+        tol_seg = 1e-6 * (scale if scale > 0.0 else 1.0)
         type_code = {"wall": _B_WALL, "symmetry": _B_SYMMETRY}
 
-        # リザーバ流入エッジのリスト (流入計算用)
+        def _mid_on(q1: np.ndarray, q2: np.ndarray, tol: float) -> np.ndarray:
+            seg = q2 - q1
+            seg_len = float(np.hypot(seg[0], seg[1]))
+            if seg_len <= 0.0:
+                return np.zeros(len(ts), dtype=bool)
+            d = mid - q1
+            dist = np.abs(d[:, 0] * seg[1] - d[:, 1] * seg[0]) / seg_len
+            tpar = (d[:, 0] * seg[0] + d[:, 1] * seg[1]) / (seg_len * seg_len)
+            return (dist <= tol) & (tpar >= -1e-9) & (tpar <= 1.0 + 1e-9)
+
+        def _edge_entry(i: int, rate: float, temp: float) -> dict:
+            """流入エッジの前計算エントリ (rate = 実分子数流量 [1/s])。"""
+            return {
+                "elem": int(ts[i]),
+                "loc": int(loc[i]),
+                "p1": p1[i],
+                "p2": p2[i],
+                "nrm": nrm[i],
+                "tan": t_vec[i] / length[i],
+                "delta": float(1e-3 * height[i]),
+                "rate": rate,
+                "temp": temp,
+                "frac": 0.0,
+            }
+
+        # 流入エッジのリスト (圧力リザーバ・流量指定の両方)
         self._res_edges: list[dict] = []
         for bc in self.s.boundaries:
-            if bc.type in ("inlet", "outlet"):
+            flow_inlet = bc.type == "inlet" and bc.flow_sccm is not None
+            if flow_inlet:
+                # 流量指定: 入射粒子は拡散反射壁として扱い (吸収しない)、
+                # 指定流量だけを注入する → 正味流量が指定値に厳密一致する
+                code = _B_WALL
+            elif bc.type in ("inlet", "outlet"):
                 code = (
                     _B_RESERVOIR if (bc.pressure_pa and bc.pressure_pa > 0.0) else _B_VACUUM
                 )
             else:
                 code = type_code[bc.type]
+
+            on = np.zeros(len(ts), dtype=bool)
             for e in bc.edges:
-                q1 = poly[e % nv]
-                q2 = poly[(e + 1) % nv]
-                seg = q2 - q1
-                seg_len = float(np.hypot(seg[0], seg[1]))
-                if seg_len <= 0.0:
-                    continue
-                d = mid - q1
-                dist = np.abs(d[:, 0] * seg[1] - d[:, 1] * seg[0]) / seg_len
-                tpar = (d[:, 0] * seg[0] + d[:, 1] * seg[1]) / (seg_len * seg_len)
-                on = (dist <= tol) & (tpar >= -1e-9) & (tpar <= 1.0 + 1e-9)
-                if not np.any(on):
-                    continue
-                self._b_type[ts[on], loc[on]] = code
-                self._b_temp[ts[on], loc[on]] = bc.temperature_k
-                if code == _B_RESERVOIR:
-                    n_res = bc.pressure_pa / (KB * bc.temperature_k)
-                    for i in np.nonzero(on)[0]:
-                        self._res_edges.append(
-                            {
-                                "elem": int(ts[i]),
-                                "loc": int(loc[i]),
-                                "p1": p1[i],
-                                "p2": p2[i],
-                                "nrm": nrm[i],
-                                "tan": t_vec[i] / length[i],
-                                "len": float(length[i]),
-                                "delta": float(1e-3 * height[i]),
-                                "n": n_res,
-                                "temp": bc.temperature_k,
-                                "frac": 0.0,
-                            }
-                        )
+                on |= _mid_on(poly[e % nv], poly[(e + 1) % nv], tol_edge)
+            if bc.p1 is not None and bc.p2 is not None:
+                on |= _mid_on(
+                    np.asarray(bc.p1, dtype=np.float64),
+                    np.asarray(bc.p2, dtype=np.float64),
+                    tol_seg,
+                )
+            if not np.any(on):
+                continue
+            self._b_type[ts[on], loc[on]] = code
+            self._b_temp[ts[on], loc[on]] = bc.temperature_k
+            idxs = np.nonzero(on)[0]
+
+            if flow_inlet:
+                # 総分子流量 [1/s] をエッジ長に比例配分 (2D: 奥行き 1 m 換算)
+                ndot = bc.flow_sccm * SCCM_TO_PER_S
+                total_len = float(length[idxs].sum())
+                for i in idxs:
+                    self._res_edges.append(
+                        _edge_entry(i, ndot * float(length[i]) / total_len, bc.temperature_k)
+                    )
+            elif code == _B_RESERVOIR:
+                # 圧力リザーバ: 平衡流束 Φ = n c̄/4 = n √(kT/2πm) [1/m²s] × エッジ長
+                n_res = bc.pressure_pa / (KB * bc.temperature_k)
+                flux = n_res * math.sqrt(KB * bc.temperature_k / (2.0 * math.pi * self.m))
+                for i in idxs:
+                    self._res_edges.append(
+                        _edge_entry(i, flux * float(length[i]), bc.temperature_k)
+                    )
 
     # ---- 流入 (リザーバ) ------------------------------------------------------
 
     def _inject(self) -> None:
-        """リザーバエッジから平衡流束 Φ = n c̄/4 (c̄ = √(8kT/πm)) で流入させる。
+        """流入エッジ (圧力リザーバ・流量指定) から粒子を注入する。
 
+        エッジごとの実分子数流量 rate [1/s] は前計算済み (リザーバ: 平衡流束
+        n c̄/4 × 長さ、流量指定: sccm 換算をエッジ長で比例配分)。
         流入法線速度は流束重み付き Maxwell (v_n = σ√(−2 ln U))、接線・z 成分は
         熱速度の正規分布。端数はエッジごとに持ち越す。
         """
@@ -263,8 +301,7 @@ class DsmcSimulation:
         new_x, new_v, new_e = [], [], []
         for ed in self._res_edges:
             sig = math.sqrt(KB * ed["temp"] / self.m)
-            flux = ed["n"] * math.sqrt(KB * ed["temp"] / (2.0 * math.pi * self.m))
-            quota = flux * ed["len"] * self.dt / self.w + ed["frac"]
+            quota = ed["rate"] * self.dt / self.w + ed["frac"]
             k = int(quota)
             ed["frac"] = quota - k
             if k == 0:

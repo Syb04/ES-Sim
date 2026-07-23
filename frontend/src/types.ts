@@ -198,10 +198,13 @@ export interface DsmcGas {
 export type DsmcBoundaryType = "wall" | "symmetry" | "inlet" | "outlet";
 
 export interface DsmcBoundary {
-  edges: number[];
+  edges: number[];             // 空可
+  p1?: Point | null;           // 線分指定 (domain 外周上、部分区間)。edges と併用可 (和集合)
+  p2?: Point | null;
   type: DsmcBoundaryType;
   temperature_k: number;
-  pressure_pa?: number | null; // inlet は必須 (>0)。outlet は省略/0で真空排気
+  pressure_pa?: number | null; // inlet は pressure_pa/flow_sccm のどちらか必須。outlet は省略/0で真空排気
+  flow_sccm?: number | null;   // inlet の流量指定 [sccm] (pressure_pa と排他)
 }
 
 // 定常ガス流れの DSMC 設定。Project.dsmc が null なら無効
