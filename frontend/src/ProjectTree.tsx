@@ -1,0 +1,375 @@
+import { useState } from "react";
+import { EDGE_LABELS_RZ, EDGE_LABELS_RZ_X0, EDGE_LABELS_XY } from "./panels/FieldPanel";
+import { isAxisymmetric, rfComponents } from "./types";
+import type {
+  DsmcResult,
+  EdgeBcType,
+  PicDiag,
+  PicFields,
+  PicFrameMsg,
+  PicStartedMsg,
+  Project,
+  SolveResult,
+  TraceResult,
+  VoltageRf,
+} from "./types";
+
+/**
+ * 左カラムのプロジェクトツリーが表現するノード。
+ * インスペクタ (中カラム) はこの選択に応じて表示ページを切替える (App.tsx 側で管理)。
+ * result-trace/result-pic/result-gas は study-trace/study-pic/study-gas と同じ
+ * インスペクタページを指す (実装単純化のため、prompts/60 参照)。
+ */
+export type TreeNode =
+  | "domain"
+  | "regions"
+  | "boundary"
+  | "mesh"
+  | "bfield"
+  | "study-fem"
+  | "study-trace"
+  | "study-pic"
+  | "study-gas"
+  | "result-phi"
+  | "result-e"
+  | "result-profile"
+  | "result-trace"
+  | "result-pic"
+  | "result-gas";
+
+interface Props {
+  project: Project;
+  activeNode: TreeNode;
+  onSelectNode: (node: TreeNode) => void;
+  selectedRegionId: string | null;
+  onSelectRegion: (id: string) => void;
+  // 境界条件の子ノード (辺) 選択中のインデックス。boundary 以外では null
+  edgeFilter: number | null;
+  onSelectEdge: (edgeIndex: number) => void;
+  edgeState: (
+    edgeIndex: number,
+  ) => { type: EdgeBcType; voltage: number; voltageRf?: VoltageRf | VoltageRf[]; seeGamma: number };
+  // 静電場FEM/粒子軌道追跡 (Solve/Mesh/Trace は同じ busy フラグを共用している、App.tsx 参照)
+  busy: boolean;
+  result: SolveResult | null;
+  traceResult: TraceResult | null;
+  picRunning: boolean;
+  picStarted: PicStartedMsg | null;
+  picFrame: PicFrameMsg | null;
+  picError: string | null;
+  picFields: PicFields | null;
+  picHistory: PicDiag[];
+  gasRunning: boolean;
+  gasProgress: { step: number; nSteps: number; nParticles: number } | null;
+  gasError: string | null;
+  gasResult: DsmcResult | null;
+}
+
+type BadgeKind = "busy" | "done" | "error" | "idle";
+
+function StatusBadge({ text, kind }: { text: string; kind: BadgeKind }) {
+  return <span className={`tree-status tree-status-${kind}`}>{text}</span>;
+}
+
+// パーセンテージ表示 (分母0/未定義時は0%扱い、NaN表示を避ける)
+function pct(numer: number, denom: number): number {
+  if (!(denom > 0)) return 0;
+  return Math.round((numer / denom) * 100);
+}
+
+export default function ProjectTree({
+  project,
+  activeNode,
+  onSelectNode,
+  selectedRegionId,
+  onSelectRegion,
+  edgeFilter,
+  onSelectEdge,
+  edgeState,
+  busy,
+  result,
+  traceResult,
+  picRunning,
+  picStarted,
+  picFrame,
+  picError,
+  picFields,
+  picHistory,
+  gasRunning,
+  gasProgress,
+  gasError,
+  gasResult,
+}: Props) {
+  const [search, setSearch] = useState("");
+  const [openGeo, setOpenGeo] = useState(true);
+  const [openStudy, setOpenStudy] = useState(true);
+  const [openResult, setOpenResult] = useState(true);
+
+  const q = search.trim().toLowerCase();
+  // ノード名の部分一致フィルタ (空文字なら常に表示 = 全表示)
+  const match = (label: string) => q === "" || label.toLowerCase().includes(q);
+
+  const coord = project.coord ?? "xy";
+  const isRz = coord === "rz";
+  const isRzX0 = coord === "rz_x0";
+  const isAxisym = isAxisymmetric(coord);
+  const edgeLabels = isRz ? EDGE_LABELS_RZ : isRzX0 ? EDGE_LABELS_RZ_X0 : EDGE_LABELS_XY;
+  const axisEdge = isRz ? 0 : isRzX0 ? 3 : null;
+
+  // 境界条件の子ノードの要約テキスト (対称軸の辺は固定表示)
+  const edgeSummary = (i: number): string => {
+    if (axisEdge === i) return "対称軸";
+    const st = edgeState(i);
+    if (st.type === "neumann") return "なし";
+    if (st.type === "dirichlet") {
+      const rf = rfComponents(st.voltageRf).length > 0 ? " +RF" : "";
+      return `Dirichlet ${st.voltage}V${rf}`;
+    }
+    if (st.type === "symmetry") return "対称 (反射)";
+    return "周期";
+  };
+
+  const femBadge = (): { text: string; kind: BadgeKind } => {
+    if (busy) return { text: "実行中", kind: "busy" };
+    if (result) return { text: "✓完了", kind: "done" };
+    return { text: "未実行", kind: "idle" };
+  };
+  const traceBadge = (): { text: string; kind: BadgeKind } => {
+    if (busy) return { text: "実行中", kind: "busy" };
+    if (traceResult) return { text: "✓完了", kind: "done" };
+    return { text: "未実行", kind: "idle" };
+  };
+  const picBadge = (): { text: string; kind: BadgeKind } => {
+    if (picRunning) {
+      const p = pct(picFrame?.step ?? 0, picStarted?.n_steps ?? 0);
+      return { text: `実行中 ${p}%`, kind: "busy" };
+    }
+    if (picError) return { text: "エラー", kind: "error" };
+    if (picFields || picHistory.length > 0) return { text: "✓完了", kind: "done" };
+    return { text: "未実行", kind: "idle" };
+  };
+  const gasBadge = (): { text: string; kind: BadgeKind } => {
+    if (gasRunning) {
+      const p = pct(gasProgress?.step ?? 0, gasProgress?.nSteps ?? 0);
+      return { text: `実行中 ${p}%`, kind: "busy" };
+    }
+    if (gasError) return { text: "エラー", kind: "error" };
+    if (gasResult) return { text: "✓完了", kind: "done" };
+    return { text: "未実行", kind: "idle" };
+  };
+
+  const regions = project.geometry.regions;
+  const showRegionsGroup = match("領域") || regions.some((r) => match(r.id));
+  const showBoundaryGroup = match("境界条件") || edgeLabels.some((label) => match(label));
+
+  return (
+    <div className="tree-search-wrap">
+      <input
+        className="tree-search"
+        type="text"
+        placeholder="ノードを検索..."
+        value={search}
+        onChange={(e) => setSearch(e.target.value)}
+      />
+
+      <div className="tree-scroll">
+        {/* --- ジオメトリ (プリ) --- */}
+        <div className="tree-section">
+          <div className="tree-section-header" onClick={() => setOpenGeo(!openGeo)}>
+            <span className="tree-caret">{openGeo ? "▼" : "▶"}</span>
+            <span className="tree-section-title">ジオメトリ</span>
+            <span className="tree-phase-badge pre">プリ</span>
+          </div>
+          {openGeo && (
+            <div className="tree-section-body">
+              {match("ドメイン") && (
+                <div
+                  className={`tree-row ${activeNode === "domain" ? "active" : ""}`}
+                  onClick={() => onSelectNode("domain")}
+                >
+                  <span>ドメイン</span>
+                </div>
+              )}
+
+              {showRegionsGroup && (
+                <>
+                  <div className="tree-row tree-row-group">領域 ({regions.length})</div>
+                  {regions
+                    .filter((r) => q === "" || match("領域") || match(r.id))
+                    .map((r) => (
+                      <div
+                        key={r.id}
+                        className={`tree-row tree-row-indent2 ${
+                          activeNode === "regions" && selectedRegionId === r.id ? "active" : ""
+                        }`}
+                        onClick={() => onSelectRegion(r.id)}
+                      >
+                        <span>{r.id}</span>
+                        <span className="tree-row-sub">{r.type}</span>
+                      </div>
+                    ))}
+                  {regions.length === 0 && <div className="tree-row tree-row-indent2 muted">(領域なし)</div>}
+                </>
+              )}
+
+              {showBoundaryGroup && (
+                <>
+                  <div className="tree-row tree-row-group">境界条件</div>
+                  {edgeLabels.map((label, i) => {
+                    if (!(q === "" || match("境界条件") || match(label))) return null;
+                    return (
+                      <div
+                        key={i}
+                        className={`tree-row tree-row-indent2 ${
+                          activeNode === "boundary" && edgeFilter === i ? "active" : ""
+                        }`}
+                        onClick={() => onSelectEdge(i)}
+                      >
+                        <span>{label}</span>
+                        <span className="tree-row-sub">{edgeSummary(i)}</span>
+                      </div>
+                    );
+                  })}
+                </>
+              )}
+
+              {match("メッシュ") && (
+                <div
+                  className={`tree-row ${activeNode === "mesh" ? "active" : ""}`}
+                  onClick={() => onSelectNode("mesh")}
+                >
+                  <span>メッシュ</span>
+                  <span className="tree-row-sub">{(project.mesh.size * 1000).toFixed(2)}mm</span>
+                </div>
+              )}
+
+              {match("磁場") && (
+                <div
+                  className={`tree-row ${activeNode === "bfield" ? "active" : ""}`}
+                  onClick={() => onSelectNode("bfield")}
+                >
+                  <span>磁場</span>
+                  {project.b_field && (
+                    <span className="tree-row-sub">
+                      Bx{project.b_field.bx},By{project.b_field.by},Bz{project.b_field.bz}
+                    </span>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+
+        {/* --- スタディ (メイン) --- */}
+        <div className="tree-section">
+          <div className="tree-section-header" onClick={() => setOpenStudy(!openStudy)}>
+            <span className="tree-caret">{openStudy ? "▼" : "▶"}</span>
+            <span className="tree-section-title">スタディ</span>
+            <span className="tree-phase-badge main">メイン</span>
+          </div>
+          {openStudy && (
+            <div className="tree-section-body">
+              {match("静電場FEM") && (
+                <div
+                  className={`tree-row ${activeNode === "study-fem" ? "active" : ""}`}
+                  onClick={() => onSelectNode("study-fem")}
+                >
+                  <span>静電場 FEM</span>
+                  <StatusBadge {...femBadge()} />
+                </div>
+              )}
+              {match("粒子軌道追跡") && (
+                <div
+                  className={`tree-row ${activeNode === "study-trace" ? "active" : ""}`}
+                  onClick={() => onSelectNode("study-trace")}
+                >
+                  <span>粒子軌道追跡</span>
+                  <StatusBadge {...traceBadge()} />
+                </div>
+              )}
+              {match("PIC-MCC") && (
+                <div
+                  className={`tree-row ${activeNode === "study-pic" ? "active" : ""}`}
+                  onClick={() => onSelectNode("study-pic")}
+                >
+                  <span>PIC-MCC</span>
+                  <StatusBadge {...picBadge()} />
+                </div>
+              )}
+              {match("ガス流れDSMC") && (
+                <div
+                  className={`tree-row ${activeNode === "study-gas" ? "active" : ""}`}
+                  onClick={() => onSelectNode("study-gas")}
+                >
+                  <span>ガス流れ DSMC</span>
+                  <StatusBadge {...gasBadge()} />
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+
+        {/* --- 結果 (ポスト) --- */}
+        <div className="tree-section">
+          <div className="tree-section-header" onClick={() => setOpenResult(!openResult)}>
+            <span className="tree-caret">{openResult ? "▼" : "▶"}</span>
+            <span className="tree-section-title">結果</span>
+            <span className="tree-phase-badge post">ポスト</span>
+          </div>
+          {openResult && (
+            <div className="tree-section-body">
+              {match("電位分布") && (
+                <div
+                  className={`tree-row ${activeNode === "result-phi" ? "active" : ""}`}
+                  onClick={() => onSelectNode("result-phi")}
+                >
+                  電位分布 φ
+                </div>
+              )}
+              {match("電場") && (
+                <div
+                  className={`tree-row ${activeNode === "result-e" ? "active" : ""}`}
+                  onClick={() => onSelectNode("result-e")}
+                >
+                  電場 |E|
+                </div>
+              )}
+              {match("ラインプロファイル") && (
+                <div
+                  className={`tree-row ${activeNode === "result-profile" ? "active" : ""}`}
+                  onClick={() => onSelectNode("result-profile")}
+                >
+                  ラインプロファイル
+                </div>
+              )}
+              {match("粒子軌道") && (
+                <div
+                  className={`tree-row ${activeNode === "result-trace" ? "active" : ""}`}
+                  onClick={() => onSelectNode("result-trace")}
+                >
+                  粒子軌道
+                </div>
+              )}
+              {match("PIC結果") && (
+                <div
+                  className={`tree-row ${activeNode === "result-pic" ? "active" : ""}`}
+                  onClick={() => onSelectNode("result-pic")}
+                >
+                  PIC 結果
+                </div>
+              )}
+              {match("ガス流れ結果") && (
+                <div
+                  className={`tree-row ${activeNode === "result-gas" ? "active" : ""}`}
+                  onClick={() => onSelectNode("result-gas")}
+                >
+                  ガス流れ結果
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}

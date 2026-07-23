@@ -4,7 +4,10 @@ import { getPort, initPort, setPort } from "./backendPort";
 import CadCanvas from "./canvas/CadCanvas";
 import type { FieldView, PicCollectorView, PicFieldView, Tool } from "./canvas/CadCanvas";
 import ProfilePanel from "./panels/ProfilePanel";
-import FieldPanel from "./panels/FieldPanel";
+import FieldPanel, { EDGE_LABELS_RZ, EDGE_LABELS_RZ_X0, EDGE_LABELS_XY } from "./panels/FieldPanel";
+import type { FieldSection } from "./panels/FieldPanel";
+import ProjectTree from "./ProjectTree";
+import type { TreeNode } from "./ProjectTree";
 import ParticlePanel from "./panels/ParticlePanel";
 import PicPanel, { PIC_FIELD_META } from "./panels/PicPanel";
 import type { CyclePicField, PicResultField } from "./panels/PicPanel";
@@ -106,6 +109,54 @@ function normalizeCollectors(pic: PicSettings): PicSettings {
   return pic;
 }
 
+// インスペクタ (中カラム) 上部に表示する現在ノードのタイトル。boundary/regions は
+// 選択中の辺/領域に応じて別途組み立てる (下記 inspectorTitle 参照) ため、ここでは既定値のみ持つ
+const NODE_TITLES: Record<TreeNode, string> = {
+  domain: "ジオメトリ — ドメイン",
+  regions: "ジオメトリ — 領域",
+  boundary: "ジオメトリ — 境界条件",
+  mesh: "ジオメトリ — メッシュ",
+  bfield: "ジオメトリ — 磁場",
+  "study-fem": "スタディ — 静電場 FEM",
+  "study-trace": "スタディ — 粒子軌道追跡",
+  "study-pic": "スタディ — PIC-MCC",
+  "study-gas": "スタディ — ガス流れ DSMC",
+  "result-phi": "結果 — 電位分布 φ",
+  "result-e": "結果 — 電場 |E|",
+  "result-profile": "結果 — ラインプロファイル",
+  "result-trace": "結果 — 粒子軌道",
+  "result-pic": "結果 — PIC 結果",
+  "result-gas": "結果 — ガス流れ結果",
+};
+
+// ツールバーの現在ツールをステータスバーに表示するための日本語ラベル
+const TOOL_LABELS: Record<Tool, string> = {
+  select: "選択",
+  polyline: "ポリライン",
+  rect: "矩形",
+  circle: "円",
+  profile: "プロファイル",
+  emitter: "エミッタ",
+  collector: "コレクタ",
+};
+
+// result-phi / result-e インスペクタページ共通の解析結果サマリ (FieldPanel の solve
+// セクションと同内容だが、結果ノード単体でも確認できるようにここでも表示する)
+function ResultSummary({ result, isAxisym }: { result: SolveResult | null; isAxisym: boolean }) {
+  if (!result) {
+    return <div className="muted">(まだ解析結果がありません。スタディ「静電場 FEM」で Solve を実行してください)</div>;
+  }
+  return (
+    <>
+      <div className="kv"><span>節点数</span><span>{result.mesh.nodes.length}</span></div>
+      <div className="kv"><span>要素数</span><span>{result.mesh.triangles.length}</span></div>
+      <div className="kv"><span>V min/max</span><span>{result.v_min.toFixed(1)} / {result.v_max.toFixed(1)} V</span></div>
+      <div className="kv"><span>|E| max</span><span>{result.e_abs_max.toExponential(2)} V/m</span></div>
+      <div className="kv"><span>エネルギー</span><span>{result.energy.toExponential(3)} {isAxisym ? "J" : "J/m"}</span></div>
+    </>
+  );
+}
+
 // フェーズ0 のサンプル (examples/parallel_plates.json と同内容)。
 // これを初期値として、以降は project state を編集していく。
 const SAMPLE: Project = {
@@ -165,9 +216,12 @@ export default function App() {
   const [profileLine, setProfileLine] = useState<[Point, Point] | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // サイドパネルのタブ (静電場/粒子追跡/PIC)。タブ切替は表示の切替のみで、
-  // 各タブの編集状態・実行状態 (PIC の WS 接続やチャート履歴など) はアンマウントされずに保持される
-  const [activeTab, setActiveTab] = useState<"field" | "particle" | "pic" | "gas">("field");
+  // プロジェクトツリー (左カラム) で選択中のノード。中カラムのインスペクタは
+  // このノードに応じて表示ページを切替える (表示切替のみで各ページはアンマウントしない。
+  // PIC の WS 接続やチャート履歴など、各ページの実行状態を保持するため)
+  const [activeNode, setActiveNode] = useState<TreeNode>("domain");
+  // "boundary" ノード配下で辺の子ノードを選択した場合のみ非null (該当エッジのみ表示するフィルタ)
+  const [edgeFilter, setEdgeFilter] = useState<number | null>(null);
 
   // 粒子設定 (エミッタ・積分パラメータ)。ジオメトリ編集とは独立に管理し、
   // 既存の Undo/Redo 履歴 (history) には積まない。保存/読込 (project.particles) の対象ではある
@@ -534,15 +588,15 @@ export default function App() {
   };
 
   // エミッタ配置ツール (CadCanvas) からの確定通知。kind/n 等はそのまま維持し p1/p2 のみ更新する。
-  // 線を確定したら「粒子追跡」タブに切替え、プロパティがすぐ見えるようにする
+  // 線を確定したら「粒子軌道追跡」インスペクタページに切替え、プロパティがすぐ見えるようにする
   const setEmitterPoints = (p1: Point, p2: Point) => {
     setParticles((prev) => ({ ...prev, emitter: { ...prev.emitter, p1, p2 } }));
-    setActiveTab("particle");
+    setActiveNode("study-trace");
   };
 
   // コレクタ配置ツール (CadCanvas) からの確定通知。線分を確定するたびに pic.collectors へ
   // 1件追加する (最大 MAX_COLLECTORS 個、達したら追加しない)。ラベルは "C1","C2",... を自動採番
-  // (欠番があっても詰めない)。配置したら PIC タブへ切替え、追加したコレクタを選択状態にする
+  // (欠番があっても詰めない)。配置したら PIC インスペクタページへ切替え、追加したコレクタを選択状態にする
   const setCollectorPoints = (p1: Point, p2: Point) => {
     const collectors = pic.collectors ?? [];
     if (collectors.length < MAX_COLLECTORS) {
@@ -551,7 +605,7 @@ export default function App() {
       setPic({ ...pic, collectors: next });
       setSelectedCollectorIndexRaw(next.length - 1);
     }
-    setActiveTab("pic");
+    setActiveNode("study-pic");
   };
 
   // コレクタ一覧 (PICパネル) の1件を更新する (ラベル・tol の編集)
@@ -571,10 +625,32 @@ export default function App() {
     setSelectedCollectorIndexRaw((sel) => (sel === index ? null : sel));
   };
 
-  // キャンバス上で領域を選択したら「静電場」タブに切替える (選択解除時はタブ切替しない)
+  // キャンバス上で領域を選択したら「領域」インスペクタページに切替える (選択解除時は切替しない)
   const selectRegionFromCanvas = (id: string | null) => {
     setSelectedRegionId(id);
-    if (id !== null) setActiveTab("field");
+    if (id !== null) setActiveNode("regions");
+  };
+
+  // プロジェクトツリーでのノード選択。ノードによって連動する副作用がある
+  // (結果表示ノードを選ぶとキャンバスの表示設定も追従させる、既存の activeTab 連動と同様)
+  const selectNode = (node: TreeNode) => {
+    setActiveNode(node);
+    if (node !== "boundary") setEdgeFilter(null);
+    if (node === "result-phi") setFieldView("v");
+    if (node === "result-e") setFieldView("e_abs");
+    if (node === "result-profile") setTool("profile");
+  };
+
+  // プロジェクトツリーで境界条件の子ノード (辺) をクリックした場合
+  const selectEdgeNode = (edgeIndex: number) => {
+    setActiveNode("boundary");
+    setEdgeFilter(edgeIndex);
+  };
+
+  // プロジェクトツリーで領域の子ノードをクリックした場合
+  const selectRegionNode = (id: string) => {
+    setSelectedRegionId(id);
+    setActiveNode("regions");
   };
 
   // --- domain ---
@@ -997,11 +1073,11 @@ export default function App() {
         })()
       : null;
 
-  // ガス流れ (DSMC) 結果フィールド表示用ビュー。「ガス」タブを選んでいて PIC 実行中でなく、
-  // かつ結果がある場合のみ非null (DSMC の n/t/u/p はすべて要素値なので nodeBased=false 固定)。
-  // PicFieldView 型をそのまま流用し、CadCanvas 側の変更は不要にする
+  // ガス流れ (DSMC) 結果フィールド表示用ビュー。ガス関連ノード (スタディ/結果) を選んでいて
+  // PIC 実行中でなく、かつ結果がある場合のみ非null (DSMC の n/t/u/p はすべて要素値なので
+  // nodeBased=false 固定)。PicFieldView 型をそのまま流用し、CadCanvas 側の変更は不要にする
   const gasFieldView: PicFieldView | null =
-    activeTab === "gas" && !picRunning && gasResult
+    (activeNode === "study-gas" || activeNode === "result-gas") && !picRunning && gasResult
       ? {
           mesh: gasResult.mesh,
           values: gasFieldValues(gasResult, gasResultField),
@@ -1016,19 +1092,54 @@ export default function App() {
   // CadCanvas へは既存の picFieldView prop をそのまま使い回す (新規propは増やさない)
   const finalPicFieldView = picCycleView ?? picFieldView ?? gasFieldView;
 
+  // --- インスペクタ (中カラム) の表示制御 ---
+  // FieldPanel は1インスタンスのみ mount し、選択ノードに応じて sections/edgeFilter を切替える
+  const fieldSections: FieldSection[] =
+    activeNode === "domain" ? ["domain"]
+    : activeNode === "regions" ? ["regions"]
+    : activeNode === "boundary" ? ["boundary"]
+    : activeNode === "mesh" ? ["mesh"]
+    : activeNode === "bfield" ? ["bfield"]
+    : activeNode === "study-fem" ? ["solve"]
+    : ["domain"]; // 上記以外のノードでは FieldPanel 自体を表示しないため値は使われない
+  const showFieldPage = ["domain", "regions", "boundary", "mesh", "bfield", "study-fem"].includes(activeNode);
+  // result-trace/result-pic/result-gas は対応する study-* と同じインスペクタページを共有する
+  const showParticlePage = activeNode === "study-trace" || activeNode === "result-trace";
+  const showPicPage = activeNode === "study-pic" || activeNode === "result-pic";
+  const showGasPage = activeNode === "study-gas" || activeNode === "result-gas";
+  const showResultPhiPage = activeNode === "result-phi";
+  const showResultEPage = activeNode === "result-e";
+  const showResultProfilePage = activeNode === "result-profile";
+
+  // インスペクタ上部のタイトル。boundary/regions は選択中の辺/領域名を付け加える
+  const edgeLabelsForTitle =
+    project.coord === "rz" ? EDGE_LABELS_RZ : project.coord === "rz_x0" ? EDGE_LABELS_RZ_X0 : EDGE_LABELS_XY;
+  const inspectorTitle =
+    activeNode === "boundary" && edgeFilter !== null
+      ? `境界条件 — ${edgeLabelsForTitle[edgeFilter]} (エッジ${edgeFilter})`
+      : activeNode === "regions" && selected
+        ? `領域 — ${selected.id}`
+        : NODE_TITLES[activeNode];
+
+  // --- 下部ステータスバー ---
+  // エラーは error → picError → gasError の順で最初の非null を優先表示する
+  const statusError = error ?? picError ?? gasError;
+  const picPct = picStarted && picStarted.n_steps > 0 ? Math.round(((picFrame?.step ?? 0) / picStarted.n_steps) * 100) : 0;
+  const gasPct = gasProgress && gasProgress.nSteps > 0 ? Math.round((gasProgress.step / gasProgress.nSteps) * 100) : 0;
+
   return (
     <div className="app">
       <div className="toolbar">
         <h1>ES-Sim</h1>
-        <button className="secondary" onClick={runMesh} disabled={busy || !health}>
-          {busy ? "計算中..." : "Mesh"}
-        </button>
-        <button onClick={runSolve} disabled={busy || !health}>
-          {busy ? "計算中..." : "Solve"}
-        </button>
-        <button className="secondary" onClick={() => setShowMesh(!showMesh)}>
-          メッシュ {showMesh ? "非表示" : "表示"}
-        </button>
+        <button className="secondary" onClick={saveProject}>保存</button>
+        <button className="secondary" onClick={() => fileInputRef.current?.click()}>読込</button>
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept="application/json"
+          className="file-input"
+          onChange={loadProject}
+        />
         <div className="sep" />
         <button className="secondary" onClick={doUndo} disabled={!history.canUndo} title="Undo (Ctrl+Z)">
           ↶ Undo
@@ -1041,6 +1152,17 @@ export default function App() {
         >
           ↷ Redo
         </button>
+        <div className="sep" />
+        {/* 座標系: FieldPanel の domain セクションにも同じ select がある (実体は同じ setCoord/
+            project.coord を共有する二重配置。値の食い違いは起きない) */}
+        <label className="snap" title="平面2D / 軸対称 r-z の切替">
+          座標系
+          <select value={project.coord ?? "xy"} onChange={(e) => setCoord(e.target.value as "xy" | "rz" | "rz_x0")}>
+            <option value="xy">平面 2D</option>
+            <option value="rz">軸対称 r-z (下辺が軸)</option>
+            <option value="rz_x0">軸対称 r-z (左辺が軸)</option>
+          </select>
+        </label>
         <div className="spacer" />
         <label
           className="snap port-field"
@@ -1069,213 +1191,42 @@ export default function App() {
         </div>
       </div>
 
-      <div className="tool-toolbar">
-        <button className={`tool ${tool === "select" ? "active" : ""}`} onClick={() => setTool("select")}>
-          選択
-        </button>
-        <button
-          className={`tool ${tool === "polyline" ? "active" : ""}`}
-          onClick={() => setTool("polyline")}
-          title="domain外にはみ出した部分は解析時にクリップされます"
-        >
-          ポリライン
-        </button>
-        <button
-          className={`tool ${tool === "rect" ? "active" : ""}`}
-          onClick={() => setTool("rect")}
-          title="domain外にはみ出した部分は解析時にクリップされます"
-        >
-          矩形
-        </button>
-        <button
-          className={`tool ${tool === "circle" ? "active" : ""}`}
-          onClick={() => setTool("circle")}
-          title="domain外にはみ出した部分は解析時にクリップされます"
-        >
-          円
-        </button>
-        <button className={`tool ${tool === "profile" ? "active" : ""}`} onClick={() => setTool("profile")}>
-          プロファイル
-        </button>
-        <button className={`tool ${tool === "emitter" ? "active" : ""}`} onClick={() => setTool("emitter")}>
-          エミッタ
-        </button>
-        <button
-          className={`tool ${tool === "collector" ? "active" : ""}`}
-          onClick={() => setTool("collector")}
-          title={
-            collectorsList.length >= MAX_COLLECTORS
-              ? `コレクタは最大${MAX_COLLECTORS}個までです`
-              : "2点クリックでコレクタ線分を追加します"
-          }
-        >
-          コレクタ ({collectorsList.length}/{MAX_COLLECTORS})
-        </button>
-        {tool === "collector" && collectorsList.length >= MAX_COLLECTORS && (
-          <span className="snap" style={{ color: "#e0b050" }}>
-            コレクタは最大{MAX_COLLECTORS}個に達しました
-          </span>
-        )}
-        <div className="sep" />
-        <label className="snap">
-          <input
-            type="checkbox"
-            checked={gridSnap}
-            onChange={(e) => setGridSnap(e.target.checked)}
-          />
-          グリッドスナップ
-        </label>
-        <label className="snap">
-          ルーラー文字
-          <select
-            className="ruler-font-select"
-            value={rulerFontSize}
-            onChange={(e) => setRulerFontSize(Number(e.target.value))}
-          >
-            <option value={9}>小</option>
-            <option value={11}>中</option>
-            <option value={14}>大</option>
-          </select>
-        </label>
-        <div className="sep" />
-        <span className="field-view-label">表示</span>
-        <select
-          className="field-view-select"
-          value={fieldView}
-          onChange={(e) => setFieldView(e.target.value as FieldView)}
-        >
-          <option value="v">電位 V</option>
-          <option value="e_abs">|E|</option>
-        </select>
-        <label className="snap">
-          <input
-            type="checkbox"
-            checked={showIsolines}
-            onChange={(e) => setShowIsolines(e.target.checked)}
-          />
-          等電位線
-        </label>
-        <label className="snap">
-          <input
-            type="checkbox"
-            checked={showVectors}
-            onChange={(e) => setShowVectors(e.target.checked)}
-          />
-          ベクトル
-        </label>
-      </div>
-
       <div className="main">
-        <div className="canvas-col">
-          <CadCanvas
+        {/* 左カラム: プロジェクトツリー (幅固定、リサイズ不要) */}
+        <div className="tree-col">
+          <ProjectTree
             project={project}
-            result={result}
-            meshResult={meshResult}
-            showMesh={showMesh}
-            tool={tool}
-            gridSnap={gridSnap}
-            rulerFontSize={rulerFontSize}
+            activeNode={activeNode}
+            onSelectNode={selectNode}
             selectedRegionId={selectedRegionId}
-            fieldView={fieldView}
-            showIsolines={showIsolines}
-            showVectors={showVectors}
-            profileLine={profileLine}
-            collectors={collectorsList}
-            selectedCollectorIndex={selectedCollectorIndex}
-            emitter={particles.emitter}
+            onSelectRegion={selectRegionNode}
+            edgeFilter={activeNode === "boundary" ? edgeFilter : null}
+            onSelectEdge={selectEdgeNode}
+            edgeState={edgeState}
+            busy={busy}
+            result={result}
             traceResult={traceResult}
-            showTrajectories={showTrajectories}
-            picFrame={picLiveFrame}
-            picFieldView={finalPicFieldView}
-            onSelectRegion={selectRegionFromCanvas}
-            onDeleteRegion={deleteRegion}
-            onAddRegion={addRegion}
-            onMoveRegion={moveRegion}
-            onEditRegionPolygon={editRegionPolygon}
-            onEditRegionShape={editRegionShape}
-            onProfileLine={(p1, p2) => setProfileLine([p1, p2])}
-            onSetEmitter={setEmitterPoints}
-            onSetCollector={setCollectorPoints}
+            picRunning={picRunning}
+            picStarted={picStarted}
+            picFrame={picFrame}
+            picError={picError}
+            picFields={picFields}
+            picHistory={picHistory}
+            gasRunning={gasRunning}
+            gasProgress={gasProgress}
+            gasError={gasError}
+            gasResult={gasResult}
           />
-          {profileLine && (
-            <ProfilePanel
-              project={project}
-              p1={profileLine[0]}
-              p2={profileLine[1]}
-              onClose={() => setProfileLine(null)}
-            />
-          )}
         </div>
-        {/* サイドパネル幅のリサイザ (ドラッグで変更、ダブルクリックで既定幅に戻す) */}
-        <div
-          className="side-resizer"
-          onMouseDown={(e) => {
-            e.preventDefault();
-            const startX = e.clientX;
-            const startW = sideWidth;
-            const onMove = (ev: MouseEvent) => {
-              const w = startW + (startX - ev.clientX);
-              setSideWidth(Math.min(560, Math.max(220, w)));
-            };
-            const onUp = () => {
-              window.removeEventListener("mousemove", onMove);
-              window.removeEventListener("mouseup", onUp);
-              document.body.style.cursor = "";
-            };
-            document.body.style.cursor = "col-resize";
-            window.addEventListener("mousemove", onMove);
-            window.addEventListener("mouseup", onUp);
-          }}
-          onDoubleClick={() => setSideWidth(280)}
-          title="ドラッグで幅を変更 / ダブルクリックで既定幅"
-        />
+
+        {/* 中カラム: インスペクタ (選択ノードの設定/実行UI)。既存の .side CSS を流用する */}
         <div className="side" style={{ width: sideWidth }}>
-          <div className="side-top">
-            <div className="actions">
-              <button className="secondary" onClick={saveProject}>保存</button>
-              <button className="secondary" onClick={() => fileInputRef.current?.click()}>読込</button>
-              <input
-                ref={fileInputRef}
-                type="file"
-                accept="application/json"
-                className="file-input"
-                onChange={loadProject}
-              />
-            </div>
-          </div>
-
-          <div className="side-tabbar">
-            <button
-              className={`side-tab ${activeTab === "field" ? "active" : ""}`}
-              onClick={() => setActiveTab("field")}
-            >
-              静電場
-            </button>
-            <button
-              className={`side-tab ${activeTab === "particle" ? "active" : ""}`}
-              onClick={() => setActiveTab("particle")}
-            >
-              粒子追跡
-            </button>
-            <button
-              className={`side-tab ${activeTab === "pic" ? "active" : ""}`}
-              onClick={() => setActiveTab("pic")}
-            >
-              PIC
-            </button>
-            <button
-              className={`side-tab ${activeTab === "gas" ? "active" : ""}`}
-              onClick={() => setActiveTab("gas")}
-            >
-              ガス
-            </button>
-          </div>
-
+          <div className="inspector-title">{inspectorTitle}</div>
           <div className="side-tab-content">
-            {/* 各タブは display:none で非表示化するのみでアンマウントしない。
-                これにより PIC 実行中の WebSocket 接続やチャート履歴、他タブの編集状態が
-                タブ切替をまたいで保持される */}
-            <div style={{ display: activeTab === "field" ? "block" : "none" }}>
+            {/* 各インスペクタページは display:none で非表示化するのみでアンマウントしない。
+                これにより PIC の WebSocket 接続やチャート履歴、他ページの編集状態が
+                ノード切替をまたいで保持される (旧タブ切替と同じ方式) */}
+            <div style={{ display: showFieldPage ? "block" : "none" }}>
               <FieldPanel
                 project={project}
                 domainW={domainW}
@@ -1292,7 +1243,7 @@ export default function App() {
                 setBField={setBField}
                 meshResult={meshResult}
                 selectedRegionId={selectedRegionId}
-                onSelectRegion={setSelectedRegionId}
+                onSelectRegion={selectRegionNode}
                 selected={selected}
                 renameRegion={renameRegion}
                 setRegionType={setRegionType}
@@ -1301,10 +1252,18 @@ export default function App() {
                 deleteRegion={deleteRegion}
                 setRegionLocalSize={setRegionLocalSize}
                 result={result}
+                sections={fieldSections}
+                edgeFilter={activeNode === "boundary" ? edgeFilter : null}
+                runMesh={runMesh}
+                runSolve={runSolve}
+                busy={busy}
+                canRun={!!health}
+                showMesh={showMesh}
+                onToggleShowMesh={() => setShowMesh(!showMesh)}
               />
             </div>
 
-            <div style={{ display: activeTab === "particle" ? "block" : "none" }}>
+            <div style={{ display: showParticlePage ? "block" : "none" }}>
               <ParticlePanel
                 project={project}
                 particles={particles}
@@ -1318,7 +1277,7 @@ export default function App() {
               />
             </div>
 
-            <div style={{ display: activeTab === "pic" ? "block" : "none" }}>
+            <div style={{ display: showPicPage ? "block" : "none" }}>
               <PicPanel
                 project={project}
                 pic={pic}
@@ -1366,7 +1325,7 @@ export default function App() {
               />
             </div>
 
-            <div style={{ display: activeTab === "gas" ? "block" : "none" }}>
+            <div style={{ display: showGasPage ? "block" : "none" }}>
               <GasPanel
                 project={project}
                 dsmc={project.dsmc ?? null}
@@ -1385,14 +1344,235 @@ export default function App() {
               />
             </div>
 
-            {error && (
-              <>
-                <h2>エラー</h2>
-                <div className="error">{error}</div>
-              </>
-            )}
+            <div style={{ display: showResultPhiPage ? "block" : "none" }}>
+              <h2>表示オプション</h2>
+              <label className="checkbox-row">
+                <input type="checkbox" checked={showIsolines} onChange={(e) => setShowIsolines(e.target.checked)} />
+                等電位線
+              </label>
+              <label className="checkbox-row">
+                <input type="checkbox" checked={showVectors} onChange={(e) => setShowVectors(e.target.checked)} />
+                ベクトル
+              </label>
+              <h2>解析結果</h2>
+              <ResultSummary result={result} isAxisym={isAxisym} />
+            </div>
+
+            <div style={{ display: showResultEPage ? "block" : "none" }}>
+              <h2>表示オプション</h2>
+              <label className="checkbox-row">
+                <input type="checkbox" checked={showIsolines} onChange={(e) => setShowIsolines(e.target.checked)} />
+                等電位線
+              </label>
+              <label className="checkbox-row">
+                <input type="checkbox" checked={showVectors} onChange={(e) => setShowVectors(e.target.checked)} />
+                ベクトル
+              </label>
+              <h2>解析結果</h2>
+              <ResultSummary result={result} isAxisym={isAxisym} />
+            </div>
+
+            <div style={{ display: showResultProfilePage ? "block" : "none" }}>
+              <h2>ラインプロファイル</h2>
+              <div className="hint">
+                キャンバス上でツール「プロファイル」を選び、2点クリックすると、その間の
+                電位/|E| 分布をキャンバス下部に表示します。
+              </div>
+              {!profileLine && <div className="muted">(まだプロファイル線が指定されていません)</div>}
+            </div>
           </div>
         </div>
+
+        {/* インスペクタ幅のリサイザ (ドラッグで変更、ダブルクリックで既定幅に戻す)。
+            ツリー/インスペクタ/キャンバスの順に並び替えたため、ドラッグ方向は旧実装 (side が右端) から
+            反転している (右へドラッグすると幅が増える) */}
+        <div
+          className="side-resizer"
+          onMouseDown={(e) => {
+            e.preventDefault();
+            const startX = e.clientX;
+            const startW = sideWidth;
+            const onMove = (ev: MouseEvent) => {
+              const w = startW + (ev.clientX - startX);
+              setSideWidth(Math.min(560, Math.max(220, w)));
+            };
+            const onUp = () => {
+              window.removeEventListener("mousemove", onMove);
+              window.removeEventListener("mouseup", onUp);
+              document.body.style.cursor = "";
+            };
+            document.body.style.cursor = "col-resize";
+            window.addEventListener("mousemove", onMove);
+            window.addEventListener("mouseup", onUp);
+          }}
+          onDoubleClick={() => setSideWidth(280)}
+          title="ドラッグで幅を変更 / ダブルクリックで既定幅"
+        />
+
+        {/* 右カラム: キャンバスツールバー + CadCanvas */}
+        <div className="canvas-col">
+          <div className="tool-toolbar">
+            <button className={`tool ${tool === "select" ? "active" : ""}`} onClick={() => setTool("select")}>
+              選択
+            </button>
+            <button
+              className={`tool ${tool === "polyline" ? "active" : ""}`}
+              onClick={() => setTool("polyline")}
+              title="domain外にはみ出した部分は解析時にクリップされます"
+            >
+              ポリライン
+            </button>
+            <button
+              className={`tool ${tool === "rect" ? "active" : ""}`}
+              onClick={() => setTool("rect")}
+              title="domain外にはみ出した部分は解析時にクリップされます"
+            >
+              矩形
+            </button>
+            <button
+              className={`tool ${tool === "circle" ? "active" : ""}`}
+              onClick={() => setTool("circle")}
+              title="domain外にはみ出した部分は解析時にクリップされます"
+            >
+              円
+            </button>
+            <button className={`tool ${tool === "profile" ? "active" : ""}`} onClick={() => setTool("profile")}>
+              プロファイル
+            </button>
+            <button className={`tool ${tool === "emitter" ? "active" : ""}`} onClick={() => setTool("emitter")}>
+              エミッタ
+            </button>
+            <button
+              className={`tool ${tool === "collector" ? "active" : ""}`}
+              onClick={() => setTool("collector")}
+              title={
+                collectorsList.length >= MAX_COLLECTORS
+                  ? `コレクタは最大${MAX_COLLECTORS}個までです`
+                  : "2点クリックでコレクタ線分を追加します"
+              }
+            >
+              コレクタ ({collectorsList.length}/{MAX_COLLECTORS})
+            </button>
+            {tool === "collector" && collectorsList.length >= MAX_COLLECTORS && (
+              <span className="snap" style={{ color: "#e0b050" }}>
+                コレクタは最大{MAX_COLLECTORS}個に達しました
+              </span>
+            )}
+            <div className="sep" />
+            <label className="snap">
+              <input
+                type="checkbox"
+                checked={gridSnap}
+                onChange={(e) => setGridSnap(e.target.checked)}
+              />
+              グリッドスナップ
+            </label>
+            <label className="snap">
+              ルーラー文字
+              <select
+                className="ruler-font-select"
+                value={rulerFontSize}
+                onChange={(e) => setRulerFontSize(Number(e.target.value))}
+              >
+                <option value={9}>小</option>
+                <option value={11}>中</option>
+                <option value={14}>大</option>
+              </select>
+            </label>
+            <div className="sep" />
+            <span className="field-view-label">表示</span>
+            <select
+              className="field-view-select"
+              value={fieldView}
+              onChange={(e) => setFieldView(e.target.value as FieldView)}
+            >
+              <option value="v">電位 V</option>
+              <option value="e_abs">|E|</option>
+            </select>
+            <label className="snap">
+              <input
+                type="checkbox"
+                checked={showIsolines}
+                onChange={(e) => setShowIsolines(e.target.checked)}
+              />
+              等電位線
+            </label>
+            <label className="snap">
+              <input
+                type="checkbox"
+                checked={showVectors}
+                onChange={(e) => setShowVectors(e.target.checked)}
+              />
+              ベクトル
+            </label>
+          </div>
+
+          <CadCanvas
+            project={project}
+            result={result}
+            meshResult={meshResult}
+            showMesh={showMesh}
+            tool={tool}
+            gridSnap={gridSnap}
+            rulerFontSize={rulerFontSize}
+            selectedRegionId={selectedRegionId}
+            fieldView={fieldView}
+            showIsolines={showIsolines}
+            showVectors={showVectors}
+            profileLine={profileLine}
+            collectors={collectorsList}
+            selectedCollectorIndex={selectedCollectorIndex}
+            emitter={particles.emitter}
+            traceResult={traceResult}
+            showTrajectories={showTrajectories}
+            picFrame={picLiveFrame}
+            picFieldView={finalPicFieldView}
+            onSelectRegion={selectRegionFromCanvas}
+            onDeleteRegion={deleteRegion}
+            onAddRegion={addRegion}
+            onMoveRegion={moveRegion}
+            onEditRegionPolygon={editRegionPolygon}
+            onEditRegionShape={editRegionShape}
+            onProfileLine={(p1, p2) => setProfileLine([p1, p2])}
+            onSetEmitter={setEmitterPoints}
+            onSetCollector={setCollectorPoints}
+          />
+          {profileLine && (
+            <ProfilePanel
+              project={project}
+              p1={profileLine[0]}
+              p2={profileLine[1]}
+              onClose={() => setProfileLine(null)}
+            />
+          )}
+        </div>
+      </div>
+
+      {/* 下部ステータスバー: エラー > 静電場/トレース計算中 > PIC実行中 > DSMC実行中 > 準備完了 の優先順位 */}
+      <div className="statusbar">
+        {statusError ? (
+          <span className="statusbar-error">{statusError}</span>
+        ) : busy ? (
+          <span>静電場FEM/トレース 計算中...</span>
+        ) : picRunning ? (
+          <>
+            <span>
+              PIC-MCC 実行中... {picPct}% ({picFrame?.step ?? 0}/{picStarted?.n_steps ?? 0})
+            </span>
+            <div className="statusbar-progress">
+              <div className="statusbar-progress-bar" style={{ width: `${picPct}%` }} />
+            </div>
+          </>
+        ) : gasRunning ? (
+          <>
+            <span>ガス流れDSMC 実行中... {gasPct}%</span>
+            <div className="statusbar-progress">
+              <div className="statusbar-progress-bar" style={{ width: `${gasPct}%` }} />
+            </div>
+          </>
+        ) : (
+          <span>準備完了 — {TOOL_LABELS[tool]}</span>
+        )}
       </div>
     </div>
   );

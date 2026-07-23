@@ -14,12 +14,18 @@ import type {
 } from "../types";
 
 /**
- * 静電場パネル (タブ1)
+ * 静電場パネル (3カラムシェルの各種インスペクタページから共用)
  * - ジオメトリ (domain 幅/高さ)・境界条件 (4辺、RF含む)・メッシュ (サイズ)
  * - 領域一覧 + 選択中領域のプロパティ編集
- * - 解析結果サマリ (節点数・V範囲・エネルギー等)・メッシュ結果サマリ
+ * - 解析実行 (Mesh/Solve) + 解析結果サマリ (節点数・V範囲・エネルギー等)・メッシュ結果サマリ
  * 編集操作自体は App 側の commitProject 経由で Undo/Redo 履歴に積まれる
+ *
+ * 3カラムシェルではプロジェクトツリーの選択ノードごとに `sections` で表示ブロックを
+ * 絞り込んで使う (例: domain ノードなら sections={["domain"]})。sections 未指定時は
+ * 従来通り全ブロックを表示する (後方互換、単体テスト等での利用を壊さないため)。
  */
+
+export type FieldSection = "domain" | "boundary" | "mesh" | "bfield" | "regions" | "solve";
 
 // RF重畳電圧の既定値 (13.56MHz の CCP を想定)
 const DEFAULT_VOLTAGE_RF: VoltageRf = { amplitude: 100.0, freq_hz: 13.56e6, phase_deg: 0.0 };
@@ -89,11 +95,12 @@ function RfComponentsEditor({
 }
 
 // 矩形 domain の外周エッジ順: 0=下, 1=右, 2=上, 3=左
-const EDGE_LABELS_XY = ["下 (y=0)", "右 (x=w)", "上 (y=h)", "左 (x=0)"];
+// (ProjectTree でもエッジ名を揃えて表示するため export する)
+export const EDGE_LABELS_XY = ["下 (y=0)", "右 (x=w)", "上 (y=h)", "左 (x=0)"];
 // 軸対称 (r-z) モード: x=z (軸方向)・y=r (径方向)。下辺 (y=0) は対称軸 (r=0)
-const EDGE_LABELS_RZ = ["対称軸 (r=0)", "右 (z=L)", "上 (r=R)", "左 (z=0)"];
+export const EDGE_LABELS_RZ = ["対称軸 (r=0)", "右 (z=L)", "上 (r=R)", "左 (z=0)"];
 // 軸対称 (r-z、左辺が軸) モード: x=r (径方向)・y=z (軸方向)。左辺 (x=0) は対称軸 (r=0)
-const EDGE_LABELS_RZ_X0 = ["下 (z=0)", "右 (r=R)", "上 (z=L)", "対称軸 (r=0)"];
+export const EDGE_LABELS_RZ_X0 = ["下 (z=0)", "右 (r=R)", "上 (z=L)", "対称軸 (r=0)"];
 
 interface Props {
   project: Project;
@@ -123,6 +130,18 @@ interface Props {
   // 領域ごとのローカルメッシュサイズ [m]。null で解除 (全体サイズを使用)
   setRegionLocalSize: (id: string, size: number | null) => void;
   result: SolveResult | null;
+  // 表示するセクションの絞り込み (プロジェクトツリーの選択ノードに対応)。
+  // 未指定なら従来通り全セクションを表示する (後方互換)
+  sections?: FieldSection[];
+  // "boundary" セクションで、指定した辺のみ表示する (辺の子ノード選択時)。未指定/null なら全辺表示
+  edgeFilter?: number | null;
+  // Mesh/Solve ボタン (study-fem インスペクタページ = "solve" セクションでのみ使用)
+  runMesh: () => void;
+  runSolve: () => void;
+  busy: boolean;
+  canRun: boolean;
+  showMesh: boolean;
+  onToggleShowMesh: () => void;
 }
 
 export default function FieldPanel({
@@ -150,7 +169,17 @@ export default function FieldPanel({
   deleteRegion,
   setRegionLocalSize,
   result,
+  sections,
+  edgeFilter,
+  runMesh,
+  runSolve,
+  busy,
+  canRun,
+  showMesh,
+  onToggleShowMesh,
 }: Props) {
+  // セクション表示判定 (sections 未指定なら常に表示 = 後方互換)
+  const showSection = (name: FieldSection) => !sections || sections.includes(name);
   const coord = project.coord ?? "xy";
   const isRz = coord === "rz";
   const isRzX0 = coord === "rz_x0";
@@ -165,315 +194,356 @@ export default function FieldPanel({
 
   return (
     <>
-      <h2>ジオメトリ (domain)</h2>
-      <div className="field">
-        <span className="label">座標系</span>
-        <select value={coord} onChange={(e) => setCoord(e.target.value as "xy" | "rz" | "rz_x0")}>
-          <option value="xy">平面 2D</option>
-          <option value="rz">軸対称 r-z (下辺が軸)</option>
-          <option value="rz_x0">軸対称 r-z (左辺が軸)</option>
-        </select>
-      </div>
-      {isAxisym && (
-        <div className="hint">
-          軸対称モードでは{isRz ? "下辺" : "左辺"}が対称軸になります。PICは未対応です。
-        </div>
+      {showSection("domain") && (
+        <>
+          <h2>ジオメトリ (domain)</h2>
+          <div className="field">
+            <span className="label">座標系</span>
+            <select value={coord} onChange={(e) => setCoord(e.target.value as "xy" | "rz" | "rz_x0")}>
+              <option value="xy">平面 2D</option>
+              <option value="rz">軸対称 r-z (下辺が軸)</option>
+              <option value="rz_x0">軸対称 r-z (左辺が軸)</option>
+            </select>
+          </div>
+          {isAxisym && (
+            <div className="hint">
+              軸対称モードでは{isRz ? "下辺" : "左辺"}が対称軸になります。PICは未対応です。
+            </div>
+          )}
+          <div className="field">
+            <span className="label">{widthLabel}</span>
+            <CommitNumberInput
+              value={mToMm(domainW)}
+              step="0.1"
+              onCommit={(w) => setDomainSize(mmToM(w), domainH)}
+            />
+          </div>
+          <div className="field">
+            <span className="label">{heightLabel}</span>
+            <CommitNumberInput
+              value={mToMm(domainH)}
+              step="0.1"
+              onCommit={(h) => setDomainSize(domainW, mmToM(h))}
+            />
+          </div>
+        </>
       )}
-      <div className="field">
-        <span className="label">{widthLabel}</span>
-        <CommitNumberInput
-          value={mToMm(domainW)}
-          step="0.1"
-          onCommit={(w) => setDomainSize(mmToM(w), domainH)}
-        />
-      </div>
-      <div className="field">
-        <span className="label">{heightLabel}</span>
-        <CommitNumberInput
-          value={mToMm(domainH)}
-          step="0.1"
-          onCommit={(h) => setDomainSize(domainW, mmToM(h))}
-        />
-      </div>
 
-      <h2>境界条件</h2>
-      {edgeLabels.map((label, i) => {
-        const st = edgeState(i);
-        // 対称軸そのものとなる辺 (自然境界) は切替不可・固定表示とする
-        const isAxisEdge = axisEdge === i;
-        const rfList = rfComponents(st.voltageRf);
-        return (
-          <div className="edge-row" key={i}>
-            <span className="edge-label">{label}</span>
-            <div className="edge-controls">
-              <select
-                value={st.type}
-                disabled={isAxisEdge}
-                onChange={(e) => setEdgeType(i, e.target.value as EdgeBcType)}
+      {showSection("boundary") && (
+        <>
+          <h2>境界条件</h2>
+          {edgeLabels.map((label, i) => {
+            // edgeFilter 指定時 (辺の子ノード選択時) はその辺のみ表示する
+            if (edgeFilter != null && edgeFilter !== i) return null;
+            const st = edgeState(i);
+            // 対称軸そのものとなる辺 (自然境界) は切替不可・固定表示とする
+            const isAxisEdge = axisEdge === i;
+            const rfList = rfComponents(st.voltageRf);
+            return (
+              <div className="edge-row" key={i}>
+                <span className="edge-label">{label}</span>
+                <div className="edge-controls">
+                  <select
+                    value={st.type}
+                    disabled={isAxisEdge}
+                    onChange={(e) => setEdgeType(i, e.target.value as EdgeBcType)}
+                  >
+                    <option value="neumann">なし (Neumann)</option>
+                    <option value="dirichlet">Dirichlet</option>
+                    <option value="symmetry">対称 (粒子反射)</option>
+                    <option value="periodic">周期</option>
+                  </select>
+                  {!isAxisEdge && st.type === "dirichlet" && (
+                    <>
+                      <CommitNumberInput value={st.voltage} onCommit={(v) => setEdgeVoltage(i, v)} />
+                      <label className="rf-check-inline">
+                        <input
+                          type="checkbox"
+                          checked={rfList.length > 0}
+                          onChange={(e) => setEdgeVoltageRf(i, e.target.checked ? [DEFAULT_VOLTAGE_RF] : undefined)}
+                        />
+                        RF
+                      </label>
+                      <label className="rf-check-inline" title="二次電子放出係数 γ">
+                        γ
+                        <CommitNumberInput
+                          className="rf-compact"
+                          value={st.seeGamma}
+                          onCommit={(v) => setEdgeSeeGamma(i, v)}
+                        />
+                      </label>
+                    </>
+                  )}
+                </div>
+                {!isAxisEdge && st.type === "dirichlet" && rfList.length > 0 && (
+                  <RfComponentsEditor components={rfList} onChange={(next) => setEdgeVoltageRf(i, next)} />
+                )}
+              </div>
+            );
+          })}
+        </>
+      )}
+
+      {showSection("mesh") && (
+        <>
+          <h2>メッシュ</h2>
+          <div className="field">
+            <span className="label">サイズ [mm]</span>
+            <CommitNumberInput
+              value={mToMm(project.mesh.size)}
+              step="0.01"
+              onCommit={(v) => setMeshSize(mmToM(v))}
+            />
+          </div>
+          <div className="field">
+            <span className="label">モード</span>
+            <select
+              value={project.mesh.mode ?? "unstructured"}
+              onChange={(e) => setMeshMode(e.target.value as "unstructured" | "structured")}
+            >
+              <option value="unstructured">非構造 (三角形)</option>
+              <option value="structured">構造格子</option>
+            </select>
+          </div>
+          {(project.mesh.mode ?? "unstructured") === "structured" && (
+            <div className="hint">
+              構造格子は矩形domainのみ対応。等間隔格子を三角形2分割で切り、
+              円・斜め境界は要素中心判定による階段近似になります(局所サイズは無効)。
+            </div>
+          )}
+        </>
+      )}
+
+      {showSection("bfield") && (
+        <>
+          <h2>一様磁場 [T]</h2>
+          <div className="hint">
+            粒子軌道追跡・PIC のローレンツ力に適用 (静電場ソルブには影響しない)。軸対称モードでは使用不可
+          </div>
+          {isAxisym && (
+            <div className="hint">軸対称モードでは一様磁場は設定できません (∇·B=0 と矛盾するため)。</div>
+          )}
+          <div className="field">
+            <span className="label">Bx</span>
+            <CommitNumberInput
+              value={bField.bx}
+              disabled={isAxisym}
+              onCommit={(v) => setBField({ bx: v })}
+            />
+          </div>
+          <div className="field">
+            <span className="label">By</span>
+            <CommitNumberInput
+              value={bField.by}
+              disabled={isAxisym}
+              onCommit={(v) => setBField({ by: v })}
+            />
+          </div>
+          <div className="field">
+            <span className="label">Bz</span>
+            <CommitNumberInput
+              value={bField.bz}
+              disabled={isAxisym}
+              onCommit={(v) => setBField({ bz: v })}
+            />
+          </div>
+        </>
+      )}
+
+      {showSection("regions") && (
+        <>
+          <h2>領域一覧 ({project.geometry.regions.length})</h2>
+          <div className="region-list">
+            {project.geometry.regions.map((r) => (
+              <div
+                key={r.id}
+                className={`region-item ${selectedRegionId === r.id ? "selected" : ""}`}
+                onClick={() => onSelectRegion(r.id)}
               >
-                <option value="neumann">なし (Neumann)</option>
-                <option value="dirichlet">Dirichlet</option>
-                <option value="symmetry">対称 (粒子反射)</option>
-                <option value="periodic">周期</option>
-              </select>
-              {!isAxisEdge && st.type === "dirichlet" && (
+                <span>{r.id}</span>
+                <span className="tag">{r.type}</span>
+              </div>
+            ))}
+            {project.geometry.regions.length === 0 && (
+              <div className="muted">(領域なし。ツールバーで作図してください)</div>
+            )}
+          </div>
+
+          {selected && (
+            <div className="region-edit">
+              <label>
+                ID
+                <CommitTextInput
+                  value={selected.id}
+                  onCommit={(newId) => renameRegion(selected.id, newId)}
+                />
+              </label>
+              <label>
+                種別
+                <select
+                  value={selected.type}
+                  onChange={(e) => setRegionType(selected.id, e.target.value as RegionType)}
+                >
+                  <option value="conductor">電極 (conductor)</option>
+                  <option value="dielectric">誘電体 (dielectric)</option>
+                  <option value="charge">空間電荷 (charge)</option>
+                </select>
+              </label>
+              {selected.shape && (
                 <>
-                  <CommitNumberInput value={st.voltage} onCommit={(v) => setEdgeVoltage(i, v)} />
-                  <label className="rf-check-inline">
-                    <input
-                      type="checkbox"
-                      checked={rfList.length > 0}
-                      onChange={(e) => setEdgeVoltageRf(i, e.target.checked ? [DEFAULT_VOLTAGE_RF] : undefined)}
-                    />
-                    RF
-                  </label>
-                  <label className="rf-check-inline" title="二次電子放出係数 γ">
-                    γ
+                  <label>
+                    中心 X [mm]
                     <CommitNumberInput
-                      className="rf-compact"
-                      value={st.seeGamma}
-                      onCommit={(v) => setEdgeSeeGamma(i, v)}
+                      value={mToMm(selected.shape.center[0])}
+                      step="0.1"
+                      onCommit={(x) =>
+                        editRegionShape(selected.id, {
+                          ...selected.shape!,
+                          center: [mmToM(x), selected.shape!.center[1]],
+                        })
+                      }
+                    />
+                  </label>
+                  <label>
+                    中心 Y [mm]
+                    <CommitNumberInput
+                      value={mToMm(selected.shape.center[1])}
+                      step="0.1"
+                      onCommit={(y) =>
+                        editRegionShape(selected.id, {
+                          ...selected.shape!,
+                          center: [selected.shape!.center[0], mmToM(y)],
+                        })
+                      }
+                    />
+                  </label>
+                  <label>
+                    半径 [mm]
+                    <CommitNumberInput
+                      value={mToMm(selected.shape.radius)}
+                      step="0.1"
+                      onCommit={(radius) => editRegionShape(selected.id, { ...selected.shape!, radius: mmToM(radius) })}
                     />
                   </label>
                 </>
               )}
+              {selected.type === "conductor" && (
+                <>
+                  <label>
+                    電位 V [V]
+                    <CommitNumberInput
+                      value={selected.voltage ?? 0}
+                      onCommit={(v) => updateRegion(selected.id, { voltage: v })}
+                    />
+                  </label>
+                  <label className="checkbox-row">
+                    <input
+                      type="checkbox"
+                      checked={rfComponents(selected.voltage_rf).length > 0}
+                      onChange={(e) =>
+                        updateRegion(selected.id, {
+                          voltage_rf: e.target.checked ? [DEFAULT_VOLTAGE_RF] : undefined,
+                        })
+                      }
+                    />
+                    RF重畳
+                  </label>
+                  {rfComponents(selected.voltage_rf).length > 0 && (
+                    <RfComponentsEditor
+                      components={rfComponents(selected.voltage_rf)}
+                      onChange={(next) => updateRegion(selected.id, { voltage_rf: next })}
+                    />
+                  )}
+                  <label>
+                    二次電子放出係数 γ
+                    <CommitNumberInput
+                      value={selected.see_gamma ?? 0}
+                      onCommit={(v) => updateRegion(selected.id, { see_gamma: v })}
+                    />
+                  </label>
+                </>
+              )}
+              {selected.type === "dielectric" && (
+                <>
+                  <label>
+                    比誘電率 εr
+                    <CommitNumberInput
+                      value={selected.eps_r ?? 1}
+                      onCommit={(v) => updateRegion(selected.id, { eps_r: v })}
+                    />
+                  </label>
+                  <label title="イオン衝突時に確率γで二次電子を放出 (PICのみ。0=無効)">
+                    二次電子放出係数 γ
+                    <CommitNumberInput
+                      value={selected.see_gamma ?? 0}
+                      onCommit={(v) => updateRegion(selected.id, { see_gamma: v })}
+                    />
+                  </label>
+                </>
+              )}
+              {selected.type === "charge" && (
+                <label>
+                  電荷密度 ρ [C/m³]
+                  <CommitNumberInput
+                    value={selected.rho ?? 0}
+                    onCommit={(v) => updateRegion(selected.id, { rho: v })}
+                  />
+                </label>
+              )}
+              <label title="この領域とその輪郭のメッシュ特性長。0で解除 (全体サイズを使用)。非構造メッシュのみ有効">
+                ローカルメッシュサイズ [mm] (0=全体)
+                <CommitNumberInput
+                  value={mToMm(
+                    project.mesh.local_sizes?.find((ls) => ls.region === selected.id)?.size ?? 0,
+                  )}
+                  onCommit={(v) => setRegionLocalSize(selected.id, v > 0 ? mmToM(v) : null)}
+                />
+              </label>
+              {(project.mesh.mode ?? "unstructured") === "structured" &&
+                project.mesh.local_sizes?.some((ls) => ls.region === selected.id) && (
+                  <div className="hint">構造格子モードではローカルメッシュサイズは無視されます。</div>
+                )}
+              <button className="danger" onClick={() => deleteRegion(selected.id)}>
+                削除
+              </button>
             </div>
-            {!isAxisEdge && st.type === "dirichlet" && rfList.length > 0 && (
-              <RfComponentsEditor components={rfList} onChange={(next) => setEdgeVoltageRf(i, next)} />
-            )}
-          </div>
-        );
-      })}
-
-      <h2>メッシュ</h2>
-      <div className="field">
-        <span className="label">サイズ [mm]</span>
-        <CommitNumberInput
-          value={mToMm(project.mesh.size)}
-          step="0.01"
-          onCommit={(v) => setMeshSize(mmToM(v))}
-        />
-      </div>
-      <div className="field">
-        <span className="label">モード</span>
-        <select
-          value={project.mesh.mode ?? "unstructured"}
-          onChange={(e) => setMeshMode(e.target.value as "unstructured" | "structured")}
-        >
-          <option value="unstructured">非構造 (三角形)</option>
-          <option value="structured">構造格子</option>
-        </select>
-      </div>
-      {(project.mesh.mode ?? "unstructured") === "structured" && (
-        <div className="hint">
-          構造格子は矩形domainのみ対応。等間隔格子を三角形2分割で切り、
-          円・斜め境界は要素中心判定による階段近似になります(局所サイズは無効)。
-        </div>
-      )}
-      {meshResult && (
-        <>
-          <div className="kv"><span>節点数</span><span>{meshResult.nodes.length}</span></div>
-          <div className="kv"><span>要素数</span><span>{meshResult.triangles.length}</span></div>
+          )}
         </>
       )}
 
-      <h2>一様磁場 [T]</h2>
-      <div className="hint">
-        粒子軌道追跡・PIC のローレンツ力に適用 (静電場ソルブには影響しない)。軸対称モードでは使用不可
-      </div>
-      {isAxisym && (
-        <div className="hint">軸対称モードでは一様磁場は設定できません (∇·B=0 と矛盾するため)。</div>
-      )}
-      <div className="field">
-        <span className="label">Bx</span>
-        <CommitNumberInput
-          value={bField.bx}
-          disabled={isAxisym}
-          onCommit={(v) => setBField({ bx: v })}
-        />
-      </div>
-      <div className="field">
-        <span className="label">By</span>
-        <CommitNumberInput
-          value={bField.by}
-          disabled={isAxisym}
-          onCommit={(v) => setBField({ by: v })}
-        />
-      </div>
-      <div className="field">
-        <span className="label">Bz</span>
-        <CommitNumberInput
-          value={bField.bz}
-          disabled={isAxisym}
-          onCommit={(v) => setBField({ bz: v })}
-        />
-      </div>
-
-      <h2>領域一覧 ({project.geometry.regions.length})</h2>
-      <div className="region-list">
-        {project.geometry.regions.map((r) => (
-          <div
-            key={r.id}
-            className={`region-item ${selectedRegionId === r.id ? "selected" : ""}`}
-            onClick={() => onSelectRegion(r.id)}
-          >
-            <span>{r.id}</span>
-            <span className="tag">{r.type}</span>
-          </div>
-        ))}
-        {project.geometry.regions.length === 0 && (
-          <div className="muted">(領域なし。ツールバーで作図してください)</div>
-        )}
-      </div>
-
-      {selected && (
-        <div className="region-edit">
-          <label>
-            ID
-            <CommitTextInput
-              value={selected.id}
-              onCommit={(newId) => renameRegion(selected.id, newId)}
-            />
-          </label>
-          <label>
-            種別
-            <select
-              value={selected.type}
-              onChange={(e) => setRegionType(selected.id, e.target.value as RegionType)}
-            >
-              <option value="conductor">電極 (conductor)</option>
-              <option value="dielectric">誘電体 (dielectric)</option>
-              <option value="charge">空間電荷 (charge)</option>
-            </select>
-          </label>
-          {selected.shape && (
-            <>
-              <label>
-                中心 X [mm]
-                <CommitNumberInput
-                  value={mToMm(selected.shape.center[0])}
-                  step="0.1"
-                  onCommit={(x) =>
-                    editRegionShape(selected.id, {
-                      ...selected.shape!,
-                      center: [mmToM(x), selected.shape!.center[1]],
-                    })
-                  }
-                />
-              </label>
-              <label>
-                中心 Y [mm]
-                <CommitNumberInput
-                  value={mToMm(selected.shape.center[1])}
-                  step="0.1"
-                  onCommit={(y) =>
-                    editRegionShape(selected.id, {
-                      ...selected.shape!,
-                      center: [selected.shape!.center[0], mmToM(y)],
-                    })
-                  }
-                />
-              </label>
-              <label>
-                半径 [mm]
-                <CommitNumberInput
-                  value={mToMm(selected.shape.radius)}
-                  step="0.1"
-                  onCommit={(radius) => editRegionShape(selected.id, { ...selected.shape!, radius: mmToM(radius) })}
-                />
-              </label>
-            </>
-          )}
-          {selected.type === "conductor" && (
-            <>
-              <label>
-                電位 V [V]
-                <CommitNumberInput
-                  value={selected.voltage ?? 0}
-                  onCommit={(v) => updateRegion(selected.id, { voltage: v })}
-                />
-              </label>
-              <label className="checkbox-row">
-                <input
-                  type="checkbox"
-                  checked={rfComponents(selected.voltage_rf).length > 0}
-                  onChange={(e) =>
-                    updateRegion(selected.id, {
-                      voltage_rf: e.target.checked ? [DEFAULT_VOLTAGE_RF] : undefined,
-                    })
-                  }
-                />
-                RF重畳
-              </label>
-              {rfComponents(selected.voltage_rf).length > 0 && (
-                <RfComponentsEditor
-                  components={rfComponents(selected.voltage_rf)}
-                  onChange={(next) => updateRegion(selected.id, { voltage_rf: next })}
-                />
-              )}
-              <label>
-                二次電子放出係数 γ
-                <CommitNumberInput
-                  value={selected.see_gamma ?? 0}
-                  onCommit={(v) => updateRegion(selected.id, { see_gamma: v })}
-                />
-              </label>
-            </>
-          )}
-          {selected.type === "dielectric" && (
-            <>
-              <label>
-                比誘電率 εr
-                <CommitNumberInput
-                  value={selected.eps_r ?? 1}
-                  onCommit={(v) => updateRegion(selected.id, { eps_r: v })}
-                />
-              </label>
-              <label title="イオン衝突時に確率γで二次電子を放出 (PICのみ。0=無効)">
-                二次電子放出係数 γ
-                <CommitNumberInput
-                  value={selected.see_gamma ?? 0}
-                  onCommit={(v) => updateRegion(selected.id, { see_gamma: v })}
-                />
-              </label>
-            </>
-          )}
-          {selected.type === "charge" && (
-            <label>
-              電荷密度 ρ [C/m³]
-              <CommitNumberInput
-                value={selected.rho ?? 0}
-                onCommit={(v) => updateRegion(selected.id, { rho: v })}
-              />
-            </label>
-          )}
-          <label title="この領域とその輪郭のメッシュ特性長。0で解除 (全体サイズを使用)。非構造メッシュのみ有効">
-            ローカルメッシュサイズ [mm] (0=全体)
-            <CommitNumberInput
-              value={mToMm(
-                project.mesh.local_sizes?.find((ls) => ls.region === selected.id)?.size ?? 0,
-              )}
-              onCommit={(v) => setRegionLocalSize(selected.id, v > 0 ? mmToM(v) : null)}
-            />
-          </label>
-          {(project.mesh.mode ?? "unstructured") === "structured" &&
-            project.mesh.local_sizes?.some((ls) => ls.region === selected.id) && (
-              <div className="hint">構造格子モードではローカルメッシュサイズは無視されます。</div>
-            )}
-          <button className="danger" onClick={() => deleteRegion(selected.id)}>
-            削除
-          </button>
-        </div>
-      )}
-
-      {result && (
+      {showSection("solve") && (
         <>
-          <h2>解析結果</h2>
-          <div className="kv"><span>節点数</span><span>{result.mesh.nodes.length}</span></div>
-          <div className="kv"><span>要素数</span><span>{result.mesh.triangles.length}</span></div>
-          <div className="kv"><span>V min/max</span><span>{result.v_min.toFixed(1)} / {result.v_max.toFixed(1)} V</span></div>
-          <div className="kv"><span>|E| max</span><span>{result.e_abs_max.toExponential(2)} V/m</span></div>
-          <div className="kv"><span>エネルギー</span><span>{result.energy.toExponential(3)} {isAxisym ? "J" : "J/m"}</span></div>
+          <h2>解析実行</h2>
+          <div className="actions">
+            <button className="secondary" onClick={runMesh} disabled={busy || !canRun}>
+              {busy ? "計算中..." : "Mesh"}
+            </button>
+            <button onClick={runSolve} disabled={busy || !canRun}>
+              {busy ? "計算中..." : "Solve"}
+            </button>
+            <button className="secondary" onClick={onToggleShowMesh}>
+              メッシュ {showMesh ? "非表示" : "表示"}
+            </button>
+          </div>
+          {!canRun && <div className="hint">backend に接続されていません (上部バーのポート設定を確認してください)。</div>}
+          {meshResult && (
+            <>
+              <div className="kv"><span>節点数 (Mesh)</span><span>{meshResult.nodes.length}</span></div>
+              <div className="kv"><span>要素数 (Mesh)</span><span>{meshResult.triangles.length}</span></div>
+            </>
+          )}
+          {result ? (
+            <>
+              <h2>解析結果</h2>
+              <div className="kv"><span>節点数</span><span>{result.mesh.nodes.length}</span></div>
+              <div className="kv"><span>要素数</span><span>{result.mesh.triangles.length}</span></div>
+              <div className="kv"><span>V min/max</span><span>{result.v_min.toFixed(1)} / {result.v_max.toFixed(1)} V</span></div>
+              <div className="kv"><span>|E| max</span><span>{result.e_abs_max.toExponential(2)} V/m</span></div>
+              <div className="kv"><span>エネルギー</span><span>{result.energy.toExponential(3)} {isAxisym ? "J" : "J/m"}</span></div>
+            </>
+          ) : (
+            !meshResult && <div className="muted">(まだ Mesh/Solve を実行していません)</div>
+          )}
         </>
       )}
     </>
