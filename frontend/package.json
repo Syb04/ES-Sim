@@ -13,6 +13,7 @@
     "@tauri-apps/api": "^2.0.0",
     "@tauri-apps/plugin-dialog": "^2.7.2",
     "@tauri-apps/plugin-fs": "^2.5.1",
+    "polygon-clipping": "^0.15.7",
     "react": "^18.3.0",
     "react-dom": "^18.3.0"
   },

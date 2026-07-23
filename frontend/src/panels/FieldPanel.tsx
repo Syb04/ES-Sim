@@ -1,3 +1,4 @@
+import { useEffect, useState } from "react";
 import { CommitNumberInput, CommitTextInput } from "../CommitInput";
 import { LENGTH_UNIT_LABEL, mToUnit, unitToM } from "../units";
 import type { LengthUnit } from "../units";
@@ -7,6 +8,7 @@ import type {
   CircleShape,
   EdgeBcType,
   MeshResult,
+  Point,
   Project,
   Region,
   RegionType,
@@ -128,6 +130,9 @@ interface Props {
   renameRegion: (oldId: string, newId: string) => void;
   setRegionType: (id: string, type: RegionType) => void;
   editRegionShape: (id: string, shape: CircleShape) => void;
+  editRegionPolygon: (id: string, polygon: Point[]) => void;
+  // 隣接する2領域のマージ (成功時 null、失敗時はエラーメッセージ文字列)
+  mergeRegions: (targetId: string, otherId: string) => string | null;
   updateRegion: (id: string, patch: Partial<Region>) => void;
   deleteRegion: (id: string) => void;
   // 領域ごとのローカルメッシュサイズ [m]。null で解除 (全体サイズを使用)
@@ -169,6 +174,8 @@ export default function FieldPanel({
   renameRegion,
   setRegionType,
   editRegionShape,
+  editRegionPolygon,
+  mergeRegions,
   updateRegion,
   deleteRegion,
   setRegionLocalSize,
@@ -184,6 +191,13 @@ export default function FieldPanel({
 }: Props) {
   // セクション表示判定 (sections 未指定なら常に表示 = 後方互換)
   const showSection = (name: FieldSection) => !sections || sections.includes(name);
+  // 領域マージ (prompts/63) の選択中マージ先IDとエラーメッセージ (ローカル state)
+  const [mergeOtherId, setMergeOtherId] = useState<string>("");
+  const [mergeError, setMergeError] = useState<string | null>(null);
+  // 選択領域が切り替わったら、別領域向けのエラー表示を持ち越さないようクリアする
+  useEffect(() => {
+    setMergeError(null);
+  }, [selected?.id]);
   const coord = project.coord ?? "xy";
   const isRz = coord === "rz";
   const isRzX0 = coord === "rz_x0";
@@ -496,6 +510,83 @@ export default function FieldPanel({
                     onCommit={(v) => updateRegion(selected.id, { rho: v })}
                   />
                 </label>
+              )}
+              {selected.polygon && (
+                <>
+                  <div className="subheading">頂点座標 [{unitLabel}]</div>
+                  <table className="vertex-table">
+                    <tbody>
+                      {selected.polygon.map((pt, i) => (
+                        <tr key={i}>
+                          <td className="vertex-index">#{i}</td>
+                          <td>
+                            <CommitNumberInput
+                              className="vertex-input"
+                              value={mToUnit(pt[0], lengthUnit)}
+                              onCommit={(x) =>
+                                editRegionPolygon(
+                                  selected.id,
+                                  selected.polygon!.map((p, j) => (j === i ? ([unitToM(x, lengthUnit), p[1]] as Point) : p)),
+                                )
+                              }
+                            />
+                          </td>
+                          <td>
+                            <CommitNumberInput
+                              className="vertex-input"
+                              value={mToUnit(pt[1], lengthUnit)}
+                              onCommit={(y) =>
+                                editRegionPolygon(
+                                  selected.id,
+                                  selected.polygon!.map((p, j) => (j === i ? ([p[0], unitToM(y, lengthUnit)] as Point) : p)),
+                                )
+                              }
+                            />
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+
+                  {(() => {
+                    // マージ先候補: polygon を持つ他領域 (自分以外)。無ければマージUI自体を隠す
+                    const mergeCandidates = project.geometry.regions.filter(
+                      (r) => r.polygon && r.id !== selected.id,
+                    );
+                    if (mergeCandidates.length === 0) return null;
+                    const otherId = mergeCandidates.some((r) => r.id === mergeOtherId)
+                      ? mergeOtherId
+                      : mergeCandidates[0].id;
+                    return (
+                      <>
+                        <div className="subheading">マージ</div>
+                        <div className="merge-row">
+                          <select
+                            value={otherId}
+                            onChange={(e) => {
+                              setMergeOtherId(e.target.value);
+                              setMergeError(null);
+                            }}
+                          >
+                            {mergeCandidates.map((r) => (
+                              <option key={r.id} value={r.id}>
+                                {r.id}
+                              </option>
+                            ))}
+                          </select>
+                          <button
+                            type="button"
+                            onClick={() => setMergeError(mergeRegions(selected.id, otherId))}
+                          >
+                            この領域とマージ
+                          </button>
+                        </div>
+                        <div className="hint">※ プロパティ (種別・電圧等) はこの領域側の設定が使われます</div>
+                        {mergeError && <div className="error">{mergeError}</div>}
+                      </>
+                    );
+                  })()}
+                </>
               )}
               <label title="この領域とその輪郭のメッシュ特性長。0で解除 (全体サイズを使用)。非構造メッシュのみ有効">
                 ローカルメッシュサイズ [{unitLabel}] (0=全体)

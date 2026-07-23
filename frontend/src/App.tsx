@@ -1,4 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+// 実行時の実体は default エクスポートのオブジェクト (src/polygon-clipping.d.ts 参照)
+import polygonClipping from "polygon-clipping";
+import type { MultiPolygon } from "polygon-clipping";
 import { api } from "./api";
 import { getPort, initPort, setPort } from "./backendPort";
 import CadCanvas from "./canvas/CadCanvas";
@@ -102,6 +105,37 @@ function nextCollectorLabel(collectors: PicCollectorSettings[]): string {
     if (m) maxN = Math.max(maxN, parseInt(m[1], 10));
   }
   return `C${maxN + 1}`;
+}
+
+// 領域マージ (prompts/63) の union 結果から共線頂点を除去する。
+// 隣接する矩形同士を union すると、共有辺上に不要な中間点 (角ではない点) が
+// 残ることがあるため、外積がほぼ0 (3点が一直線) の頂点を取り除いて素直な多角形に戻す。
+// また polygon-clipping はリングの先頭点を末尾に複製して閉じた形で返すため、
+// まずその重複する閉じ点を取り除いてから判定する。
+function removeCollinearVertices(ring: Point[]): Point[] {
+  let pts = ring.slice();
+  if (pts.length > 1) {
+    const [fx, fy] = pts[0];
+    const [lx, ly] = pts[pts.length - 1];
+    if (fx === lx && fy === ly) pts = pts.slice(0, -1);
+  }
+  const n = pts.length;
+  if (n < 3) return pts;
+  // 座標のスケールに応じた閾値にする (絶対値1e-12だと大きい座標系で共線判定が緩すぎるため)
+  let maxAbs = 0;
+  for (const [x, y] of pts) maxAbs = Math.max(maxAbs, Math.abs(x), Math.abs(y));
+  const scale = Math.max(maxAbs, 1);
+  const eps = 1e-12 * scale * scale;
+  const cross = (o: Point, a: Point, b: Point) => (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]);
+  const result: Point[] = [];
+  for (let i = 0; i < n; i++) {
+    const prev = pts[(i - 1 + n) % n];
+    const cur = pts[i];
+    const next = pts[(i + 1) % n];
+    if (Math.abs(cross(prev, cur, next)) > eps) result.push(cur);
+  }
+  // 万一すべて共線判定される (退化ケース) 場合は元の頂点列を返して安全側に倒す
+  return result.length >= 3 ? result : pts;
 }
 
 // 旧形式 (単数 collector) を持つ pic 設定を collectors 配列へ正規化する (後方互換、prompts/37)
@@ -943,6 +977,47 @@ export default function App() {
     });
   };
 
+  // --- 隣接領域のマージ (prompts/63) ---
+  // 領域 otherId を targetId へマージする (union)。成功時は target の polygon を
+  // union 結果へ差し替え、other を削除する (プロパティは target 側を維持)。
+  // 失敗時 (非隣接で1つにならない / 穴ができる) はエラーメッセージ文字列を返す
+  const mergeRegions = (targetId: string, otherId: string): string | null => {
+    const p = projectRef.current;
+    const target = p.geometry.regions.find((r) => r.id === targetId);
+    const other = p.geometry.regions.find((r) => r.id === otherId);
+    if (!target || !other) return "領域が見つかりません";
+    if (!target.polygon || !other.polygon) return "多角形領域のみマージできます";
+
+    let unionResult: MultiPolygon;
+    try {
+      // polygon-clipping の Polygon 型はリング(穴なし単一外周)の配列。
+      // 単一輪郭のみを扱うためそれぞれ1リングの Polygon として渡す
+      unionResult = polygonClipping.union([target.polygon], [other.polygon]);
+    } catch (err) {
+      return `マージに失敗しました: ${String(err)}`;
+    }
+    if (unionResult.length !== 1) return "領域が隣接していないためマージできません";
+    const poly = unionResult[0];
+    if (poly.length > 1) return "マージ結果に穴ができるためマージできません";
+    const mergedPolygon = removeCollinearVertices(poly[0]);
+
+    commitProject({
+      ...p,
+      geometry: {
+        ...p.geometry,
+        regions: p.geometry.regions
+          .filter((r) => r.id !== otherId)
+          .map((r) => (r.id === targetId ? { ...r, polygon: mergedPolygon } : r)),
+      },
+      // マージで消える other への参照 (deleteRegion と同様の掃除) を落とす
+      mesh: {
+        ...p.mesh,
+        local_sizes: (p.mesh.local_sizes ?? []).filter((ls) => ls.region !== otherId),
+      },
+    });
+    return null;
+  };
+
   // --- 保存/読込 ---
   // particles / pic は history 管理外の別 state のため、保存時にここで project へ合成する
   const saveProject = () => {
@@ -1274,6 +1349,8 @@ export default function App() {
                 renameRegion={renameRegion}
                 setRegionType={setRegionType}
                 editRegionShape={editRegionShape}
+                editRegionPolygon={editRegionPolygon}
+                mergeRegions={mergeRegions}
                 updateRegion={updateRegion}
                 deleteRegion={deleteRegion}
                 setRegionLocalSize={setRegionLocalSize}

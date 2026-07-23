@@ -219,6 +219,15 @@ button.danger:hover { background: #b34747; }
 .region-edit label { display: flex; flex-direction: column; font-size: 11px; color: var(--muted); gap: 2px; }
 .region-edit input, .region-edit select { width: 100%; }
 
+/* 領域の頂点座標テーブル + マージUI (prompts/63) */
+.region-edit .subheading { font-size: 11px; color: var(--muted); margin: 6px 0 3px; }
+.vertex-table { width: 100%; border-collapse: collapse; margin-bottom: 4px; }
+.vertex-table td { padding: 1px 3px 1px 0; }
+.vertex-table .vertex-index { width: 22px; color: var(--muted); font-size: 11px; text-align: right; }
+.vertex-table input.vertex-input { width: 80px; }
+.merge-row { display: flex; gap: 4px; align-items: center; margin-bottom: 3px; }
+.merge-row select { flex: 1; width: auto; }
+
 .file-input { display: none; }
 .side .actions { display: flex; gap: 6px; margin: 8px 0; }
 .muted { color: var(--muted); font-size: 12px; }
