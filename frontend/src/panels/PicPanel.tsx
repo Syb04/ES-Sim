@@ -119,6 +119,10 @@ interface Props {
   onSelectCollector: (index: number | null) => void;
   onUpdateCollector: (index: number, patch: Partial<PicCollectorSettings>) => void;
   onDeleteCollector: (index: number) => void;
+
+  // 表示モード: "all"=従来通り全表示 (既定・後方互換)、"setup"=設定/実行UIのみ、
+  // "results"=結果表示のみ (結果ノード用インスペクタページで使う)
+  mode?: "all" | "setup" | "results";
 }
 
 const DEFAULT_INITIAL_PLASMA: InitialPlasma = {
@@ -204,7 +208,10 @@ export default function PicPanel({
   onSelectCollector,
   onUpdateCollector,
   onDeleteCollector,
+  mode = "all",
 }: Props) {
+  // mode が "all" のときは従来通り両方表示。それ以外は該当モードのみ表示する
+  const show = (m: "setup" | "results") => mode === "all" || mode === m;
   // 有効チェックを一度オフにしても、再度オンにしたときに直前の値を復元できるよう保持する
   const plasmaDefaultsRef = useRef<InitialPlasma>(pic.initial_plasma ?? DEFAULT_INITIAL_PLASMA);
   useEffect(() => {
@@ -305,6 +312,8 @@ export default function PicPanel({
 
   return (
     <>
+      {show("setup") && (
+      <>
       <h2>PIC: 初期プラズマ</h2>
       <div className="field">
         <span className="label">有効</span>
@@ -588,7 +597,14 @@ export default function PicPanel({
         />
       </div>
 
+      </>
+      )}
+
+      {/* IEDF/IADF は一覧編集(setup)と結果表示(results)にまたがるため、
+          見出しは両モードで出し、中身だけモードで出し分ける */}
       <h2>PIC: IEDF/IADF (コレクタ、最大8個)</h2>
+      {show("setup") && (
+      <>
       <p className="hint">
         キャンバスの「コレクタ」ツールでウエハ面上に2点クリックして線分を追加します。
         一覧の行をクリックするとキャンバス上で選択中のコレクタを強調表示します。
@@ -645,8 +661,10 @@ export default function PicPanel({
           </div>
         ))}
       </div>
+      </>
+      )}
 
-      {collectorResults.length > 0 && (
+      {show("results") && collectorResults.length > 0 && (
         <>
           <div className="field">
             <span className="label">表示コレクタ</span>
@@ -715,6 +733,8 @@ export default function PicPanel({
         </>
       )}
 
+      {show("setup") && (
+      <>
       <div className="actions">
         <button onClick={onStart} disabled={!canRun || running}>
           {running ? "実行中..." : "PIC開始"}
@@ -796,8 +816,10 @@ export default function PicPanel({
           <PicHistoryChart history={history} />
         </>
       )}
+      </>
+      )}
 
-      {fields && (
+      {show("results") && fields && (
         <>
           <h2>PIC: 結果フィールド</h2>
           <p className="hint">時間平均ステップ数: {fields.avg_steps}</p>
@@ -825,7 +847,7 @@ export default function PicPanel({
         </>
       )}
 
-      {cycle && (
+      {show("results") && cycle && (
         <PicCyclePlayer
           cycle={cycle}
           field={cycleField}
@@ -841,6 +863,11 @@ export default function PicPanel({
           showParticles={cycleShowParticles}
           onShowParticlesChange={onCycleShowParticlesChange}
         />
+      )}
+
+      {/* results専用ページで未実行の場合のヒント (mode="all" の従来ページでは出さない) */}
+      {mode === "results" && !fields && !cycle && (
+        <p className="hint">PIC計算が未実行です。スタディ「PIC-MCC」から実行してください。</p>
       )}
 
       {error && (

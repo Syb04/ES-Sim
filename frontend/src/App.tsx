@@ -1103,10 +1103,14 @@ export default function App() {
     : activeNode === "study-fem" ? ["solve"]
     : ["domain"]; // 上記以外のノードでは FieldPanel 自体を表示しないため値は使われない
   const showFieldPage = ["domain", "regions", "boundary", "mesh", "bfield", "study-fem"].includes(activeNode);
-  // result-trace/result-pic/result-gas は対応する study-* と同じインスペクタページを共有する
-  const showParticlePage = activeNode === "study-trace" || activeNode === "result-trace";
-  const showPicPage = activeNode === "study-pic" || activeNode === "result-pic";
-  const showGasPage = activeNode === "study-gas" || activeNode === "result-gas";
+  // study-* ノードは設定UI込みの従来ページ、result-* ノードは結果専用ページを表示する
+  // (パネル自体は mode="setup"/"results" の2インスタンスを常時 mount し、display:none で切替える)
+  const showParticleSetupPage = activeNode === "study-trace";
+  const showParticleResultsPage = activeNode === "result-trace";
+  const showPicSetupPage = activeNode === "study-pic";
+  const showPicResultsPage = activeNode === "result-pic";
+  const showGasSetupPage = activeNode === "study-gas";
+  const showGasResultsPage = activeNode === "result-gas";
   const showResultPhiPage = activeNode === "result-phi";
   const showResultEPage = activeNode === "result-e";
   const showResultProfilePage = activeNode === "result-profile";
@@ -1263,7 +1267,9 @@ export default function App() {
               />
             </div>
 
-            <div style={{ display: showParticlePage ? "block" : "none" }}>
+            {/* study-trace (設定+実行UI) と result-trace (結果専用) は同じ props を渡す
+                ParticlePanel の2インスタンスで、mode だけを切り替えて表示する */}
+            <div style={{ display: showParticleSetupPage ? "block" : "none" }}>
               <ParticlePanel
                 project={project}
                 particles={particles}
@@ -1274,10 +1280,27 @@ export default function App() {
                 traceResult={traceResult}
                 showTrajectories={showTrajectories}
                 onToggleTrajectories={setShowTrajectories}
+                mode="setup"
+              />
+            </div>
+            <div style={{ display: showParticleResultsPage ? "block" : "none" }}>
+              <ParticlePanel
+                project={project}
+                particles={particles}
+                onChange={setParticles}
+                busy={busy}
+                canRun={!!health}
+                onTrace={runTrace}
+                traceResult={traceResult}
+                showTrajectories={showTrajectories}
+                onToggleTrajectories={setShowTrajectories}
+                mode="results"
               />
             </div>
 
-            <div style={{ display: showPicPage ? "block" : "none" }}>
+            {/* study-pic (設定+実行UI) と result-pic (結果専用) は同じ props を渡す
+                PicPanel の2インスタンスで、mode だけを切り替えて表示する */}
+            <div style={{ display: showPicSetupPage ? "block" : "none" }}>
               <PicPanel
                 project={project}
                 pic={pic}
@@ -1322,10 +1345,61 @@ export default function App() {
                 onSelectCollector={setSelectedCollectorIndexRaw}
                 onUpdateCollector={updateCollector}
                 onDeleteCollector={deleteCollector}
+                mode="setup"
+              />
+            </div>
+            <div style={{ display: showPicResultsPage ? "block" : "none" }}>
+              <PicPanel
+                project={project}
+                pic={pic}
+                onChange={setPic}
+                emitter={particles.emitter}
+                canRun={!!health}
+                running={picRunning}
+                onStart={runPicStart}
+                onStop={runPicStop}
+                canContinue={picCanContinue}
+                onContinue={runPicContinue}
+                continueDisabledByProjectChange={picProjectChangedSinceRun}
+                started={picStarted}
+                frame={picFrame}
+                history={picHistory}
+                error={picError}
+                fields={picFields}
+                resultField={picResultField}
+                onResultFieldChange={(v) => {
+                  // 結果表示の切替時はアニメ優先を解除し、選択したフィールドを表示する
+                  setPicResultField(v);
+                  setCycleViewActive(false);
+                  setCyclePlaying(false);
+                }}
+                logScale={picLogScale}
+                onLogScaleChange={setPicLogScale}
+                cycle={picCycle}
+                cycleField={cycleField}
+                onCycleFieldChange={(v) => { setCycleField(v); setCycleViewActive(true); }}
+                cycleLogScale={cycleLogScale}
+                onCycleLogScaleChange={(v) => { setCycleLogScale(v); setCycleViewActive(true); }}
+                cyclePlaying={cyclePlaying}
+                onCyclePlayingChange={(v) => { setCyclePlaying(v); if (v) setCycleViewActive(true); }}
+                cycleBinIndex={cycleBinIndex}
+                onCycleBinIndexChange={(v) => { setCycleBinIndex(v); setCycleViewActive(true); }}
+                cycleFps={cycleFps}
+                onCycleFpsChange={setCycleFps}
+                cycleShowParticles={cycleShowParticles}
+                onCycleShowParticlesChange={(v) => { setCycleShowParticles(v); setCycleViewActive(true); }}
+                collectorResults={picCollectors}
+                selectedCollectorIndex={selectedCollectorIndex}
+                onSelectCollector={setSelectedCollectorIndexRaw}
+                onUpdateCollector={updateCollector}
+                onDeleteCollector={deleteCollector}
+                mode="results"
               />
             </div>
 
-            <div style={{ display: showGasPage ? "block" : "none" }}>
+            {/* study-gas (設定+実行UI) と result-gas (結果専用) は同じ props を渡す
+                GasPanel の2インスタンスで、mode だけを切り替えて表示する */}
+            <div style={{ display: showGasSetupPage ? "block" : "none" }}>
               <GasPanel
                 project={project}
                 dsmc={project.dsmc ?? null}
@@ -1341,6 +1415,26 @@ export default function App() {
                 onResultFieldChange={setGasResultField}
                 logScale={gasLogScale}
                 onLogScaleChange={setGasLogScale}
+                mode="setup"
+              />
+            </div>
+            <div style={{ display: showGasResultsPage ? "block" : "none" }}>
+              <GasPanel
+                project={project}
+                dsmc={project.dsmc ?? null}
+                onChange={setDsmc}
+                canRun={!!health}
+                running={gasRunning}
+                onRun={runDsmc}
+                onStop={stopDsmc}
+                progress={gasProgress}
+                result={gasResult}
+                error={gasError}
+                resultField={gasResultField}
+                onResultFieldChange={setGasResultField}
+                logScale={gasLogScale}
+                onLogScaleChange={setGasLogScale}
+                mode="results"
               />
             </div>
 

@@ -127,6 +127,10 @@ interface Props {
   onResultFieldChange: (v: GasResultField) => void;
   logScale: boolean;
   onLogScaleChange: (v: boolean) => void;
+
+  // 表示モード: "all"=従来通り全表示 (既定・後方互換)、"setup"=設定/実行UIのみ、
+  // "results"=結果表示のみ (結果ノード用インスペクタページで使う)
+  mode?: "all" | "setup" | "results";
 }
 
 export default function GasPanel({
@@ -144,7 +148,11 @@ export default function GasPanel({
   onResultFieldChange,
   logScale,
   onLogScaleChange,
+  mode = "all",
 }: Props) {
+  // mode が "all" のときは従来通り両方表示。それ以外は該当モードのみ表示する
+  const show = (m: "setup" | "results") => mode === "all" || mode === m;
+
   const dsmcDefaultsRef = useRef<DsmcSettings>(dsmc ?? DEFAULT_DSMC);
   useEffect(() => {
     if (dsmc) dsmcDefaultsRef.current = dsmc;
@@ -176,6 +184,8 @@ export default function GasPanel({
 
   return (
     <>
+      {show("setup") && (
+      <>
       <h2>ガス流れ (DSMC)</h2>
       <div className="field">
         <span className="label">有効</span>
@@ -189,9 +199,13 @@ export default function GasPanel({
         NTC 法 + VHS 分子モデルによる定常ガス流れ解析。既存の三角形メッシュをセルとして使う
         (平面2Dのみ対応)。結果は PIC の MCC で「DSMCガス場を使用」を有効にすると背景ガスとして使える。
       </p>
+      </>
+      )}
 
       {dsmc && (
         <>
+          {show("setup") && (
+          <>
           <h2>ガス種 (VHS)</h2>
           <div className="field">
             <span className="label">ガス名</span>
@@ -471,6 +485,8 @@ export default function GasPanel({
               </div>
             </>
           )}
+          </>
+          )}
 
           {error && (
             <>
@@ -479,7 +495,7 @@ export default function GasPanel({
             </>
           )}
 
-          {result && (
+          {show("results") && result && (
             <>
               <h2>結果</h2>
               <div className="kv">
@@ -520,6 +536,12 @@ export default function GasPanel({
             </>
           )}
         </>
+      )}
+
+      {/* results専用ページで未実行の場合のヒント (mode="all" の従来ページでは出さない)。
+          dsmc が無効の場合も含め、結果セクションが表示されないケースをまとめて拾う */}
+      {mode === "results" && !(dsmc && result) && (
+        <p className="hint">DSMC計算が未実行です。スタディ「ガス流れ DSMC」から実行してください。</p>
       )}
     </>
   );

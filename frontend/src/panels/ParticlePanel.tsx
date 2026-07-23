@@ -23,6 +23,10 @@ interface Props {
   traceResult: TraceResult | null;
   showTrajectories: boolean;
   onToggleTrajectories: (v: boolean) => void;
+
+  // 表示モード: "all"=従来通り全表示 (既定・後方互換)、"setup"=設定/実行UIのみ、
+  // "results"=結果表示のみ (結果ノード用インスペクタページで使う)
+  mode?: "all" | "setup" | "results";
 }
 
 const ELECTRON: Species = { preset: "electron" };
@@ -38,7 +42,11 @@ export default function ParticlePanel({
   traceResult,
   showTrajectories,
   onToggleTrajectories,
+  mode = "all",
 }: Props) {
+  // mode が "all" のときは従来通り両方表示。それ以外は該当モードのみ表示する
+  const show = (m: "setup" | "results") => mode === "all" || mode === m;
+
   const { species, emitter, fn } = particles;
   const fnEnabled = !!fn;
 
@@ -92,6 +100,8 @@ export default function ParticlePanel({
 
   return (
     <>
+      {show("setup") && (
+      <>
       {fnEnabled ? (
         <p className="hint">
           FN電界放出が有効なため、粒子種・エミッタの設定は無効です (下の「FN電界放出」を参照)。
@@ -272,53 +282,64 @@ export default function ParticlePanel({
           {busy ? "計算中..." : "Trace"}
         </button>
       </div>
+      </>
+      )}
 
-      <label className="snap particle-trace-toggle">
-        <input
-          type="checkbox"
-          checked={showTrajectories}
-          onChange={(e) => onToggleTrajectories(e.target.checked)}
-        />
-        軌道を表示
-      </label>
-
-      {summary && (
+      {show("results") && (
         <>
-          <h2>トレース結果</h2>
-          <div className="kv"><span>粒子数</span><span>{summary.n}</span></div>
-          <div className="kv"><span>吸収 / 生存</span><span>{summary.absorbed} / {summary.alive}</span></div>
-          <div className="kv">
-            <span>平均飛行時間</span>
-            <span>{summary.avgTof !== null ? summary.avgTof.toExponential(3) : "-"} s</span>
-          </div>
-          <div className="kv">
-            <span>最終エネルギー min/max</span>
-            <span>
-              {summary.eMin !== null ? summary.eMin.toExponential(3) : "-"} /{" "}
-              {summary.eMax !== null ? summary.eMax.toExponential(3) : "-"} eV
-            </span>
-          </div>
-          <div className="kv">
-            <span>入射角 平均±標準偏差</span>
-            <span>
-              {summary.angleMean !== null ? summary.angleMean.toFixed(2) : "-"} ±{" "}
-              {summary.angleStd !== null ? summary.angleStd.toFixed(2) : "-"} deg
-            </span>
-          </div>
-          <div className="kv">
-            <span>入射角 min/max</span>
-            <span>
-              {summary.angleMin !== null ? summary.angleMin.toFixed(2) : "-"} /{" "}
-              {summary.angleMax !== null ? summary.angleMax.toFixed(2) : "-"} deg
-            </span>
-          </div>
-          {traceResult && traceResult.fn_current != null && (
-            <div className="kv">
-              <span>FN総放出電流</span>
-              <span>
-                {traceResult.fn_current.toExponential(3)} {isAxisymmetric(project.coord) ? "A" : "A/m"}
-              </span>
-            </div>
+          <label className="snap particle-trace-toggle">
+            <input
+              type="checkbox"
+              checked={showTrajectories}
+              onChange={(e) => onToggleTrajectories(e.target.checked)}
+            />
+            軌道を表示
+          </label>
+
+          {summary && (
+            <>
+              <h2>トレース結果</h2>
+              <div className="kv"><span>粒子数</span><span>{summary.n}</span></div>
+              <div className="kv"><span>吸収 / 生存</span><span>{summary.absorbed} / {summary.alive}</span></div>
+              <div className="kv">
+                <span>平均飛行時間</span>
+                <span>{summary.avgTof !== null ? summary.avgTof.toExponential(3) : "-"} s</span>
+              </div>
+              <div className="kv">
+                <span>最終エネルギー min/max</span>
+                <span>
+                  {summary.eMin !== null ? summary.eMin.toExponential(3) : "-"} /{" "}
+                  {summary.eMax !== null ? summary.eMax.toExponential(3) : "-"} eV
+                </span>
+              </div>
+              <div className="kv">
+                <span>入射角 平均±標準偏差</span>
+                <span>
+                  {summary.angleMean !== null ? summary.angleMean.toFixed(2) : "-"} ±{" "}
+                  {summary.angleStd !== null ? summary.angleStd.toFixed(2) : "-"} deg
+                </span>
+              </div>
+              <div className="kv">
+                <span>入射角 min/max</span>
+                <span>
+                  {summary.angleMin !== null ? summary.angleMin.toFixed(2) : "-"} /{" "}
+                  {summary.angleMax !== null ? summary.angleMax.toFixed(2) : "-"} deg
+                </span>
+              </div>
+              {traceResult && traceResult.fn_current != null && (
+                <div className="kv">
+                  <span>FN総放出電流</span>
+                  <span>
+                    {traceResult.fn_current.toExponential(3)} {isAxisymmetric(project.coord) ? "A" : "A/m"}
+                  </span>
+                </div>
+              )}
+            </>
+          )}
+
+          {/* results専用ページで未実行の場合のヒント (mode="all" の従来ページでは出さない) */}
+          {mode === "results" && !traceResult && (
+            <p className="hint">トレースが未実行です。スタディ「粒子軌道追跡」から実行してください。</p>
           )}
         </>
       )}
