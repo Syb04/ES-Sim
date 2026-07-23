@@ -151,7 +151,8 @@ def test_trace_fn_conductor_region():
 
 def test_pic_fn_emission_count_and_history():
     """PIC の FN 放出: マクロ数が I·t/(e·w) を再現し、履歴に fn_i が乗ること。"""
-    w = 1e5  # マクロ重み (実電子数/マクロ)
+    w = 1e6  # マクロ重み (実電子数/マクロ)。毎ステップの放出マクロ数が
+    # FN_MAX_MACROS_PER_STEP 未満に収まる値にする (上限系のテストは別関数)
     project = Project.model_validate(
         _plates_project(0.0, VOLT, fn={"edges": [3]})  # particles は使わない (下で pic を設定)
         | {
@@ -206,3 +207,41 @@ def test_pic_fn_requires_weight_without_plasma():
     )
     with pytest.raises(ValueError, match="macro_weight"):
         PicSimulation(project)
+
+
+def test_pic_fn_emission_cap_preserves_charge():
+    """巨大な放出数 (小さい macro_weight) でもメモリを溢れさせず電荷を保存する。
+
+    β=10 (J ~ 5e12 A/m²) + macro_weight=1 では 1 ステップの実電子数が ~1e13 に
+    なる。マクロ数は FN_MAX_MACROS_PER_STEP に抑えられ、実効重みの引き上げで
+    総電荷 Σw = ΣI·dt/e (床関数分) が保存されること。
+    """
+    from es_sim.pic import FN_MAX_MACROS_PER_STEP
+
+    project = Project.model_validate(
+        _plates_project(0.0, VOLT, fn={"edges": [3]})
+        | {
+            "pic": {
+                "n_macro": 100,
+                "dt": 1e-13,
+                "n_steps": 2,
+                "frame_every": 100,
+                "fn": {
+                    "edges": [3],
+                    "phi_ev": PHI,
+                    "beta": BETA,  # βE = 1e10 V/m → J ~ 5e12 A/m² (莫大な放出)
+                    "macro_weight": 1.0,
+                },
+            }
+        }
+    )
+    sim = PicSimulation(project)
+    sim.step()  # MemoryError にならないこと
+
+    el = sim.species["electron"]
+    assert len(el.x) == FN_MAX_MACROS_PER_STEP  # 上限で抑えられている
+    assert sim.fn_events == FN_MAX_MACROS_PER_STEP
+    # 総電荷保存: Σw = このステップの放出実電子数 (床関数適用後の nominal 総数)
+    i_step = sim.history["fn_i"][0]
+    n_real_nominal = math.floor(i_step * sim.dt / (1.602176634e-19 * 1.0))
+    assert float(el.w.sum()) == pytest.approx(n_real_nominal, rel=1e-9)

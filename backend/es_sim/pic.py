@@ -27,7 +27,7 @@ import numpy as np
 import scipy.sparse.linalg as spla
 
 from .fem import EPS0, _material_arrays, _radial_index, assemble
-from .fn import build_fn_surface, fn_segment_currents
+from .fn import build_fn_surface, distribute_particles, fn_segment_currents
 from .mcc import MccModel
 from .meshing import generate_mesh
 from .particles import (
@@ -58,6 +58,11 @@ _WALK_POOL: ThreadPoolExecutor | None = None
 
 # 軸上 (r=0) のゼロ割ガード (particles.py の trace と同じ値)
 _R_TINY = 1e-30
+
+# FN 電界放出の1ステップあたりの放出マクロ電子数の上限 (prompts/53)。
+# 強電界 + 小さい macro_weight では I·dt/(e·w) が天文学的な数になり得るため、
+# 超過時はマクロ重みを引き上げて粒子数をこの上限に抑える (総電荷は保存)
+FN_MAX_MACROS_PER_STEP = 10000
 
 
 def _walk_pool() -> ThreadPoolExecutor:
@@ -1056,6 +1061,11 @@ class PicSimulation:
         セグメント上の一様乱数、初速は法線方向 init_energy_ev。注入と同様に
         初期半ステップ後退キックを適用する。
 
+        放出マクロ数が FN_MAX_MACROS_PER_STEP を超える場合 (強電界 + 小さい
+        macro_weight で I·dt/(e·w) が巨大になるケース、prompts/53) は、マクロ数を
+        上限に抑えて実効重み w_eff = total·w/上限 を与える (総電荷は保存される。
+        メモリ確保エラー対策)。
+
         戻り値: このステップの総放出電流 [A/m]。
         """
         surf = self._fn_surf
@@ -1069,8 +1079,17 @@ class PicSimulation:
         total = int(n_int.sum())
         if total == 0:
             return i_tot
-        seg_idx = np.repeat(np.arange(len(seg_i)), n_int)
-        t = self._fn_rng.random(total)
+        if total > FN_MAX_MACROS_PER_STEP:
+            # マクロ数を上限に抑え、重みを引き上げて電荷を保存する (prompts/53)
+            counts = distribute_particles(n_int.astype(np.float64), FN_MAX_MACROS_PER_STEP)
+            w_emit = self._fn_w * (total / FN_MAX_MACROS_PER_STEP)
+            n_emit = int(counts.sum())  # == FN_MAX_MACROS_PER_STEP
+            seg_idx = np.repeat(np.arange(len(seg_i)), counts)
+        else:
+            w_emit = self._fn_w
+            n_emit = total
+            seg_idx = np.repeat(np.arange(len(seg_i)), n_int)
+        t = self._fn_rng.random(n_emit)
         pos = (
             surf.pa[seg_idx]
             + t[:, None] * (surf.pb[seg_idx] - surf.pa[seg_idx])
@@ -1078,7 +1097,7 @@ class PicSimulation:
         )
         elem = surf.elem[seg_idx]
         sp = self.species["electron"]
-        v = np.zeros((total, 3))
+        v = np.zeros((n_emit, 3))
         v[:, :2] = self._fn_speed * surf.nrm[seg_idx]
         # 初期半ステップ後退キック (注入と同じ規約)
         e_at = exy[elem]
@@ -1086,10 +1105,10 @@ class PicSimulation:
         bary = self._bary_of(pos, elem)
         sp.x = np.concatenate([sp.x, pos])
         sp.v = np.concatenate([sp.v, v])
-        sp.w = np.concatenate([sp.w, np.full(total, self._fn_w)])
+        sp.w = np.concatenate([sp.w, np.full(n_emit, w_emit)])
         sp.elem = np.concatenate([sp.elem, elem])
         self._bary_append(sp, bary)
-        self.fn_events += total
+        self.fn_events += n_emit
         return i_tot
 
     def _walk_chunked_submit(
