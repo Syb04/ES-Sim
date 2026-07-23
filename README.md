@@ -1,6 +1,12 @@
 # ES-Sim
 
+[![Latest Release](https://img.shields.io/github/v/release/Syb04/ES-Sim)](https://github.com/Syb04/ES-Sim/releases/latest)
+
 2Dスケッチ CAD + 静電場シミュレーション(FEM → 粒子軌道 → PIC-MCC)の個人研究用デスクトップアプリ。
+
+**📦 ダウンロード**: Windows 用インストーラー(setup.exe / msi)は
+**[リリースページ](https://github.com/Syb04/ES-Sim/releases)** から。最新版は
+[こちら](https://github.com/Syb04/ES-Sim/releases/latest)(バックエンド同梱、exe 一つで起動)。
 
 平面上に電極・誘電体・空間電荷をスケッチし、そのまま静電場解析(P1-FEM)・荷電粒子の軌道追跡・
 自己無撞着な PIC-MCC 粒子シミュレーションへと展開できる。バックエンドは Python(FastAPI ローカル
