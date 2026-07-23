@@ -233,5 +233,6 @@ def test_rz_x0_validation_errors():
             "pic": {"dt": 1e-9, "n_steps": 10, "n_macro": 10, "frame_every": 10},
         }
     )
-    with pytest.raises(ValueError, match="軸対称"):
-        PicSimulation(project)
+    # pic + rz_x0 は対応済み (prompts/47): エラーにならず構築でき、径方向 = x になる
+    sim = PicSimulation(project)
+    assert sim.rz and sim.ridx == 0

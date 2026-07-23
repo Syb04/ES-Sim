@@ -26,7 +26,7 @@ from dataclasses import dataclass
 import numpy as np
 import scipy.sparse.linalg as spla
 
-from .fem import EPS0, _material_arrays, assemble
+from .fem import EPS0, _material_arrays, _radial_index, assemble
 from .fn import build_fn_surface, fn_segment_currents
 from .mcc import MccModel
 from .meshing import generate_mesh
@@ -53,6 +53,9 @@ COLLECTOR_MAX_SAMPLES = 50000
 
 # walk 並列実行用の共有ワーカースレッド (遅延生成、プロセスで1本)
 _WALK_POOL: ThreadPoolExecutor | None = None
+
+# 軸上 (r=0) のゼロ割ガード (particles.py の trace と同じ値)
+_R_TINY = 1e-30
 
 
 def _walk_pool() -> ThreadPoolExecutor:
@@ -92,10 +95,13 @@ class PicSimulation:
     def __init__(self, project: Project):
         if project.pic is None:
             raise ValueError("project.pic が指定されていません")
-        if project.coord != "xy":
-            raise ValueError("PIC は軸対称モードに未対応です (coord='xy' を使用してください)")
         self.project = project
         self.pic: PicSettings = project.pic
+        # 軸対称モード (prompts/47)。rz: 径方向 = y、rz_x0: 径方向 = x。
+        # マクロ粒子は「リング」(周方向に一様な実粒子 w 個の輪) として扱い、
+        # v[:, 2] は vz の代わりに vθ (周方向速度) を表す
+        self.ridx = _radial_index(project.coord)
+        self.rz = self.ridx is not None
 
         # ---- メッシュ・幾何前処理 (particles.py の実装を再利用) --------------
         self.mesh = generate_mesh(project)
@@ -108,6 +114,14 @@ class PicSimulation:
         det = self.coeffs[3]
         self.area = 0.5 * np.abs(det)          # (M,) 要素面積
         self.eps_elem, _ = _material_arrays(project, mesh)  # (M,) 要素ごとの ε
+        # 要素「体積」: xy = 面積 (奥行き1m換算)、rz = 2π r̄ A (周方向積分)。
+        # xy では self.area と同一オブジェクトなので既存経路はビット単位で不変
+        if self.rz:
+            self._r_nodes = mesh.nodes[self.tris][:, :, self.ridx]  # (M, 3) 頂点の r
+            self.r_bar = self._r_nodes.mean(axis=1)                 # (M,) 要素重心半径
+            self.elem_vol = 2.0 * np.pi * self.r_bar * self.area
+        else:
+            self.elem_vol = self.area
 
         # 周期境界の正準化写像 (スレーブ→マスター)。電荷堆積・密度積算・求解は
         # 正準節点番号 (tris_dep) を使い、粒子 walk・E 補間は元の tris を使う
@@ -223,12 +237,13 @@ class PicSimulation:
         if ip is not None:
             rng = np.random.default_rng(ip.seed)
             n_macro = self.pic.n_macro
-            # 装荷可能面積 = 誘電体 (固体) 要素を除いた面積 (粒子は入れないため)
+            # 装荷可能体積 = 誘電体 (固体) 要素を除いた体積
+            # (xy: 面積 = 奥行き1m換算、rz: 2πr̄A。elem_vol は xy では area と同一)
             if self._solid_elem is None:
-                area_load = float(self.area.sum())
+                area_load = float(self.elem_vol.sum())
             else:
-                area_load = float(self.area[~self._solid_elem].sum())
-            w0 = ip.density * area_load / n_macro  # マクロ重み (奥行き1m換算)
+                area_load = float(self.elem_vol[~self._solid_elem].sum())
+            w0 = ip.density * area_load / n_macro  # マクロ重み (実粒子数/マクロ。rz はリング)
             x0, elem0 = self._sample_uniform(rng, n_macro)
             for name, q, m, t_ev, mobile in (
                 ("electron", -QE, ME, ip.te_ev, True),
@@ -356,13 +371,24 @@ class PicSimulation:
                     "samples": 0,   # 保存済みサンプル数 (上限はコレクタごとに適用)
                 }
             )
-        # 節点集中面積 = Σ隣接要素面積/3 (averaged_density の規格化に使う)。
-        # 周期境界では正準節点番号で積むため、スレーブ節点の面積は 0 になる
-        self._node_area = np.bincount(
-            self.tris_dep.ravel(),
-            weights=np.repeat(self.area / 3.0, 3),
-            minlength=self.n_nodes,
-        )
+        # 節点集中体積 (averaged_density の規格化に使う)。
+        # xy: Σ隣接要素面積/3 (従来どおり)。rz: Σ 2π∫L_i r dA = Σ 2π(A/12)(2r_i+r_j+r_k)
+        # (線形 r の厳密積分。fem.assemble の右辺と同じ公式)。
+        # 周期境界では正準節点番号で積むため、スレーブ節点の値は 0 になる
+        if self.rz:
+            node_w = (
+                2.0 * np.pi * (self.area / 12.0)[:, None]
+                * (self._r_nodes + 3.0 * self.r_bar[:, None])
+            )
+            self._node_area = np.bincount(
+                self.tris_dep.ravel(), weights=node_w.ravel(), minlength=self.n_nodes
+            )
+        else:
+            self._node_area = np.bincount(
+                self.tris_dep.ravel(),
+                weights=np.repeat(self.area / 3.0, 3),
+                minlength=self.n_nodes,
+            )
 
         # ---- 診断・時刻 -------------------------------------------------------
         self.t = 0.0
@@ -389,7 +415,14 @@ class PicSimulation:
         for sp in self.species.values():
             if sp.mobile and len(sp.x):
                 e_at = np.stack([ex[sp.elem], ey[sp.elem]], axis=1)
-                sp.v[:, :2] -= 0.5 * self.dt * (sp.q / sp.m) * e_at
+                if self.rz:
+                    # 軸対称: 遠心力項も含めて半ステップ後退させる
+                    a0 = (sp.q / sp.m) * e_at
+                    r0 = np.maximum(sp.x[:, self.ridx], _R_TINY)
+                    a0[:, self.ridx] += sp.v[:, 2] ** 2 / r0
+                    sp.v[:, :2] -= 0.5 * self.dt * a0
+                else:
+                    sp.v[:, :2] -= 0.5 * self.dt * (sp.q / sp.m) * e_at
 
     # ---- 内部処理 -----------------------------------------------------------
 
@@ -790,16 +823,18 @@ class PicSimulation:
     def _sample_uniform(self, rng: np.random.Generator, n: int):
         """ドメイン内 (メッシュ要素上 = 電極領域を除く) の一様分布サンプリング。
 
-        要素を面積比例で選び、要素内は重心座標の一様分布で配置する。
-        所属要素が同時に確定するので walk 初期化が不要。
+        要素を体積比例 (xy: 面積、rz: 2πr̄A) で選び、要素内は重心座標の一様分布で
+        配置する。所属要素が同時に確定するので walk 初期化が不要。
         誘電体 (固体) 要素は粒子が入れないため装荷対象から除外する。
+        rz では要素内の r 依存 (∝r) を r̄ で代表する近似 (要素サイズ ≪ r で厳密に
+        一様密度へ収束。軸近傍の要素では僅かに軸寄りが過剰になる)。
         """
         if self._solid_elem is None:
-            p_elem = self.area / self.area.sum()
+            p_elem = self.elem_vol / self.elem_vol.sum()
             elem = rng.choice(len(self.tris), size=n, p=p_elem).astype(np.int64)
         else:
             loadable = np.nonzero(~self._solid_elem)[0]
-            p_elem = self.area[loadable] / self.area[loadable].sum()
+            p_elem = self.elem_vol[loadable] / self.elem_vol[loadable].sum()
             elem = loadable[rng.choice(len(loadable), size=n, p=p_elem)].astype(np.int64)
         r1 = np.sqrt(rng.random(n))
         r2 = rng.random(n)
@@ -880,10 +915,14 @@ class PicSimulation:
         v = np.zeros(self.n_nodes)
         vd = self._dirichlet_values(t)
         v[self.fixed] = vd
+        if self.rz:
+            # 軸対称: リング電荷 Q [C] の P1 射影は f_i = Q·L_i/(2π)
+            # (fem.assemble は弱形式の 2π を両辺で落とした規約のため。q_surf も同様)
+            f_dep = f_dep / (2.0 * np.pi)
         f = self.f_static + f_dep
         if self._solid_elem is not None:
             # 誘電体の蓄積表面電荷を恒常的に加算する (誘電体なしの経路は数値不変)
-            f = f + self.q_surf
+            f = f + (self.q_surf / (2.0 * np.pi) if self.rz else self.q_surf)
         rhs = f[self.free] - self.k_fd @ vd
         v[self.free] = self.lu.solve(rhs)
         if self.canon is not None:
@@ -922,7 +961,14 @@ class PicSimulation:
         elem = self._inj_elem
         v = self._injection_velocities()
         e_at = np.stack([ex[elem], ey[elem]], axis=1)
-        v[:, :2] -= 0.5 * self.dt * (sp.q / sp.m) * e_at
+        if self.rz:
+            # 軸対称: 遠心力項 (maxwell 注入では vθ ≠ 0) も含めて半ステップ後退
+            a0 = (sp.q / sp.m) * e_at
+            r0 = np.maximum(self._inj_pos[:, self.ridx], _R_TINY)
+            a0[:, self.ridx] += v[:, 2] ** 2 / r0
+            v[:, :2] -= 0.5 * self.dt * a0
+        else:
+            v[:, :2] -= 0.5 * self.dt * (sp.q / sp.m) * e_at
         n = len(elem)
         sp.x = np.concatenate([sp.x, self._inj_pos])
         sp.v = np.concatenate([sp.v, v])
@@ -942,7 +988,8 @@ class PicSimulation:
         """
         surf = self._fn_surf
         fn = self.pic.fn
-        _f_surf, seg_i = fn_segment_currents(surf, exy, fn, "xy")
+        # 座標系を渡す (rz では I [A] = J·L·2πr̄。放出実電子数 I·dt/e は自動整合)
+        _f_surf, seg_i = fn_segment_currents(surf, exy, fn, self.project.coord)
         i_tot = float(seg_i.sum())
         quota = seg_i * (self.dt / (QE * self._fn_w)) + self._fn_frac
         n_int = np.floor(quota).astype(np.int64)
@@ -1023,7 +1070,8 @@ class PicSimulation:
         phi = self._solve_phi(self._deposit(), t)
         # 3. E 補間の準備 (要素ごとの一定値)
         ex, ey = self._e_field(phi)
-        fe = float(np.sum(0.5 * self.eps_elem * (ex**2 + ey**2) * self.area))
+        # 場のエネルギー (xy: [J/m]、rz: [J]。elem_vol は xy では area と同一)
+        fe = float(np.sum(0.5 * self.eps_elem * (ex**2 + ey**2) * self.elem_vol))
         # 要素ごとの E を (M,2) に詰め、粒子への補間 gather を1回で済ませる
         exy = np.stack([ex, ey], axis=1)
 
@@ -1039,9 +1087,20 @@ class PicSimulation:
                 ke[sp.name] = 0.5 * sp.m * float(np.sum(sp.w * np.sum(sp.v**2, axis=1)))
                 continue
             e_at = exy[sp.elem]
-            # 2d3v: E は vx, vy のみに作用し、vz はそのまま
             v_new = sp.v.copy()
-            v_new[:, :2] += (sp.q / sp.m) * dt * e_at
+            ang_l = None
+            if self.rz:
+                # 軸対称プッシュ (prompts/47): 遠心力項 vθ²/r を現在位置で評価して
+                # 径方向加速度に加える (trace と同じ半陰的規約)。v[:, 2] は vθ
+                ridx = self.ridx
+                a_rz = (sp.q / sp.m) * e_at
+                r_cur = np.maximum(sp.x[:, ridx], _R_TINY)
+                ang_l = sp.x[:, ridx] * sp.v[:, 2]  # 角運動量 L = r·vθ (保存量)
+                a_rz[:, ridx] += sp.v[:, 2] ** 2 / r_cur
+                v_new[:, :2] += dt * a_rz
+            else:
+                # 2d3v: E は vx, vy のみに作用し、vz はそのまま
+                v_new[:, :2] += (sp.q / sp.m) * dt * e_at
             # 時刻中心化した運動エネルギー: KE(t_n) ≈ ½ m Σ w v(n-1/2)·v(n+1/2)
             # (v·v_new は列ごとの積和で評価: axis 縮約より高速で結果はビット一致)
             vdot = (
@@ -1049,6 +1108,17 @@ class PicSimulation:
             ) + sp.v[:, 2] * v_new[:, 2]
             ke[sp.name] = 0.5 * sp.m * float(np.sum(sp.w * vdot))
             x_new = sp.x + dt * v_new[:, :2]
+            if self.rz:
+                # 軸交差 (r < 0): 径座標・径速度・vθ (= L の符号) を鏡映してから
+                # walk する (軸 r=0 は境界メッシュエッジだが吸収させない)
+                cross = x_new[:, self.ridx] < 0.0
+                if np.any(cross):
+                    x_new[cross, self.ridx] = -x_new[cross, self.ridx]
+                    v_new[cross, self.ridx] = -v_new[cross, self.ridx]
+                    ang_l[cross] = -ang_l[cross]
+                # 角運動量保存: 移動後の位置で vθ = L/r を更新する
+                r_new = np.maximum(x_new[:, self.ridx], _R_TINY)
+                v_new[:, 2] = np.where(ang_l != 0.0, ang_l / r_new, 0.0)
             pushed.append((sp, v_new, x_new, np.empty((len(x_new), 3))))
 
         # 5. walk 更新 (種ごとに独立・決定的なので、2種のときは並列に実行して

@@ -3,6 +3,7 @@ import { api } from "../api";
 import { saveTextFile } from "../saveFile";
 import { CommitNumberInput, CommitTextInput } from "../CommitInput";
 import FnEmissionSection from "./FnPanel";
+import { isAxisymmetric } from "../types";
 import type {
   Emitter,
   FnEmission,
@@ -68,9 +69,6 @@ interface Props {
   // フェーズ2 (粒子) パネルの現在のエミッタ設定。injection.emitter として共用する
   emitter: Emitter;
   canRun: boolean;
-  // true (project.coord が "rz" または "rz_x0"、isAxisymmetric() 判定) のとき PIC は未対応。
-  // 開始/続き実行ボタンを無効化し、注記を出す
-  rzDisabled: boolean;
   running: boolean;
   onStart: () => void;
   onStop: () => void;
@@ -170,7 +168,6 @@ export default function PicPanel({
   onChange,
   emitter,
   canRun,
-  rzDisabled,
   running,
   onStart,
   onStop,
@@ -305,9 +302,6 @@ export default function PicPanel({
 
   return (
     <>
-      {rzDisabled && (
-        <div className="hint">軸対称モードでは PIC は利用できません。</div>
-      )}
       <h2>PIC: 初期プラズマ</h2>
       <div className="field">
         <span className="label">有効</span>
@@ -394,7 +388,8 @@ export default function PicPanel({
             </select>
           </div>
           <div className="field">
-            <span className="label">電流 [A/m]</span>
+            {/* 軸対称ではリングエミッタの全電流 [A]、平面2Dでは奥行き1mあたり [A/m] */}
+            <span className="label">{isAxisymmetric(project.coord) ? "電流 [A]" : "電流 [A/m]"}</span>
             <CommitNumberInput
               value={pic.injection.current_a_per_m}
               onCommit={(v) => updateInjection({ current_a_per_m: v })}
@@ -692,7 +687,7 @@ export default function PicPanel({
       )}
 
       <div className="actions">
-        <button onClick={onStart} disabled={!canRun || running || rzDisabled}>
+        <button onClick={onStart} disabled={!canRun || running}>
           {running ? "実行中..." : "PIC開始"}
         </button>
         <button className="secondary" onClick={onStop} disabled={!running}>
@@ -701,13 +696,11 @@ export default function PicPanel({
         <button
           className="secondary"
           onClick={onContinue}
-          disabled={!canContinue || rzDisabled}
+          disabled={!canContinue}
           title={
-            rzDisabled
-              ? "軸対称モードでは PIC は利用できません"
-              : continueDisabledByProjectChange
-                ? "ジオメトリ・プラズマ設定が変更されたため続き実行できません (再度 PIC開始 してください)"
-                : undefined
+            continueDisabledByProjectChange
+              ? "ジオメトリ・プラズマ設定が変更されたため続き実行できません (再度 PIC開始 してください)"
+              : undefined
           }
         >
           続きから実行
@@ -762,12 +755,12 @@ export default function PicPanel({
             </span>
           </div>
           <div className="kv">
-            <span>誘電体表面電荷 [C/m]</span>
+            <span>{isAxisymmetric(project.coord) ? "誘電体表面電荷 [C]" : "誘電体表面電荷 [C/m]"}</span>
             <span>{frame.diag.surf_q !== undefined ? frame.diag.surf_q.toExponential(3) : "-"}</span>
           </div>
           {frame.diag.fn_i !== undefined && (
             <div className="kv">
-              <span>FN放出電流 [A/m]</span>
+              <span>{isAxisymmetric(project.coord) ? "FN放出電流 [A]" : "FN放出電流 [A/m]"}</span>
               <span>{frame.diag.fn_i.toExponential(3)}</span>
             </div>
           )}

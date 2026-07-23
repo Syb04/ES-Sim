@@ -234,7 +234,11 @@ class InitialPlasma(BaseModel):
 
 
 class PicInjection(BaseModel):
-    """エミッタからの定常注入。電流 [A/m] を毎ステップの実電荷として等分注入する。"""
+    """エミッタからの定常注入。電流を毎ステップの実電荷として等分注入する。
+
+    current_a_per_m の単位: 平面2D (xy) = [A/m] (奥行き1m換算)、
+    軸対称 (rz / rz_x0) = [A] (リングエミッタの全電流)。
+    """
 
     emitter: Emitter
     species: Literal["electron", "ion"] = "electron"

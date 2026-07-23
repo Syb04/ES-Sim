@@ -1219,7 +1219,6 @@ export default function App() {
                 onChange={setPic}
                 emitter={particles.emitter}
                 canRun={!!health}
-                rzDisabled={isAxisym}
                 running={picRunning}
                 onStart={runPicStart}
                 onStop={runPicStop}

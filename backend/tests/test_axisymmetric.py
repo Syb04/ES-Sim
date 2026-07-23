@@ -270,9 +270,9 @@ def test_rz_validation_errors():
             }
         )
 
-    # pic + rz は明確なエラー
+    # pic + rz は対応済み (prompts/47): エラーにならず構築でき、rz モードになる
     project = _disk_project(
         pic={"dt": 1e-9, "n_steps": 10, "n_macro": 10, "frame_every": 10}
     )
-    with pytest.raises(ValueError, match="軸対称"):
-        PicSimulation(project)
+    sim = PicSimulation(project)
+    assert sim.rz and sim.ridx == 1

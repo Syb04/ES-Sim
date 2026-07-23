@@ -359,7 +359,8 @@ export interface Project {
 }
 
 // 軸対称モード判定 (rz: 下辺 y=0 が対称軸、rz_x0: 左辺 x=0 が対称軸)。
-// PIC無効化・エネルギー単位 [J] 表示など「rz または rz_x0 で共通に発動する」判定はここに集約する
+// エネルギー単位 [J]・電流 [A]・表面電荷 [C] 表示など「rz または rz_x0 で共通に
+// 発動する」判定はここに集約する (PIC は prompts/47 で軸対称対応済み)
 export function isAxisymmetric(coord: Project["coord"]): boolean {
   return coord === "rz" || coord === "rz_x0";
 }
