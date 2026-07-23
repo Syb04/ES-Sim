@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api";
 import { saveTextFile } from "../saveFile";
-import { CommitNumberInput, CommitTextInput } from "../CommitInput";
+import { CommitNullableNumberInput, CommitNumberInput, CommitTextInput } from "../CommitInput";
 import FnEmissionSection from "./FnPanel";
 import { isAxisymmetric } from "../types";
 import type {
@@ -523,19 +523,10 @@ export default function PicPanel({
       </div>
       <div className="field">
         <span className="label">dt [s] (空欄=自動)</span>
-        <input
-          type="text"
-          value={pic.dt === null ? "" : String(pic.dt)}
+        <CommitNullableNumberInput
+          value={pic.dt}
           placeholder="自動"
-          onChange={(e) => {
-            const raw = e.target.value;
-            if (raw.trim() === "") {
-              onChange({ ...pic, dt: null });
-              return;
-            }
-            const n = Number(raw);
-            if (Number.isFinite(n)) onChange({ ...pic, dt: n });
-          }}
+          onCommit={(v) => onChange({ ...pic, dt: v })}
         />
       </div>
       <div className="field">

@@ -95,6 +95,78 @@ export function CommitNumberInput({
   );
 }
 
+/**
+ * null 許容の数値入力 (dt の「空欄=自動」など) の確定時コミット版 (prompts/59)。
+ * - 空欄で確定すると onCommit(null)
+ * - CommitNumberInput と同様に blur/Enter で確定するため、`3e-11` のような
+ *   指数表記を途中入力で弾かれずに入力できる
+ */
+export function CommitNullableNumberInput({
+  value,
+  placeholder,
+  className,
+  disabled,
+  onCommit,
+}: {
+  value: number | null;
+  placeholder?: string;
+  className?: string;
+  disabled?: boolean;
+  onCommit: (value: number | null) => void;
+}) {
+  const [draft, setDraft] = useState(value === null ? "" : formatNumber(value));
+  const focusedRef = useRef(false);
+
+  useEffect(() => {
+    if (!focusedRef.current) setDraft(value === null ? "" : formatNumber(value));
+  }, [value]);
+
+  const commit = () => {
+    const t = draft.trim();
+    if (t === "") {
+      onCommit(null);
+      setDraft("");
+      return;
+    }
+    const n = Number(t);
+    if (Number.isFinite(n)) {
+      onCommit(n);
+      setDraft(formatNumber(n));
+    } else {
+      setDraft(value === null ? "" : formatNumber(value)); // パース不能なら元に戻す
+    }
+  };
+
+  return (
+    <input
+      type="text"
+      inputMode="decimal"
+      className={className}
+      disabled={disabled}
+      placeholder={placeholder}
+      value={draft}
+      onFocus={() => {
+        focusedRef.current = true;
+      }}
+      onChange={(e) => setDraft(e.target.value)}
+      onBlur={() => {
+        focusedRef.current = false;
+        commit();
+      }}
+      onKeyDown={(e) => {
+        if (e.key === "Enter") {
+          e.preventDefault();
+          commit();
+          e.currentTarget.blur();
+        } else if (e.key === "Escape") {
+          setDraft(value === null ? "" : formatNumber(value));
+          e.currentTarget.blur();
+        }
+      }}
+    />
+  );
+}
+
 interface TextProps {
   value: string;
   className?: string;

@@ -1,4 +1,4 @@
-import { CommitNumberInput } from "../CommitInput";
+import { CommitNullableNumberInput, CommitNumberInput } from "../CommitInput";
 import { mToMm, mmToM } from "../units";
 import FnEmissionSection from "./FnPanel";
 import { isAxisymmetric } from "../types";
@@ -246,19 +246,10 @@ export default function ParticlePanel({
       <h2>積分設定</h2>
       <div className="field">
         <span className="label">dt [s] (空欄=自動)</span>
-        <input
-          type="text"
-          value={particles.dt === null ? "" : String(particles.dt)}
+        <CommitNullableNumberInput
+          value={particles.dt}
           placeholder="自動"
-          onChange={(e) => {
-            const raw = e.target.value;
-            if (raw.trim() === "") {
-              onChange({ ...particles, dt: null });
-              return;
-            }
-            const n = Number(raw);
-            if (Number.isFinite(n)) onChange({ ...particles, dt: n });
-          }}
+          onCommit={(v) => onChange({ ...particles, dt: v })}
         />
       </div>
       <div className="field">

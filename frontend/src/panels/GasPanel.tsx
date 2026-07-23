@@ -1,5 +1,5 @@
 import { useEffect, useRef } from "react";
-import { CommitNumberInput, CommitTextInput } from "../CommitInput";
+import { CommitNullableNumberInput, CommitNumberInput, CommitTextInput } from "../CommitInput";
 import type { DsmcBoundary, DsmcBoundaryType, DsmcGas, DsmcResult, DsmcSettings, Point, Project } from "../types";
 import { mToMm, mmToM } from "../units";
 
@@ -419,19 +419,10 @@ export default function GasPanel({
           </div>
           <div className="field">
             <span className="label">dt [s] (空欄=自動)</span>
-            <input
-              type="text"
-              value={dsmc.dt === null ? "" : String(dsmc.dt)}
+            <CommitNullableNumberInput
+              value={dsmc.dt}
               placeholder="自動"
-              onChange={(e) => {
-                const raw = e.target.value;
-                if (raw.trim() === "") {
-                  onChange({ ...dsmc, dt: null });
-                  return;
-                }
-                const n = Number(raw);
-                if (Number.isFinite(n)) onChange({ ...dsmc, dt: n });
-              }}
+              onCommit={(v) => onChange({ ...dsmc, dt: v })}
             />
           </div>
           <div className="field">
