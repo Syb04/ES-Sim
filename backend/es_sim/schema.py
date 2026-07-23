@@ -353,6 +353,12 @@ class PicSettings(BaseModel):
     # FN 電界放出源 (prompts/46)。毎ステップの表面電界から I·dt 分の電子を放出する。
     # null なら無効 (従来動作と完全一致)
     fn: FnEmission | None = None
+    # イオンサブサイクリング (prompts/50): イオンを N ステップに1回、N·dt で押す。
+    # 休止ステップ中はイオンの電荷堆積をキャッシュして再利用する。1 = 無効 (従来と完全一致)
+    ion_subcycle: int = Field(1, ge=1)
+    # 粒子処理 (walk 探索) のワーカースレッド数 (prompts/50)。粒子ごとの walk は独立な
+    # ため、チャンク並列化しても結果は逐次実行とビット単位で一致する。1 = 従来経路
+    threads: int = Field(1, ge=1, le=32)
 
 
 class Project(BaseModel):

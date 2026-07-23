@@ -537,6 +537,26 @@ export default function PicPanel({
         />
       </div>
       <div className="field">
+        <span className="label">イオンサブサイクル</span>
+        <CommitNumberInput
+          value={pic.ion_subcycle ?? 1}
+          onCommit={(v) => onChange({ ...pic, ion_subcycle: Math.max(1, Math.round(v)) })}
+        />
+      </div>
+      <p className="hint">
+        イオンを N ステップに1回 N·dt で押す (1=無効)。5〜10 で高速化、結果は近似
+      </p>
+      <div className="field">
+        <span className="label">スレッド数</span>
+        <CommitNumberInput
+          value={pic.threads ?? 1}
+          onCommit={(v) => onChange({ ...pic, threads: Math.max(1, Math.round(v)) })}
+        />
+      </div>
+      <p className="hint">
+        walk 探索の並列スレッド数。結果は1と完全一致。CPUコア数程度まで
+      </p>
+      <div className="field">
         <span className="label">平均ステップ数 (空欄=最後の25%)</span>
         <input
           type="text"

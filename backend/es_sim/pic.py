@@ -314,6 +314,25 @@ class PicSimulation:
                 else 0.0
             )
 
+        # ---- イオンサブサイクリング (prompts/50) ------------------------------
+        # イオンを _sub ステップに1回、_sub·dt で押す。休止ステップ中はイオンが
+        # 動かないため電荷堆積ベクトルをキャッシュして再利用する (イオン配列が
+        # 変わる箇所 — プッシュ・電離生成・イオン注入 — で必ず無効化すること)
+        self._sub = max(1, int(self.pic.ion_subcycle))
+        self._f_ion_cache: np.ndarray | None = None
+        self._last_ke_i = 0.0  # 休止ステップの KE 診断用 (直近プッシュ時の値を流用)
+
+        # ---- 粒子チャンク並列 (prompts/50) ------------------------------------
+        # walk 探索を粒子チャンクに分けてスレッド並列化する。粒子ごとの walk は
+        # 独立で numpy ufunc は GIL を解放するため実効的。チャンク分割しても
+        # 各粒子の演算は不変なので、結果は逐次実行とビット単位で一致する
+        self._nthreads = max(1, int(self.pic.threads))
+        self._chunk_pool = (
+            ThreadPoolExecutor(max_workers=self._nthreads, thread_name_prefix="pic-chunk")
+            if self._nthreads > 1
+            else None
+        )
+
         # ---- MCC (モンテカルロ衝突、prompts/19) ------------------------------
         # mcc=null なら無効 (従来の無衝突動作と完全一致)
         self.mcc = MccModel(self.pic.mcc, self.m_ion) if self.pic.mcc is not None else None
@@ -421,15 +440,17 @@ class PicSimulation:
         ex, ey = self._e_field(phi0)
         for sp in self.species.values():
             if sp.mobile and len(sp.x):
+                # サブサイクル時のイオンは実効時間刻み _sub·dt で後退させる
+                dt_sp = self.dt * self._sub if (sp.name == "ion" and self._sub > 1) else self.dt
                 e_at = np.stack([ex[sp.elem], ey[sp.elem]], axis=1)
                 if self.rz:
                     # 軸対称: 遠心力項も含めて半ステップ後退させる
                     a0 = (sp.q / sp.m) * e_at
                     r0 = np.maximum(sp.x[:, self.ridx], _R_TINY)
                     a0[:, self.ridx] += sp.v[:, 2] ** 2 / r0
-                    sp.v[:, :2] -= 0.5 * self.dt * a0
+                    sp.v[:, :2] -= 0.5 * dt_sp * a0
                 else:
-                    sp.v[:, :2] -= 0.5 * self.dt * (sp.q / sp.m) * e_at
+                    sp.v[:, :2] -= 0.5 * dt_sp * (sp.q / sp.m) * e_at
 
     # ---- 内部処理 -----------------------------------------------------------
 
@@ -902,7 +923,12 @@ class PicSimulation:
         )
 
     def _deposit(self) -> np.ndarray:
-        """全種の電荷堆積 (不動種はキャッシュを再利用)。"""
+        """全種の電荷堆積 (不動種はキャッシュを再利用)。
+
+        イオンサブサイクリング (prompts/50) 中はイオンが休止ステップで動かない
+        ため、堆積ベクトルをキャッシュして再利用する (イオン配列が変わる箇所で
+        _f_ion_cache = None に無効化される)。
+        """
         f = np.zeros(self.n_nodes)
         for sp in self.species.values():
             if len(sp.x) == 0:
@@ -911,6 +937,10 @@ class PicSimulation:
                 if sp.name not in self._f_immobile:
                     self._f_immobile[sp.name] = self._deposit_species(sp)
                 f += self._f_immobile[sp.name]
+            elif sp.name == "ion" and self._sub > 1:
+                if self._f_ion_cache is None:
+                    self._f_ion_cache = self._deposit_species(sp)
+                f += self._f_ion_cache
             else:
                 f += self._deposit_species(sp)
         return f
@@ -975,20 +1005,24 @@ class PicSimulation:
         elem = self._inj_elem
         v = self._injection_velocities()
         e_at = np.stack([ex[elem], ey[elem]], axis=1)
+        # イオン注入 + サブサイクル時は実効刻み _sub·dt で後退させる
+        dt_inj = self.dt * self._sub if (inj.species == "ion" and self._sub > 1) else self.dt
         if self.rz:
             # 軸対称: 遠心力項 (maxwell 注入では vθ ≠ 0) も含めて半ステップ後退
             a0 = (sp.q / sp.m) * e_at
             r0 = np.maximum(self._inj_pos[:, self.ridx], _R_TINY)
             a0[:, self.ridx] += v[:, 2] ** 2 / r0
-            v[:, :2] -= 0.5 * self.dt * a0
+            v[:, :2] -= 0.5 * dt_inj * a0
         else:
-            v[:, :2] -= 0.5 * self.dt * (sp.q / sp.m) * e_at
+            v[:, :2] -= 0.5 * dt_inj * (sp.q / sp.m) * e_at
         n = len(elem)
         sp.x = np.concatenate([sp.x, self._inj_pos])
         sp.v = np.concatenate([sp.v, v])
         sp.w = np.concatenate([sp.w, np.full(n, self._inj_w)])
         sp.elem = np.concatenate([sp.elem, elem])
         self._bary_append(sp, self._inj_bary)
+        if inj.species == "ion":
+            self._f_ion_cache = None  # イオンが増えたので堆積キャッシュを無効化
 
     def _emit_fn(self, exy: np.ndarray) -> float:
         """FN 電界放出 (prompts/46)。現ステップの表面電界から電子を放出する。
@@ -1034,12 +1068,63 @@ class PicSimulation:
         self.fn_events += total
         return i_tot
 
+    def _walk_chunked_submit(
+        self, elem: np.ndarray, x_new: np.ndarray, l_new: np.ndarray, futures: list
+    ):
+        """1種の walk を粒子チャンクに分割してプールへ投入する (prompts/50)。
+
+        各粒子の walk は完全に独立 (読み取り共有のみ・書き込みは自分の行のみ) の
+        決定的処理なので、チャンク分割しても結果は逐次実行とビット単位で一致する。
+        戻り値は出力先の (elem_new, absorbed, b_elem, b_loc)。呼び出し側が
+        futures の完了を待ってから読むこと。粒子数が少ない種はスレッド起動コストの
+        方が高いため、その場で逐次計算する (futures には積まない)。
+        """
+        n = len(elem)
+        if n < 4096:
+            return _walk_step(
+                self.coeffs, self.adjacency, elem, x_new, l_new,
+                packed=self._coeffs_packed,
+            )
+        k = self._nthreads
+        bounds = [(i * n) // k for i in range(k + 1)]
+        elem_new = np.empty(n, dtype=np.int64)
+        absorbed = np.empty(n, dtype=bool)
+        b_elem = np.empty(n, dtype=np.int64)
+        b_loc = np.empty(n, dtype=np.int64)
+
+        def _run(lo: int, hi: int) -> None:
+            sub_l = None if l_new is None else l_new[lo:hi]
+            e, a, be, bl = _walk_step(
+                self.coeffs, self.adjacency, elem[lo:hi], x_new[lo:hi], sub_l,
+                packed=self._coeffs_packed,
+            )
+            elem_new[lo:hi] = e
+            absorbed[lo:hi] = a
+            b_elem[lo:hi] = be
+            b_loc[lo:hi] = bl
+
+        for i in range(k):
+            if bounds[i + 1] > bounds[i]:
+                futures.append(self._chunk_pool.submit(_run, bounds[i], bounds[i + 1]))
+        return elem_new, absorbed, b_elem, b_loc
+
     def _run_walks(self, pushed) -> list:
         """種ごとの walk を実行する (2種以上なら並列)。
 
         walk は乱数を使わず入力のみで決まる決定的処理で、種間で共有する
         書き込み先も無いため、並列化しても結果はビット単位で不変。
+        threads > 1 (prompts/50) では全種のチャンクをまとめてプールへ投入し、
+        全ワーカーで消化する (種横断で負荷分散する)。
         """
+        if self._chunk_pool is not None:
+            futures: list = []
+            results = [
+                self._walk_chunked_submit(sp.elem, x_new, l_new, futures)
+                for sp, _v, x_new, l_new in pushed
+            ]
+            for fut in futures:
+                fut.result()
+            return results
         if len(pushed) <= 1:
             return [
                 _walk_step(
@@ -1090,6 +1175,9 @@ class PicSimulation:
         exy = np.stack([ex, ey], axis=1)
 
         # 4. リープフロッグでプッシュ (種ごとの v_new, x_new を先に全て計算する)
+        # イオンサブサイクリング (prompts/50): イオンは _sub ステップに1回だけ
+        # 実効刻み _sub·dt で押す (最初のプッシュは step_count = 0)
+        push_ions = self._sub == 1 or (self.step_count % self._sub == 0)
         ke: dict[str, float] = {}
         pushed: list[tuple[PicSpecies, np.ndarray, np.ndarray, np.ndarray]] = []
         for sp in self.species.values():
@@ -1100,6 +1188,12 @@ class PicSimulation:
                 # 不動種: 運動エネルギーのみ評価
                 ke[sp.name] = 0.5 * sp.m * float(np.sum(sp.w * np.sum(sp.v**2, axis=1)))
                 continue
+            if sp.name == "ion" and not push_ions:
+                # サブサイクル休止ステップ: イオンは動かさず、KE は直近プッシュ時の
+                # 値を流用する (位置・所属要素・堆積キャッシュはそのまま有効)
+                ke[sp.name] = self._last_ke_i
+                continue
+            dt_sp = dt * self._sub if (sp.name == "ion" and self._sub > 1) else dt
             e_at = exy[sp.elem]
             v_new = sp.v.copy()
             ang_l = None
@@ -1111,17 +1205,19 @@ class PicSimulation:
                 r_cur = np.maximum(sp.x[:, ridx], _R_TINY)
                 ang_l = sp.x[:, ridx] * sp.v[:, 2]  # 角運動量 L = r·vθ (保存量)
                 a_rz[:, ridx] += sp.v[:, 2] ** 2 / r_cur
-                v_new[:, :2] += dt * a_rz
+                v_new[:, :2] += dt_sp * a_rz
             else:
                 # 2d3v: E は vx, vy のみに作用し、vz はそのまま
-                v_new[:, :2] += (sp.q / sp.m) * dt * e_at
+                v_new[:, :2] += (sp.q / sp.m) * dt_sp * e_at
             # 時刻中心化した運動エネルギー: KE(t_n) ≈ ½ m Σ w v(n-1/2)·v(n+1/2)
             # (v·v_new は列ごとの積和で評価: axis 縮約より高速で結果はビット一致)
             vdot = (
                 sp.v[:, 0] * v_new[:, 0] + sp.v[:, 1] * v_new[:, 1]
             ) + sp.v[:, 2] * v_new[:, 2]
             ke[sp.name] = 0.5 * sp.m * float(np.sum(sp.w * vdot))
-            x_new = sp.x + dt * v_new[:, :2]
+            if sp.name == "ion":
+                self._last_ke_i = ke[sp.name]
+            x_new = sp.x + dt_sp * v_new[:, :2]
             if self.rz:
                 # 軸交差 (r < 0): 径座標・径速度・vθ (= L の符号) を鏡映してから
                 # walk する (軸 r=0 は境界メッシュエッジだが吸収させない)
@@ -1194,6 +1290,8 @@ class PicSimulation:
                 sp.elem = elem_new
                 sp.bary = l_new
             sp.nidx = None  # 所属要素が変わったので節点番号キャッシュを無効化
+            if sp.name == "ion":
+                self._f_ion_cache = None  # イオンが動いたので堆積キャッシュを無効化
 
         # 5.5. MCC 衝突 (衝突は位置を変えないので所属要素の更新は不要)
         if self.mcc is not None:
@@ -1223,10 +1321,14 @@ class PicSimulation:
                     io.w = np.concatenate([io.w, res.new_w.copy()])
                     io.elem = np.concatenate([io.elem, res.new_elem.copy()])
                     self._bary_append(io, new_l)
-                    # 不動イオンに追加した場合は堆積キャッシュを無効化
+                    # 不動イオン・サブサイクル中のイオンの堆積キャッシュを無効化
                     self._f_immobile.pop("ion", None)
-            if io.mobile and len(io.x):
-                self.mcc.collide_ions(io.v, dt)
+                    self._f_ion_cache = None
+            if io.mobile and len(io.x) and push_ions:
+                # サブサイクル時 (prompts/50) はイオン衝突もプッシュステップに
+                # 実効刻み _sub·dt でまとめて適用する (衝突は速度のみ変えるため
+                # 堆積キャッシュには影響しない)
+                self.mcc.collide_ions(io.v, dt * self._sub if self._sub > 1 else dt)
 
         # 6. 注入
         if self.pic.injection is not None:

@@ -199,6 +199,12 @@ export interface PicSettings {
   collectors?: PicCollectorSettings[];
   // FN 電界放出源 (prompts/46)。毎ステップの表面電界から放出する。null/undefined = 無効
   fn?: FnEmission | null;
+  // イオンサブサイクリング (prompts/50)。イオンを N ステップに1回、実効刻み N·dt で押す。
+  // 省略/undefined = 1 (無効、従来経路とビット単位で一致)
+  ion_subcycle?: number;
+  // 粒子チャンク並列のスレッド数 (prompts/50)。walk 探索を threads 分割して並列実行する。
+  // 結果は threads の値によらずビット単位で一致。省略/undefined = 1 (逐次)
+  threads?: number;
 }
 
 // IEDF/IADF コレクタ線分の設定
