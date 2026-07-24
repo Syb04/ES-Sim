@@ -522,3 +522,23 @@ export interface ProfileResult {
   v: (number | null)[];      // 電位 [V] (領域外は null)
   e_abs: (number | null)[];  // |E| [V/m] (領域外は null)
 }
+
+// ---- 計算結果の保存・読込 (prompts/64) ----------------
+// 「結果付き保存」でプロジェクト本体に同梱する計算結果一式。
+// フロント専用フィールドであり、solve/trace/mesh/pic/dsmc 等の API へ送る project には含めない
+// (結果はジオメトリ・設定と整合していないと意味がないため、プロジェクトと同じ1ファイルに保存する方針)
+export interface ResultsBundle {
+  version: 1;
+  solve?: SolveResult | null;
+  mesh?: MeshResult | null;      // Mesh ボタン単独実行の結果
+  trace?: TraceResult | null;
+  pic?: {
+    started: PicStartedMsg;       // mesh を含む (フィールド描画に必須なので必須項目)
+    frame: PicFrameMsg | null;    // 最終フレーム (ライブ表示・診断の復元用)
+    history: PicDiag[];
+    fields: PicFields | null;
+    cycle: PicCycle | null;
+    collectors: PicCollectorResult[];
+  } | null;
+  gas?: DsmcResult | null;
+}

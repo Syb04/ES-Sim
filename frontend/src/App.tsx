@@ -47,6 +47,7 @@ import type {
   Project,
   Region,
   RegionType,
+  ResultsBundle,
   SolveResult,
   TraceResult,
   VoltageRf,
@@ -1027,6 +1028,33 @@ export default function App() {
     });
   };
 
+  // 結果付き保存: プロジェクトに results を同梱して1ファイルで保存する。
+  // 結果 (特に PIC の cycle) は大きくなりうるため、整形なし (compact) で書き出す
+  const saveProjectWithResults = () => {
+    const toSave: Project = { ...project, particles, pic: withInjectionEmitter(pic, particles.emitter) };
+    // pic 結果は picStarted (mesh を含む) が無いと描画できないため、それが無い場合は同梱しない
+    const results: ResultsBundle = {
+      version: 1,
+      solve: result,
+      mesh: meshResult,
+      trace: traceResult,
+      pic: picStarted
+        ? {
+            started: picStarted,
+            frame: picFrame,
+            history: picHistory,
+            fields: picFields,
+            cycle: picCycle,
+            collectors: picCollectors,
+          }
+        : null,
+      gas: gasResult,
+    };
+    saveTextFile("project_results.json", JSON.stringify({ ...toSave, results }), "JSON", ["json"]).catch((err) => {
+      setError(String(err));
+    });
+  };
+
   const loadProject = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -1037,10 +1065,14 @@ export default function App() {
         if (!obj || typeof obj !== "object" || !("geometry" in obj)) {
           throw new Error("不正なプロジェクトファイルです (geometry がありません)");
         }
+        // 「結果付き保存」ファイルは project 本体に results (ResultsBundle) を同梱している。
+        // results はフロント専用フィールドで、以後 solve 等の API へ送る project に紛れ込んではいけない
+        // ため、project 部分 (projectOnly) と分離してから従来どおりの補完処理にかける
+        const { results, ...projectOnly } = obj as Project & { results?: ResultsBundle };
         // 省略可能フィールドを既定値で補完する。backend の pydantic スキーマは
         // regions / boundaries 等を省略可 (既定 []) としており、手書き・サンプルの
         // JSON では欠けていることがある (欠けたまま state に入れると .find 等で落ちる)
-        const raw = obj as Project;
+        const raw = projectOnly as Project;
         const loaded: Project = {
           ...raw,
           geometry: {
@@ -1052,19 +1084,43 @@ export default function App() {
         };
         commitProject(loaded);
         // particles / pic は独立管理の state なので、読込んだファイルにあれば反映し、なければ既定値に戻す
-        const loadedParticles = (obj as Project).particles;
+        const loadedParticles = raw.particles;
         // FN 専用プロジェクト (fn_diode.json 等) は emitter を省略できる (スキーマ上
         // fn 指定時は emitter 不要) ため、既定値をベースに合成して欠損フィールドを
         // 補完する (emitter が無いまま state に入れると UI が .p1 等の参照で落ちる)
         setParticles(
           loadedParticles ? { ...DEFAULT_PARTICLES, ...loadedParticles } : DEFAULT_PARTICLES,
         );
-        const loadedPic = (obj as Project).pic;
+        const loadedPic = raw.pic;
         // mcc/see_energy_ev が無い旧形式のファイルでも安全に読み込めるよう、既定値をベースに合成し、
         // 旧形式 (単数 collector) のプロジェクトは collectors 配列へ移行する
         setPic(loadedPic ? normalizeCollectors({ ...DEFAULT_PIC, ...loadedPic }) : DEFAULT_PIC);
         setSelectedCollectorIndexRaw(null);
         setSelectedRegionId(null);
+        // 結果付き保存ファイルなら計算結果も復元する (commitProject による結果クリアの後に上書きする)
+        if (results) {
+          setResult(results.solve ?? null);
+          setMeshResult(results.mesh ?? null);
+          setTraceResult(results.trace ?? null);
+          setGasResult(results.gas ?? null);
+          setPicStarted(results.pic?.started ?? null);
+          setPicFrame(results.pic?.frame ?? null);
+          setPicHistory(results.pic?.history ?? []);
+          setPicFields(results.pic?.fields ?? null);
+          setPicCycle(results.pic?.cycle ?? null);
+          setPicCollectors(results.pic?.collectors ?? []);
+          // 結果表示セレクトは既定 (ライブ/線形) へ戻す
+          setPicResultField("live");
+          setPicLogScale(false);
+          // サーバーには読込んだ状態が存在しない (このセッションで実行していない) ため、
+          // 「続きから実行」は無効にし、次の新規実行を促す
+          setPicContinueReady(false);
+          setPicProjectChangedSinceRun(true);
+          // 周期アニメーションの再生系も既定値へ戻す (フィールド選択・データ自体は復元済みの値を保つ)
+          setCyclePlaying(false);
+          setCycleBinIndex(0);
+          setCycleViewActive(false);
+        }
         setError(null);
       } catch (err) {
         setError(String(err));
@@ -1075,6 +1131,10 @@ export default function App() {
   };
 
   const selected = project.geometry.regions.find((r) => r.id === selectedRegionId) ?? null;
+
+  // 「結果付き保存」ボタンの有効条件: FEM/Mesh/トレース/PIC/DSMC のいずれかの結果があること
+  // (何も無い状態で保存しても project 部分だけの通常保存と同じになってしまうため無効化する)
+  const hasAnyResults = !!result || !!meshResult || !!traceResult || !!gasResult || !!picStarted;
 
   // 「続きから実行」ボタンの有効条件: 直前の実行が done/stop 済みで現在実行中でなく、
   // かつ前回実行以降にジオメトリが編集されていないこと (health 未接続時も不可)
@@ -1224,6 +1284,18 @@ export default function App() {
       <div className="toolbar">
         <h1>ES-Sim</h1>
         <button className="secondary" onClick={saveProject}>保存</button>
+        <button
+          className="secondary"
+          onClick={saveProjectWithResults}
+          disabled={!hasAnyResults}
+          title={
+            hasAnyResults
+              ? "プロジェクト設定に加えて計算結果 (FEM/トレース/PIC/DSMC) も1ファイルに保存します。PIC結果を含むとファイルが大きくなることがあります"
+              : "保存できる計算結果がありません (Solve/Mesh/粒子トレース/PIC/DSMC のいずれかを実行してください)"
+          }
+        >
+          結果付き保存
+        </button>
         <button className="secondary" onClick={() => fileInputRef.current?.click()}>読込</button>
         <input
           ref={fileInputRef}
