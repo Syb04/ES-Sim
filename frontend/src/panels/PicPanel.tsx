@@ -1,11 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api";
 import { saveTextFile } from "../saveFile";
-import { CommitNullableNumberInput, CommitNumberInput, CommitTextInput } from "../CommitInput";
+import { CommitNullableNumberInput, CommitNumberInput, CommitTextInput, formatNumber } from "../CommitInput";
 import FnEmissionSection from "./FnPanel";
 import { LENGTH_UNIT_LABEL, mToUnit, unitToM } from "../units";
 import type { LengthUnit } from "../units";
-import { isAxisymmetric } from "../types";
+import { isAxisymmetric, rfComponents } from "../types";
 import type {
   Emitter,
   FnEmission,
@@ -175,6 +175,27 @@ function emitterSummary(e: Emitter, lengthUnit: LengthUnit): string {
   return `ライン (${f(e.p1[0])}, ${f(e.p1[1])}) - (${f(e.p2[0])}, ${f(e.p2[1])}) ${u}, n=${e.n}`;
 }
 
+// project.geometry.boundaries の Dirichlet 境界に設定された RF 周波数を、全境界・全成分から
+// 重複排除して昇順に集める (prompts/68: ステップ数のRFサイクル換算に使う)。
+// 0Hz や未設定 (voltage_rf なし) は換算の意味がないので除外する
+function collectRfFrequencies(project: Project): number[] {
+  const freqs = new Set<number>();
+  for (const bc of project.geometry.boundaries) {
+    if (bc.type !== "dirichlet") continue;
+    for (const rf of rfComponents(bc.voltage_rf)) {
+      if (rf.freq_hz > 0) freqs.add(rf.freq_hz);
+    }
+  }
+  return Array.from(freqs).sort((a, b) => a - b);
+}
+
+// サイクル数の表示整形。有効3桁程度 (toPrecision(3)) で丸め、formatNumber と同様に
+// "e+" の "+" を除いて見た目を揃える (通常は 0.1〜数百程度の範囲を想定)
+function formatCycles(v: number): string {
+  if (!Number.isFinite(v)) return String(v);
+  return v.toPrecision(3).replace("e+", "e");
+}
+
 export default function PicPanel({
   project,
   lengthUnit,
@@ -292,6 +313,13 @@ export default function PicPanel({
   };
 
   const progressPct = started && started.n_steps > 0 ? Math.min(100, ((frame?.step ?? 0) / started.n_steps) * 100) : 0;
+
+  // ステップ数のRFサイクル換算 (prompts/68)。RF周波数は境界条件から収集、
+  // dt は pic.dt (手動指定) を優先し、未指定なら直近実行の started.dt を使う
+  // (どちらもなければ dt自動かつ未実行 = 換算不能)
+  const rfFrequencies = useMemo(() => collectRfFrequencies(project), [project]);
+  const effectiveDt = pic.dt ?? started?.dt ?? null;
+  const dtFromStarted = pic.dt === null && started != null;
 
   // IEDF/IADF ヒストグラムのビン数 (既定60、変更で再ビニング。コレクタ設定自体ではないので project 保存対象外)
   const [collectorBins, setCollectorBins] = useState(60);
@@ -553,6 +581,23 @@ export default function PicPanel({
           onCommit={(v) => onChange({ ...pic, n_steps: Math.max(1, Math.round(v)) })}
         />
       </div>
+      {rfFrequencies.length > 0 &&
+        (effectiveDt === null ? (
+          <p className="hint">dt が自動のため、RFサイクル換算は実行開始後に確定します</p>
+        ) : (
+          rfFrequencies.map((f) => {
+            const periodS = 1 / f;
+            const stepsPerCycle = periodS / effectiveDt;
+            const cycles = pic.n_steps / stepsPerCycle;
+            return (
+              <p className="hint" key={f}>
+                {formatNumber(f)} Hz: {pic.n_steps} ステップ ≈ {formatCycles(cycles)} RFサイクル
+                (1サイクル ≈ {stepsPerCycle.toFixed(1)} ステップ)
+                {dtFromStarted && " (前回実行の dt で換算)"}
+              </p>
+            );
+          })
+        ))}
       <div className="field">
         <span className="label">フレーム間隔</span>
         <CommitNumberInput
