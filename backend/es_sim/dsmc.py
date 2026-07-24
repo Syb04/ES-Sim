@@ -13,6 +13,9 @@
   再抽選する (質量保存を守る簡易処理)
 - 定常判定はユーザ指定の n_steps に委ね、最終 avg_steps の時間平均で
   セルごとの n・u・T (・p = n kB T) を得る。結果は MCC の GasField にそのまま渡せる
+- 平滑化 (smoothing_passes、prompts/67): 統計ノイズ低減のため、n/T/u/p 導出前の
+  生モーメントに隣接セル対称拡散を適用できる (体積重みで総量厳密保存・正値保証)。
+  既定 0 (無効、従来と完全一致)
 - 平面2D (coord="xy") 専用。奥行き 1 m 換算 (セル体積 = 面積 × 1 m)
 """
 
@@ -609,6 +612,59 @@ class DsmcSimulation:
         self.v[i1] = v_com + half_g
         self.v[i2] = v_com - half_g
 
+    # ---- 結果の平滑化 (隣接セル拡散、prompts/67) -------------------------------
+
+    def _smooth_moments(
+        self, acc_cnt: np.ndarray, acc_v: np.ndarray, acc_v2: np.ndarray
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """統計ノイズ低減のための隣接セル拡散 (n/t/u/p 導出前の生モーメントに適用)。
+
+        導出後の n/T/u/p を別々に平滑化すると p = n kB T の整合が崩れて負温度等の
+        人工値が出るため、蓄積モーメント (Σ個数・Σv・Σv²) の段階でまとめて平滑化する。
+        セル密度的な量 q_i = acc_i / V_i に対し、1パスで
+            q_i' = q_i + θ Σ_{j∈adj(i)} (W_ij/V_i)(q_j − q_i),  W_ij = min(V_i, V_j), θ=0.25
+        を全成分 (個数・vx・vy・vz・v²) 一括で行う。W_ij は i, j について対称なので
+        ペアごとの交換 (i の増分×V_i と j の増分×V_j) が厳密に相殺し、
+        Σ_i V_i q_i (= Σ acc、質量・運動量・エネルギーに対応) は保存される。
+        係数 1 − θ·Σ_j W_ij/V_i は W_ij ≤ V_i・隣接最大3枚から ≥ 1 − 0.25×3 = 0.25 > 0
+        なので q_i' は非負の入力に対して常に非負 (凸結合、正値性保証)。
+        固体 (誘電体) 要素にはガスが存在しないため交換対象から完全に除外する
+        (自身が固体の行も、固体を隣接に持つ場合の当該隣接も、両方無効化する。
+        固体セルの acc は元々0なので、除外しても保存性は損なわれない)。
+        呼び出し側の蓄積配列そのものは書き換えず、コピー (計算結果) を返す。
+        """
+        passes = self.s.smoothing_passes
+        if passes <= 0:
+            return acc_cnt, acc_v, acc_v2
+
+        adj = self.adjacency  # (n_elem, 3)、-1 = 境界
+        has_nb = adj >= 0
+        adj_safe = np.where(has_nb, adj, 0)  # 無効エントリはダミー参照 (後で重み0にする)
+
+        valid = has_nb.copy()
+        if self._solid is not None:
+            valid &= ~self._solid[:, None]       # 自身が固体の行は交換しない
+            valid &= ~self._solid[adj_safe]      # 固体隣接も除外
+
+        vol = self.vol
+        w = np.where(valid, np.minimum(vol[:, None], vol[adj_safe]), 0.0)  # (n,3)
+        coef = w / vol[:, None]  # θ 倍前の拡散係数 (パス間で不変なので事前計算)
+        theta = 0.25
+
+        # 5成分 (個数・vx・vy・vz・v²) をまとめて (n_elem, 5) にしてベクトル化する
+        q = np.empty((len(vol), 5))
+        q[:, 0] = acc_cnt / vol
+        q[:, 1:4] = acc_v / vol[:, None]
+        q[:, 4] = acc_v2 / vol
+
+        for _ in range(passes):
+            qj = q[adj_safe]  # (n,3,5)
+            diff = qj - q[:, None, :]
+            delta = theta * np.einsum("nk,nkc->nc", coef, diff)
+            q = q + delta
+
+        return q[:, 0] * vol, q[:, 1:4] * vol[:, None], q[:, 4] * vol
+
     # ---- サンプリングと実行 ---------------------------------------------------
 
     def _sample(self) -> None:
@@ -672,16 +728,22 @@ class DsmcSimulation:
                 "(avg_steps を長くするか、停止せず完走させてください)"
             )
 
-        cnt = np.maximum(self._acc_cnt, 1e-300)
-        n_avg = self._acc_cnt * self.w / (self._samples * self.vol)
-        u_mean3 = self._acc_v / cnt[:, None]
-        v2_mean = self._acc_v2 / cnt
+        # 結果組み立て直前に (蓄積配列そのものは変更せず) 平滑化する。smoothing_passes=0
+        # なら acc_* をそのまま返すので既存動作と完全一致する
+        acc_cnt, acc_v, acc_v2 = self._smooth_moments(
+            self._acc_cnt, self._acc_v, self._acc_v2
+        )
+        cnt = np.maximum(acc_cnt, 1e-300)
+        n_avg = acc_cnt * self.w / (self._samples * self.vol)
+        u_mean3 = acc_v / cnt[:, None]
+        v2_mean = acc_v2 / cnt
         # T = m/(3k)·(⟨|v|²⟩ − |⟨v⟩|²) (3成分)
         t_avg = np.maximum(
             self.m / (3.0 * KB) * (v2_mean - np.sum(u_mean3 * u_mean3, axis=1)), 0.0
         )
-        # サンプルが無いセル (固体・枯渇) は 0 に落とす
-        empty = self._acc_cnt <= 0.0
+        # サンプルが無いセル (固体・枯渇) は 0 に落とす (平滑化後の値で判定する:
+        # 平滑化は隣接から統計を分け合わせる操作なので、平滑化後に実質0のセルのみ除く)
+        empty = acc_cnt <= 0.0
         t_avg[empty] = 0.0
         u_mean3[empty] = 0.0
         return DsmcResult(

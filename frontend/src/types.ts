@@ -220,6 +220,9 @@ export interface DsmcSettings {
   avg_steps: number;          // 最終 N ステップで時間平均
   seed: number;
   threads: number;            // walk 探索の並列スレッド数 (1=従来経路)
+  // 隣接セル拡散による統計ノイズ平滑化の回数 (0=無効、prompts/67)。総量
+  // (質量・運動量・エネルギー) は保存され、結果表示と PIC 連成の両方に適用される
+  smoothing_passes: number;
 }
 
 // POST /dsmc のレスポンス (定常時間平均のガス場)

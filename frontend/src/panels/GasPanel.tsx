@@ -63,6 +63,7 @@ const DEFAULT_DSMC: DsmcSettings = {
   avg_steps: 500,
   seed: 0,
   threads: 1,
+  smoothing_passes: 0,
 };
 
 const DEFAULT_BOUNDARY: DsmcBoundary = {
@@ -478,6 +479,17 @@ export default function GasPanel({
           </div>
           <p className="hint">
             walk 探索の並列スレッド数。結果は1と完全一致。CPUコア数程度まで
+          </p>
+          <div className="field">
+            <span className="label">平滑化回数</span>
+            <CommitNumberInput
+              value={dsmc.smoothing_passes ?? 0}
+              onCommit={(v) => onChange({ ...dsmc, smoothing_passes: Math.min(20, Math.max(0, Math.round(v))) })}
+            />
+          </div>
+          <p className="hint">
+            隣接セル拡散による統計ノイズの平滑化。0=無効。総量 (質量・運動量・エネルギー) は
+            保存され、結果表示と PIC 連成の両方に適用されます。目安 1〜5
           </p>
 
           <div className="field">

@@ -9,6 +9,8 @@
 4. 非一様ガス場の MCC 結合: 定数場は一様指定とビット単位一致、
    密度2倍領域では電子衝突数がほぼ2倍
 5. walk のチャンク並列化 (prompts/65): threads=4 が threads=1 とビット単位で一致
+6. 結果の平滑化 (prompts/67): 隣接セル拡散 (smoothing_passes) の保存性・正値性・
+   ノイズ低減
 """
 
 import math
@@ -190,6 +192,79 @@ def test_dsmc_threads_match_serial():
     assert res1.dt == res4.dt
     assert res1.inflow == res4.inflow
     assert res1.outflow == res4.outflow
+
+
+# ---- 結果の平滑化 (隣接セル拡散、prompts/67) -----------------------------------
+
+
+def test_dsmc_smoothing_conserves_total():
+    """smoothing_passes=3 でも Σ V_i n_i (総粒子数相当) は passes=0 と厳密に一致する。
+
+    W_ij = min(V_i, V_j) は i, j について対称なので、ペアごとの交換
+    (i の増分×V_i と j の増分×V_j) が相殺し、Σ_i V_i q_i は理論上厳密に保存される
+    (丸め誤差のみ)。同一 seed で乱数消費列も同一になるよう平滑化以外の設定は揃える。
+    """
+    t0 = 300.0
+    base = {
+        "init_pressure_pa": 10.0,
+        "init_temperature_k": t0,
+        "wall_temperature_k": t0,
+        "n_particles": 20000,
+        "n_steps": 300,
+        "avg_steps": 150,
+        "seed": 1,
+    }
+    sim0 = DsmcSimulation(_project({**base, "smoothing_passes": 0}))
+    res0 = sim0.run()
+    sim3 = DsmcSimulation(_project({**base, "smoothing_passes": 3}))
+    res3 = sim3.run()
+
+    tot0 = float(np.sum(sim0.vol * res0.n))
+    tot3 = float(np.sum(sim3.vol * res3.n))
+    assert tot3 == pytest.approx(tot0, rel=1e-10)
+
+
+def test_dsmc_smoothing_nonnegative():
+    """平滑化後も n・t は全要素で非負 (係数 1 − θ·Σ W_ij/V_i ≥ 0.25 > 0 の凸結合)。"""
+    t0 = 300.0
+    project = _project(
+        {
+            "init_pressure_pa": 10.0,
+            "init_temperature_k": t0,
+            "wall_temperature_k": t0,
+            "n_particles": 20000,
+            "n_steps": 300,
+            "avg_steps": 150,
+            "seed": 1,
+            "smoothing_passes": 5,
+        }
+    )
+    sim = DsmcSimulation(project)
+    res = sim.run()
+    assert np.all(res.n >= 0.0)
+    assert np.all(res.t >= 0.0)
+
+
+def test_dsmc_smoothing_reduces_noise():
+    """一様平衡箱 (全辺壁、流入なし) で n の空間分散 (var(n)/mean(n)^2) が
+    passes=5 で passes=0 より小さくなる (統計ノイズの低減が目的通り効いている)。
+    """
+    t0 = 300.0
+    base = {
+        "init_pressure_pa": 10.0,
+        "init_temperature_k": t0,
+        "wall_temperature_k": t0,
+        "n_particles": 20000,
+        "n_steps": 300,
+        "avg_steps": 150,
+        "seed": 1,
+    }
+    res0 = DsmcSimulation(_project({**base, "smoothing_passes": 0})).run()
+    res5 = DsmcSimulation(_project({**base, "smoothing_passes": 5})).run()
+
+    var0 = float(np.var(res0.n) / np.mean(res0.n) ** 2)
+    var5 = float(np.var(res5.n) / np.mean(res5.n) ** 2)
+    assert var5 < var0
 
 
 # ---- 非一様ガス場の MCC 結合 (Phase A、prompts/54) ------------------------------

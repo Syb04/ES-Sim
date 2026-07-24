@@ -456,6 +456,10 @@ class DsmcSettings(BaseModel):
     # 粒子処理 (walk 探索) のワーカースレッド数 (prompts/65)。粒子ごとの walk は独立な
     # ため、チャンク並列化しても結果は逐次実行とビット単位で一致する。1 = 従来経路
     threads: int = Field(1, ge=1, le=32)
+    # 隣接セル拡散による統計ノイズ平滑化の回数 (0=無効、prompts/67)。導出前の生モーメント
+    # (Σ個数・Σv・Σv²) に体積重み対称拡散を適用してから n/T/u/p を導出するため、
+    # p = n kB T の整合を保ったまま総量 (質量・運動量・エネルギー) を厳密に保存する
+    smoothing_passes: int = Field(0, ge=0, le=20)
 
 
 class Project(BaseModel):
