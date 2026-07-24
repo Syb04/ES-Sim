@@ -8,6 +8,7 @@
    圧力が流れ方向に単調減少する
 4. 非一様ガス場の MCC 結合: 定数場は一様指定とビット単位一致、
    密度2倍領域では電子衝突数がほぼ2倍
+5. walk のチャンク並列化 (prompts/65): threads=4 が threads=1 とビット単位で一致
 """
 
 import math
@@ -145,6 +146,50 @@ def test_dsmc_pressure_driven_channel():
     # 流れは +x 方向
     ux_mean = float(np.sum(res.u[:, 0] * res.n * area) / np.sum(res.n * area))
     assert ux_mean > 0.0
+
+
+def test_dsmc_threads_match_serial():
+    """threads=4 のチャンク並列 walk は threads=1 (逐次) とビット単位で一致する。
+
+    walk は粒子ごとに独立・読み取り共有のみ・乱数不使用の決定的処理なので、
+    チャンク分割しても書き込み先が競合せず結果は不変であるはず (prompts/65)。
+    n_particles=8000 は初期充填数がほぼそのまま粒子数になるため (macro_weight は
+    目標粒子数から逆算される)、_walk_chunked の並列しきい値 (4096) を初回 walk で
+    確実に越える。
+    """
+    t0 = 300.0
+
+    def _run(threads: int):
+        project = _project(
+            {
+                "boundaries": [
+                    {"edges": [3], "type": "inlet", "pressure_pa": 20.0, "temperature_k": t0},
+                    {"edges": [1], "type": "outlet", "pressure_pa": 5.0, "temperature_k": t0},
+                ],
+                "init_pressure_pa": 12.0,
+                "init_temperature_k": t0,
+                "wall_temperature_k": t0,
+                "n_particles": 8000,
+                "n_steps": 30,
+                "avg_steps": 10,
+                "seed": 3,
+                "threads": threads,
+            }
+        )
+        sim = DsmcSimulation(project)
+        return sim.run()
+
+    res1 = _run(1)
+    res4 = _run(4)
+    assert np.array_equal(res1.n, res4.n)
+    assert np.array_equal(res1.t, res4.t)
+    assert np.array_equal(res1.u, res4.u)
+    assert np.array_equal(res1.p, res4.p)
+    assert res1.n_particles == res4.n_particles
+    assert res1.macro_weight == res4.macro_weight
+    assert res1.dt == res4.dt
+    assert res1.inflow == res4.inflow
+    assert res1.outflow == res4.outflow
 
 
 # ---- 非一様ガス場の MCC 結合 (Phase A、prompts/54) ------------------------------

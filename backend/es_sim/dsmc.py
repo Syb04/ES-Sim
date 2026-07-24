@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 import math
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
 import numpy as np
@@ -95,6 +96,18 @@ class DsmcSimulation:
         else:
             self.vol = self.area
         self._solid = _solid_elements(project, self.mesh)  # 誘電体 (固体) 要素 or None
+
+        # ---- 粒子チャンク並列 (prompts/65) ------------------------------------
+        # walk 探索を粒子チャンクに分けてスレッド並列化する (pic.py の
+        # _walk_chunked_submit と同じ方式)。粒子ごとの walk は独立 (読み取り共有のみ・
+        # 乱数不使用) な決定的処理なので、チャンク分割しても結果は逐次実行と
+        # ビット単位で一致する
+        self._nthreads = max(1, int(self.s.threads))
+        self._chunk_pool = (
+            ThreadPoolExecutor(max_workers=self._nthreads, thread_name_prefix="dsmc-chunk")
+            if self._nthreads > 1
+            else None
+        )
         gas_area = float(
             self.vol.sum() if self._solid is None else self.vol[~self._solid].sum()
         )
@@ -353,6 +366,46 @@ class DsmcSimulation:
 
     # ---- 移動と境界 -----------------------------------------------------------
 
+    def _walk_chunked(self, elem: np.ndarray, x_new: np.ndarray):
+        """walk を粒子チャンクに分割してスレッド並列実行する (prompts/65)。
+
+        pic.py の _walk_chunked_submit を参考にした同期版: DSMC は種が1つ
+        (walk 対象の粒子集合が常に単一) なので、この関数内で完了を待って結合
+        結果を返せばよく、futures を呼び出し側へ持ち回す必要がない。
+        粒子ごとの walk は独立 (読み取り共有のみ・書き込みは自分の行のみ) で
+        乱数も使わない決定的処理なので、チャンク分割しても結果は逐次実行と
+        ビット単位で一致する。粒子数が少ない場合はスレッド起動コストの方が
+        高いためその場で逐次計算する (dsmc.py の _walk_step 呼び出しは l_new
+        を渡していないため、ここでも常に None のまま _walk_step へ渡す)。
+        """
+        n = len(elem)
+        if n < 4096 or self._chunk_pool is None:
+            return _walk_step(self.coeffs, self.adjacency, elem, x_new, packed=self._packed)
+        k = self._nthreads
+        bounds = [(i * n) // k for i in range(k + 1)]
+        elem_new = np.empty(n, dtype=np.int64)
+        absorbed = np.empty(n, dtype=bool)
+        b_elem = np.empty(n, dtype=np.int64)
+        b_loc = np.empty(n, dtype=np.int64)
+
+        def _run(lo: int, hi: int) -> None:
+            e, a, be, bl = _walk_step(
+                self.coeffs, self.adjacency, elem[lo:hi], x_new[lo:hi], packed=self._packed
+            )
+            elem_new[lo:hi] = e
+            absorbed[lo:hi] = a
+            b_elem[lo:hi] = be
+            b_loc[lo:hi] = bl
+
+        futures = [
+            self._chunk_pool.submit(_run, bounds[i], bounds[i + 1])
+            for i in range(k)
+            if bounds[i + 1] > bounds[i]
+        ]
+        for fut in futures:
+            fut.result()
+        return elem_new, absorbed, b_elem, b_loc
+
     def _move(self) -> None:
         """自由分子移動 + 境界処理。
 
@@ -384,9 +437,7 @@ class DsmcSimulation:
             self.v[:, 2] = vt * cosw - vr * sinw
         else:
             x_new = self.x + dt * self.v[:, :2]
-        elem_new, absorbed, b_elem, b_loc = _walk_step(
-            self.coeffs, self.adjacency, self.elem, x_new, packed=self._packed
-        )
+        elem_new, absorbed, b_elem, b_loc = self._walk_chunked(self.elem, x_new)
 
         remove = np.zeros(n, dtype=bool)
         t_rem = np.full(n, dt)       # 残余移動時間
@@ -450,9 +501,7 @@ class DsmcSimulation:
             x_from[c_idx] = inside[cont]
             e_from[c_idx] = ea[cont]
             x_new[c_idx] = inside[cont] + t_rem[c_idx][:, None] * self.v[c_idx, :2]
-            e2, a2, be2, bl2 = _walk_step(
-                self.coeffs, self.adjacency, ea[cont], x_new[c_idx], packed=self._packed
-            )
+            e2, a2, be2, bl2 = self._walk_chunked(ea[cont], x_new[c_idx])
             elem_new[c_idx] = e2
             b_elem[c_idx] = be2
             b_loc[c_idx] = bl2

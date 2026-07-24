@@ -62,6 +62,7 @@ const DEFAULT_DSMC: DsmcSettings = {
   n_steps: 2000,
   avg_steps: 500,
   seed: 0,
+  threads: 1,
 };
 
 const DEFAULT_BOUNDARY: DsmcBoundary = {
@@ -462,6 +463,16 @@ export default function GasPanel({
             <span className="label">乱数シード</span>
             <CommitNumberInput value={dsmc.seed} onCommit={(v) => onChange({ ...dsmc, seed: Math.round(v) })} />
           </div>
+          <div className="field">
+            <span className="label">スレッド数</span>
+            <CommitNumberInput
+              value={dsmc.threads ?? 1}
+              onCommit={(v) => onChange({ ...dsmc, threads: Math.max(1, Math.round(v)) })}
+            />
+          </div>
+          <p className="hint">
+            walk 探索の並列スレッド数。結果は1と完全一致。CPUコア数程度まで
+          </p>
 
           <div className="actions">
             <button onClick={onRun} disabled={!canRun || running}>

@@ -219,6 +219,7 @@ export interface DsmcSettings {
   n_steps: number;
   avg_steps: number;          // 最終 N ステップで時間平均
   seed: number;
+  threads: number;            // walk 探索の並列スレッド数 (1=従来経路)
 }
 
 // POST /dsmc のレスポンス (定常時間平均のガス場)

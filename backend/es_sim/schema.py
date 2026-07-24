@@ -453,6 +453,9 @@ class DsmcSettings(BaseModel):
     n_steps: int = Field(2000, gt=0)
     avg_steps: int = Field(500, gt=0, description="最終 N ステップで時間平均")
     seed: int = 0
+    # 粒子処理 (walk 探索) のワーカースレッド数 (prompts/65)。粒子ごとの walk は独立な
+    # ため、チャンク並列化しても結果は逐次実行とビット単位で一致する。1 = 従来経路
+    threads: int = Field(1, ge=1, le=32)
 
 
 class Project(BaseModel):
