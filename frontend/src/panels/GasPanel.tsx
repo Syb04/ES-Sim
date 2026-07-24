@@ -131,6 +131,10 @@ interface Props {
   onResultFieldChange: (v: GasResultField) => void;
   logScale: boolean;
   onLogScaleChange: (v: boolean) => void;
+  // 「粒子を表示」チェックボックス (実行中のライブ粒子表示のON/OFF、既定 ON、prompts/66)。
+  // App 側 state で保持する (ローカルにしないのは setup/results 両ページで同じ値を共有するため)
+  showParticles: boolean;
+  onShowParticlesChange: (v: boolean) => void;
 
   // 表示モード: "all"=従来通り全表示 (既定・後方互換)、"setup"=設定/実行UIのみ、
   // "results"=結果表示のみ (結果ノード用インスペクタページで使う)
@@ -153,6 +157,8 @@ export default function GasPanel({
   onResultFieldChange,
   logScale,
   onLogScaleChange,
+  showParticles,
+  onShowParticlesChange,
   mode = "all",
 }: Props) {
   // mode が "all" のときは従来通り両方表示。それ以外は該当モードのみ表示する
@@ -474,6 +480,15 @@ export default function GasPanel({
             walk 探索の並列スレッド数。結果は1と完全一致。CPUコア数程度まで
           </p>
 
+          <div className="field">
+            <span className="label">粒子を表示</span>
+            <input
+              type="checkbox"
+              checked={showParticles}
+              onChange={(e) => onShowParticlesChange(e.target.checked)}
+              title="実行中のキャンバスに間引き粒子位置をライブ表示する (PICのライブ粒子表示と同様)"
+            />
+          </div>
           <div className="actions">
             <button onClick={onRun} disabled={!canRun || running}>
               {running ? "計算中..." : "ガス流れ計算"}

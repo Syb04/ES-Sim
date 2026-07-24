@@ -327,6 +327,11 @@ export default function App() {
   const [gasResult, setGasResult] = useState<DsmcResult | null>(null);
   // 実行中の進捗 (started/progress メッセージから更新。未実行/完了後は null)
   const [gasProgress, setGasProgress] = useState<{ step: number; nSteps: number; nParticles: number } | null>(null);
+  // 実行中のライブ粒子位置 (progress の間引き座標。実行中のみ非null、完了後は結果フィールド
+  // 表示に切り替わるため null に戻す、prompts/66)
+  const [gasLiveParticles, setGasLiveParticles] = useState<Point[] | null>(null);
+  // 「粒子を表示」チェックボックス (GasPanel、既定 ON)。OFF なら CadCanvas へ null を渡す
+  const [gasShowParticles, setGasShowParticles] = useState(true);
   const dsmcClientRef = useRef<DsmcClient | null>(null);
   // 「結果表示」セレクトの選択と対数スケールチェックボックス
   const [gasResultField, setGasResultField] = useState<GasResultField>("n");
@@ -510,6 +515,7 @@ export default function App() {
     setGasError(null);
     setGasResult(null);
     setGasProgress(null);
+    setGasLiveParticles(null);
     setGasRunning(true);
     const callbacks: DsmcClientCallbacks = {
       onStarted: (msg) => {
@@ -517,16 +523,23 @@ export default function App() {
       },
       onProgress: (msg) => {
         setGasProgress({ step: msg.step, nSteps: msg.n_steps, nParticles: msg.n_particles });
+        // 未対応バックエンド (particles 省略) では null のまま (何も描画しない)
+        setGasLiveParticles(msg.particles ?? null);
       },
       onDone: (msg) => {
         setGasResult(msg.result);
         setGasRunning(false);
+        setGasLiveParticles(null); // 完了後は結果フィールド表示に切り替わるため残さない
       },
       onError: (detail) => {
         setGasError(detail);
         setGasRunning(false);
+        setGasLiveParticles(null);
       },
-      onClose: () => setGasRunning(false),
+      onClose: () => {
+        setGasRunning(false);
+        setGasLiveParticles(null);
+      },
     };
     const client = new DsmcClient(callbacks);
     dsmcClientRef.current = client;
@@ -1591,6 +1604,8 @@ export default function App() {
                 onResultFieldChange={setGasResultField}
                 logScale={gasLogScale}
                 onLogScaleChange={setGasLogScale}
+                showParticles={gasShowParticles}
+                onShowParticlesChange={setGasShowParticles}
                 mode="setup"
               />
             </div>
@@ -1611,6 +1626,8 @@ export default function App() {
                 onResultFieldChange={setGasResultField}
                 logScale={gasLogScale}
                 onLogScaleChange={setGasLogScale}
+                showParticles={gasShowParticles}
+                onShowParticlesChange={setGasShowParticles}
                 mode="results"
               />
             </div>
@@ -1799,6 +1816,7 @@ export default function App() {
             showTrajectories={showTrajectories}
             picFrame={picLiveFrame}
             picFieldView={finalPicFieldView}
+            gasParticles={gasRunning && gasShowParticles ? gasLiveParticles : null}
             onSelectRegion={selectRegionFromCanvas}
             onDeleteRegion={deleteRegion}
             onAddRegion={addRegion}

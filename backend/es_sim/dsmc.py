@@ -48,6 +48,10 @@ _B_SYMMETRY = 1
 _B_RESERVOIR = 2  # inlet / outlet (圧力 > 0): 吸収 + リザーバ流入
 _B_VACUUM = 3     # outlet (圧力なし): 吸収のみ
 
+# 進捗コールバックへ渡す間引き粒子数の上限 (pic.py の MAX_FRAME_PARTICLES と同じ値。
+# ライブ表示用途は同程度の点数で十分なため揃えている)
+MAX_CALLBACK_PARTICLES = 2000
+
 
 @dataclass
 class DsmcResult:
@@ -623,12 +627,27 @@ class DsmcSimulation:
         self._move()
         self._collide()
 
+    def _thin_positions(self) -> np.ndarray:
+        """粒子位置 (self.x) を最大 MAX_CALLBACK_PARTICLES 点に間引いて返す (ライブ表示用)。
+
+        pic.py の frame 粒子間引きと同じ考え方: 等間隔サンプル (linspace) を使う。
+        粒子順序に物理的意味はないが、injection で新粒子が末尾に追加されるため、
+        先頭からの単純な stride 抽出だと新しい粒子ばかり削られて偏る。
+        self.x は (x,y) または (z,r) の描画平面2次元座標そのもの (rz でも同じ)。
+        """
+        n = len(self.x)
+        if n <= MAX_CALLBACK_PARTICLES:
+            return self.x
+        idx = np.linspace(0, n - 1, MAX_CALLBACK_PARTICLES).astype(np.int64)
+        return self.x[idx]
+
     def run(self, callback=None, should_stop=None) -> DsmcResult:
         """n_steps 進め、最終 avg_steps の時間平均から DsmcResult を作る。
 
-        callback(step, n_particles) を 100 ステップごとに呼ぶ (進捗表示用)。
-        should_stop() が True を返したら中断する (WS の stop コマンド用)。
-        平均区間に入る前に中断された場合は結果が無いためエラーを送出する。
+        callback(step, n_particles, positions) を 100 ステップごとに呼ぶ (進捗表示用)。
+        n_particles は間引き前の実シミュレーション粒子数、positions は間引き後の
+        粒子座標 (≤2000点、(k,2) ndarray)。should_stop() が True を返したら中断する
+        (WS の stop コマンド用)。平均区間に入る前に中断された場合は結果が無いためエラーを送出する。
         """
         n_steps = self.s.n_steps
         avg_start = max(0, n_steps - self.s.avg_steps)
@@ -646,7 +665,7 @@ class DsmcSimulation:
             if i >= avg_start:
                 self._sample()
             if callback is not None and (i + 1) % 100 == 0:
-                callback(i + 1, len(self.x))
+                callback(i + 1, len(self.x), self._thin_positions())
         if self._samples == 0:
             raise ValueError(
                 "平均区間に入る前に停止したため、ガス場の結果がありません "

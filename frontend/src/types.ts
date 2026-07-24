@@ -251,6 +251,8 @@ export interface DsmcProgressMsg {
   step: number;
   n_steps: number;
   n_particles: number;
+  // ライブ粒子表示用 (prompts/66)。間引き済み座標 (≤2000点)。未対応バックエンドでは省略され得る
+  particles?: Point[];
 }
 
 export interface DsmcDoneMsg {

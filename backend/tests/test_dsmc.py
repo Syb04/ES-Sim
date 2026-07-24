@@ -538,6 +538,11 @@ def test_dsmc_ws_progress():
                 progress += 1
                 assert 0 < msg["step"] <= 350
                 assert msg["n_particles"] > 0
+                # ライブ粒子表示 (prompts/66): 間引き済み座標が同梱される
+                assert len(msg["particles"]) > 0
+                assert len(msg["particles"]) <= 2000
+                assert all(len(pt) == 2 for pt in msg["particles"])
+                assert np.all(np.isfinite(msg["particles"]))
             elif msg["type"] == "done":
                 break
             else:
@@ -548,3 +553,37 @@ def test_dsmc_ws_progress():
         assert all(np.isfinite(result["p"]))
     # done 後は保持スロットが更新されている
     assert srv._last_dsmc is not None
+
+
+def test_dsmc_run_callback_particles():
+    """run(callback) の callback(step, n_particles, positions) が間引き粒子座標を渡す
+    (prompts/66)。n_particles=8000 は間引き上限 (2000) を超えるケースで、
+    positions が上限内・有限値であることを確認する。
+    """
+    project = _project(
+        {
+            "init_pressure_pa": 5.0,
+            "n_particles": 8000,
+            "n_steps": 250,
+            "avg_steps": 50,
+            "seed": 3,
+        }
+    )
+    sim = DsmcSimulation(project)
+    calls = []
+
+    def cb(step, n_particles, positions):
+        calls.append((step, n_particles, positions))
+
+    sim.run(cb)
+
+    assert len(calls) == 2  # 100, 200 (250ステップなので200まで)
+    for step, n_particles, positions in calls:
+        assert step in (100, 200)
+        assert n_particles > 0
+        assert isinstance(positions, np.ndarray)
+        assert positions.shape[0] <= 2000
+        assert positions.shape[1] == 2
+        assert np.all(np.isfinite(positions))
+        # 間引き前の実粒子数が2000を超えていることを確認 (間引きが実際に働くケース)
+        assert n_particles > positions.shape[0] or n_particles <= 2000

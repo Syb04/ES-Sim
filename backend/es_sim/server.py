@@ -206,7 +206,9 @@ async def _run_dsmc_session(ws: WebSocket, project_dict: dict) -> None:
     stop = threading.Event()
     queue: asyncio.Queue = asyncio.Queue()
 
-    def on_progress(step: int, n_particles: int) -> None:
+    def on_progress(step: int, n_particles: int, positions: np.ndarray) -> None:
+        # positions は dsmc.py 側で既に間引き済み (≤2000点)。ライブ粒子表示 (prompts/66) 用に
+        # PIC の frame メッセージと同じ形式 ([[x,y], ...]) で同梱する
         loop.call_soon_threadsafe(
             queue.put_nowait,
             {
@@ -214,6 +216,7 @@ async def _run_dsmc_session(ws: WebSocket, project_dict: dict) -> None:
                 "step": step,
                 "n_steps": sim.s.n_steps,
                 "n_particles": n_particles,
+                "particles": positions.tolist(),
             },
         )
 

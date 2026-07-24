@@ -100,6 +100,10 @@ interface Props {
   // PIC結果フィールド表示 (done後、「結果表示」セレクトでライブ以外を選んだ場合のみ非null)。
   // 存在する間は picFrame / Solve 結果表示より優先して描画し、粒子オーバーレイは出さない
   picFieldView: PicFieldView | null;
+  // DSMC ライブ粒子表示 (prompts/66)。実行中 (かつ表示チェックON) のみ非null で、
+  // 間引き済み座標をメッシュ/領域の上に点描画する。App 側で実行中〜完了までのみ渡す
+  // (完了後は結果フィールド表示に切り替わるため残さない)
+  gasParticles?: Point[] | null;
   onSelectRegion: (id: string | null) => void;
   onDeleteRegion: (id: string) => void;
   onAddRegion: (geom: Point[] | CircleShape) => void;
@@ -329,6 +333,7 @@ export default function CadCanvas({
   showTrajectories,
   picFrame,
   picFieldView,
+  gasParticles,
   onSelectRegion,
   onDeleteRegion,
   onAddRegion,
@@ -491,13 +496,15 @@ export default function CadCanvas({
     };
 
     // 粒子オーバーレイの共通ヘルパー (1〜2px の小さな矩形。多数点でも軽く保つため fillRect を使う)。
-    // PICライブ表示 / 周期アニメーションの粒子スナップショットで共用する
-    const drawSpecies = (pts: Point[], color: string) => {
+    // PICライブ表示 / 周期アニメーションの粒子スナップショット / DSMCライブ粒子表示 (prompts/66) で
+    // 共用する。半径 (px) は種別ごとに変えられるよう省略可にする (既定は従来通り0.8px)
+    const drawSpecies = (pts: Point[], color: string, radiusPx = 0.8) => {
       ctx.fillStyle = color;
+      const d = radiusPx * 2;
       for (const [px0, py0] of pts) {
         const px = sx(px0);
         const py = sy(py0);
-        ctx.fillRect(px - 0.8, py - 0.8, 1.6, 1.6);
+        ctx.fillRect(px - radiusPx, py - radiusPx, d, d);
       }
     };
 
@@ -782,6 +789,13 @@ export default function CadCanvas({
       const color = r.type === "conductor" ? "#e0b050" : r.type === "dielectric" ? "#50b0e0" : "#b070e0";
       if (r.shape) drawCircle(r.shape, color);
       else drawPoly(r.polygon ?? [], color);
+    }
+
+    // DSMC ライブ粒子表示 (prompts/66): 実行中の間引き粒子座標を灰白系の小さい点で散布描画する。
+    // PICライブ粒子 (drawSpecies) と同じ体裁で見た目を揃える。メッシュ/領域の上・選択ハイライトの
+    // 下に描く (領域を隠しすぎず、かつ選択ハンドルより手前に出ない位置)
+    if (gasParticles) {
+      drawSpecies(gasParticles, "#c8ccd4", 1.2);
     }
 
     // 選択中領域のハイライト (+ 選択ツール時は頂点/中点ハンドル、circle は半径ハンドル)
@@ -1233,6 +1247,7 @@ export default function CadCanvas({
     showTrajectories,
     picFrame,
     picFieldView,
+    gasParticles,
     isRz,
     isRzX0,
     isAxisym,
